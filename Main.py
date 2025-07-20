@@ -412,22 +412,156 @@ def calculate_signal_strength(df, signal_type):
     except Exception:
         return 2  # Default medium strength
 
+def calculate_signal_accuracy_score(df, signal_data, symbol):
+    """محاسبه امتیاز دقت سیگنال بر اساس عوامل مختلف"""
+    try:
+        if df is None or len(df) < 50 or not signal_data:
+            return 0
+        
+        last_row = df.iloc[-1]
+        prev_rows = df.iloc[-10:] if len(df) >= 10 else df
+        accuracy_score = 0
+        
+        # 1. امتیاز RSI (وزن: 25%)
+        rsi_value = signal_data.get('rsi', 50)
+        if signal_data['type'] == 'buy':
+            if rsi_value < 20:
+                accuracy_score += 25
+            elif rsi_value < 25:
+                accuracy_score += 20
+            elif rsi_value < 30:
+                accuracy_score += 15
+            elif rsi_value < 35:
+                accuracy_score += 10
+        else:  # sell
+            if rsi_value > 80:
+                accuracy_score += 25
+            elif rsi_value > 75:
+                accuracy_score += 20
+            elif rsi_value > 70:
+                accuracy_score += 15
+            elif rsi_value > 65:
+                accuracy_score += 10
+        
+        # 2. امتیاز MACD (وزن: 20%)
+        if ('MACD_12_26_9' in df.columns and 'MACDs_12_26_9' in df.columns and
+            not pd.isna(last_row.get('MACD_12_26_9')) and not pd.isna(last_row.get('MACDs_12_26_9'))):
+            
+            macd_line = last_row['MACD_12_26_9']
+            signal_line = last_row['MACDs_12_26_9']
+            macd_histogram = macd_line - signal_line
+            
+            if signal_data['type'] == 'buy' and macd_histogram > 0 and macd_line > signal_line:
+                accuracy_score += 20
+            elif signal_data['type'] == 'sell' and macd_histogram < 0 and macd_line < signal_line:
+                accuracy_score += 20
+            elif abs(macd_histogram) > 0.001:  # سیگنال قوی MACD
+                accuracy_score += 10
+        
+        # 3. امتیاز حجم معاملات (وزن: 15%)
+        if 'volume_sma' in df.columns and not pd.isna(last_row.get('volume_sma')):
+            try:
+                volume_ratio = last_row['volume'] / last_row['volume_sma']
+                if volume_ratio > 2.5:
+                    accuracy_score += 15
+                elif volume_ratio > 2:
+                    accuracy_score += 12
+                elif volume_ratio > 1.5:
+                    accuracy_score += 8
+                elif volume_ratio > 1.2:
+                    accuracy_score += 5
+            except (ZeroDivisionError, TypeError):
+                pass
+        
+        # 4. امتیاز میانگین متحرک (وزن: 15%)
+        if all(col in df.columns for col in ['sma20', 'sma50', 'sma200']):
+            current_price = last_row['close']
+            sma20 = last_row.get('sma20')
+            sma50 = last_row.get('sma50')
+            sma200 = last_row.get('sma200')
+            
+            if not any(pd.isna(val) for val in [sma20, sma50, sma200]):
+                if signal_data['type'] == 'buy':
+                    # قیمت بالای تمام میانگین‌ها - سیگنال قوی خرید
+                    if current_price > sma20 > sma50 > sma200:
+                        accuracy_score += 15
+                    elif current_price > sma20 > sma50:
+                        accuracy_score += 10
+                    elif current_price > sma20:
+                        accuracy_score += 5
+                else:  # sell
+                    # قیمت پایین تمام میانگین‌ها - سیگنال قوی فروش
+                    if current_price < sma20 < sma50 < sma200:
+                        accuracy_score += 15
+                    elif current_price < sma20 < sma50:
+                        accuracy_score += 10
+                    elif current_price < sma20:
+                        accuracy_score += 5
+        
+        # 5. امتیاز نوسان‌گیر استوکاستیک (وزن: 10%)
+        if 'STOCHk_14_3_3' in df.columns and 'STOCHd_14_3_3' in df.columns:
+            k_value = last_row.get('STOCHk_14_3_3')
+            d_value = last_row.get('STOCHd_14_3_3')
+            
+            if not pd.isna(k_value) and not pd.isna(d_value):
+                if signal_data['type'] == 'buy' and k_value < 20 and d_value < 20:
+                    accuracy_score += 10
+                elif signal_data['type'] == 'sell' and k_value > 80 and d_value > 80:
+                    accuracy_score += 10
+                elif signal_data['type'] == 'buy' and k_value < 30:
+                    accuracy_score += 5
+                elif signal_data['type'] == 'sell' and k_value > 70:
+                    accuracy_score += 5
+        
+        # 6. امتیاز روند کلی (وزن: 10%)
+        if len(prev_rows) >= 5:
+            trend_direction = 0
+            close_prices = prev_rows['close'].values
+            
+            # بررسی روند صعودی یا نزولی
+            for i in range(1, len(close_prices)):
+                if close_prices[i] > close_prices[i-1]:
+                    trend_direction += 1
+                elif close_prices[i] < close_prices[i-1]:
+                    trend_direction -= 1
+            
+            trend_strength = abs(trend_direction) / len(close_prices)
+            
+            if signal_data['type'] == 'buy' and trend_direction > 0:
+                accuracy_score += int(10 * trend_strength)
+            elif signal_data['type'] == 'sell' and trend_direction < 0:
+                accuracy_score += int(10 * trend_strength)
+        
+        # 7. امتیاز اضافی برای نمادهای پرحجم (وزن: 5%)
+        if symbol in ['BTC/USDT', 'ETH/USDT', 'BNB/USDT']:
+            accuracy_score += 5
+        
+        # محدود کردن امتیاز به 100
+        accuracy_score = min(accuracy_score, 100)
+        
+        logger.info(f"Accuracy score for {symbol}: {accuracy_score}")
+        return accuracy_score
+        
+    except Exception as e:
+        logger.error(f"Error calculating accuracy score for {symbol}: {e}")
+        return 0
+
 async def analyze_market():
-    """Analyze market and return signals with improved error handling"""
-    signals = []
+    """تحلیل بازار و بازگرداندن بهترین سیگنال"""
+    all_signals = []
     successful_analyses = 0
     failed_analyses = 0
     
     logger.info(f"Starting market analysis for {len(SYMBOLS)} symbols")
     
-    # Process symbols in batches to avoid overwhelming the API
+    # پردازش نمادها به صورت دسته‌ای
     batch_size = 5
     for i in range(0, len(SYMBOLS), batch_size):
         batch_symbols = SYMBOLS[i:i+batch_size]
         
         for symbol in batch_symbols:
             try:
-                # Add delay to respect rate limits
+                # تاخیر برای رعایت محدودیت نرخ
                 await asyncio.sleep(1)
                 
                 logger.info(f"Analyzing {symbol}...")
@@ -446,31 +580,36 @@ async def analyze_market():
                 if signal_data:
                     current_price = await get_current_price(symbol)
                     if current_price is not None:
-                        if signal_data['type'] == 'buy':
-                            entry = current_price
-                            target = entry * 1.05  # 5% target
-                            stop_loss = entry * 0.96  # 4% stop loss
-                            signal_type = 'Long'
-                        else:  # sell
-                            entry = current_price
-                            target = entry * 0.95  # 5% target
-                            stop_loss = entry * 1.04  # 4% stop loss
-                            signal_type = 'Short'
+                        # محاسبه امتیاز دقت
+                        accuracy_score = calculate_signal_accuracy_score(df, signal_data, symbol)
                         
-                        signals.append({
-                            'symbol': symbol,
-                            'type': signal_type,
-                            'entry': entry,
-                            'target': target,
-                            'stop_loss': stop_loss,
-                            'strength': signal_data['strength'],
-                            'rsi': signal_data['rsi'],
-                            'macd': signal_data['macd'],
-                            'method': signal_data.get('method', 'Unknown'),
-                            'timestamp': datetime.now().strftime('%H:%M:%S')
-                        })
-                        
-                        logger.info(f"Signal found for {symbol}: {signal_type}")
+                        if accuracy_score >= 40:  # حداقل امتیاز قابل قبول
+                            if signal_data['type'] == 'buy':
+                                entry = current_price
+                                target = entry * 1.05  # 5% هدف
+                                stop_loss = entry * 0.96  # 4% حد ضرر
+                                signal_type = 'Long'
+                            else:  # sell
+                                entry = current_price
+                                target = entry * 0.95  # 5% هدف
+                                stop_loss = entry * 1.04  # 4% حد ضرر
+                                signal_type = 'Short'
+                            
+                            all_signals.append({
+                                'symbol': symbol,
+                                'type': signal_type,
+                                'entry': entry,
+                                'target': target,
+                                'stop_loss': stop_loss,
+                                'strength': signal_data['strength'],
+                                'accuracy_score': accuracy_score,
+                                'rsi': signal_data['rsi'],
+                                'macd': signal_data['macd'],
+                                'method': signal_data.get('method', 'Unknown'),
+                                'timestamp': datetime.now().strftime('%H:%M:%S')
+                            })
+                            
+                            logger.info(f"High accuracy signal found for {symbol}: {signal_type} (Score: {accuracy_score})")
                 
                 successful_analyses += 1
                 
@@ -478,62 +617,100 @@ async def analyze_market():
                 logger.error(f"Error analyzing {symbol}: {e}")
                 failed_analyses += 1
         
-        # Small delay between batches
+        # تاخیر کوتاه بین دسته‌ها
         if i + batch_size < len(SYMBOLS):
             await asyncio.sleep(2)
     
-    logger.info(f"Analysis complete. Success: {successful_analyses}, Failed: {failed_analyses}, Signals: {len(signals)}")
-    return signals
+    # انتخاب بهترین سیگنال
+    best_signal = None
+    if all_signals:
+        # مرتب‌سازی بر اساس امتیاز دقت
+        all_signals.sort(key=lambda x: x['accuracy_score'], reverse=True)
+        best_signal = all_signals[0]  # بهترین سیگنال
+        
+        logger.info(f"Best signal selected: {best_signal['symbol']} with accuracy score: {best_signal['accuracy_score']}")
+    
+    logger.info(f"Analysis complete. Success: {successful_analyses}, Failed: {failed_analyses}, "
+                f"Total signals: {len(all_signals)}, Best signal: {best_signal['symbol'] if best_signal else 'None'}")
+    
+    return [best_signal] if best_signal else []
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /start command with improved error handling"""
+    """مدیریت دستور /start با ارائه بهترین سیگنال"""
     try:
         user_id = update.effective_user.id
         username = update.effective_user.username or "Unknown"
         logger.info(f"User {username} ({user_id}) started analysis")
         
         await update.message.reply_text(
-            "🔍 تحلیل بازار در حال انجام...\n"
+            "🔍 در حال تحلیل بازار برای یافتن بهترین فرصت معاملاتی...\n"
             "⏳ این کار ممکن است چند دقیقه طول بکشد."
         )
         
-        # Set a timeout for the entire analysis
+        # تنظیم timeout برای کل تحلیل
         try:
-            signals = await asyncio.wait_for(analyze_market(), timeout=300)  # 5 minutes max
+            signals = await asyncio.wait_for(analyze_market(), timeout=300)  # حداکثر 5 دقیقه
         except asyncio.TimeoutError:
             await update.message.reply_text(
                 "⏱️ تحلیل بیش از حد زمان برد. لطفا دوباره تلاش کنید."
             )
             return
         
-        if signals:
-            # Sort signals by strength
-            signals.sort(key=lambda x: x['strength'], reverse=True)
+        if signals and len(signals) > 0:
+            sig = signals[0]  # بهترین سیگنال
             
-            message = f"📊 *فرصت‌های معاملاتی یافت شده:* ({len(signals)} سیگنال)\n\n"
+            # تعیین emoji و رنگ بر اساس نوع سیگنال
+            emoji = '📈' if sig['type'] == 'Long' else '📉'
+            type_color = '🟢' if sig['type'] == 'Long' else '🔴'
             
-            for i, sig in enumerate(signals, 1):
-                emoji = '📈' if sig['type'] == 'Long' else '📉'
-                strength_stars = '⭐' * sig['strength']
-                
-                message += f"{emoji} *{sig['type']} {sig['symbol']}* {strength_stars}\n"
-                message += f"💰 ورودی: `{sig['entry']:.4f}`\n"
-                message += f"🎯 هدف: `{sig['target']:.4f}`\n"
-                message += f"🛑 حد ضرر: `{sig['stop_loss']:.4f}`\n"
-                message += f"📊 RSI: `{sig['rsi']:.1f}` | روش: `{sig['method']}`\n"
-                message += f"⏰ زمان: `{sig['timestamp']}`\n\n"
-                
-                # Limit message length
-                if len(message) > 3500:
-                    message += f"... و {len(signals) - i} سیگنال دیگر"
-                    break
+            # محاسبه درصد سود/ضرر
+            if sig['type'] == 'Long':
+                profit_pct = ((sig['target'] - sig['entry']) / sig['entry']) * 100
+                loss_pct = ((sig['entry'] - sig['stop_loss']) / sig['entry']) * 100
+            else:
+                profit_pct = ((sig['entry'] - sig['target']) / sig['entry']) * 100
+                loss_pct = ((sig['stop_loss'] - sig['entry']) / sig['entry']) * 100
             
-            message += "\n⚠️ *هشدار:* این سیگنال‌ها صرفاً جهت اطلاع‌رسانی هستند."
+            # ساختار پیام بهینه‌شده
+            message = f"🎯 *بهترین فرصت معاملاتی یافت شده*\n"
+            message += f"{'='*30}\n\n"
+            
+            message += f"{emoji} *{sig['type']} {sig['symbol']}* {type_color}\n"
+            message += f"🏆 **امتیاز دقت: {sig['accuracy_score']}/100**\n\n"
+            
+            message += f"📊 **جزئیات معاملاتی:**\n"
+            message += f"💰 قیمت ورودی: `{sig['entry']:.6f}`\n"
+            message += f"🎯 هدف قیمت: `{sig['target']:.6f}` (+{profit_pct:.1f}%)\n"
+            message += f"🛑 حد ضرر: `{sig['stop_loss']:.6f}` (-{loss_pct:.1f}%)\n\n"
+            
+            message += f"📈 **تحلیل تکنیکال:**\n"
+            message += f"• RSI: `{sig['rsi']:.1f}`\n"
+            message += f"• MACD: `{sig['macd']:.6f}`\n"
+            message += f"• روش تحلیل: `{sig['method']}`\n"
+            message += f"• قدرت سیگنال: {'⭐' * sig['strength']}\n\n"
+            
+            message += f"⏰ زمان تولید سیگنال: `{sig['timestamp']}`\n\n"
+            
+            # اضافه کردن توصیه‌های مدیریت ریسک
+            message += f"🎖️ **توصیه‌های مدیریت ریسک:**\n"
+            message += f"• حداکثر 2-3% از کل سرمایه ریسک کنید\n"
+            message += f"• حد ضرر را رعایت کنید\n"
+            message += f"• در صورت رسیدن به 50% سود، حد ضرر را به نقطه سربسر منتقل کنید\n\n"
+            
+            message += f"⚠️ **هشدار:** این تحلیل صرفاً جنبه اطلاع‌رسانی دارد و توصیه سرمایه‌گذاری نیست."
+            
         else:
             message = (
-                "❌ در حال حاضر هیچ سیگنال معاملاتی قوی یافت نشد.\n\n"
-                "💡 ممکن است بازار در حال تثبیت باشد یا شرایط مناسب معاملاتی وجود نداشته باشد.\n"
-                "🔄 چند دقیقه دیگر مجدداً تلاش کنید."
+                "❌ متأسفانه در حال حاضر هیچ سیگنال معاملاتی با دقت بالا یافت نشد.\n\n"
+                "🔍 **دلایل احتمالی:**\n"
+                "• بازار در حالت تثبیت قرار دارد\n"
+                "• شرایط تکنیکال مناسب معاملاتی وجود ندارد\n"
+                "• همه سیگنال‌ها دارای ریسک بالا هستند\n\n"
+                "💡 **پیشنهاد:**\n"
+                "• 30-60 دقیقه دیگر مجدداً تلاش کنید\n"
+                "• در انتظار شکل‌گیری الگوهای تکنیکال باشید\n"
+                "• از معاملات پر ریسک خودداری کنید\n\n"
+                "🔄 برای تحلیل مجدد /start را ارسال کنید."
             )
         
         await update.message.reply_text(message, parse_mode='Markdown')
