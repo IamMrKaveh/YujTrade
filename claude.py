@@ -38,7 +38,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Telegram bot token
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '7873285133:AAHOo3L7DewCgdVZbnx8Gs4xDJRnHs_R2VI')
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'token')
 
 # Global exchange instance
 exchange = None

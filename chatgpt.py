@@ -18,7 +18,7 @@ if not hasattr(np, 'NaN'):
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '7873285133:AAHOo3L7DewCgdVZbnx8Gs4xDJRnHs_R2VI')
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'token')
 exchange = None
 
 def load_symbols():
