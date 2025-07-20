@@ -7,7 +7,9 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import pandas as pd
 import numpy as np
+import talib
 import ccxt.async_support as ccxt
+
 
 # Suppress warnings
 warnings.filterwarnings('ignore', category=UserWarning)
@@ -52,7 +54,7 @@ def load_symbols():
         logger.error("symbols.txt file not found. Using default symbols.")
         # Create default symbols.txt file
         default_symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'ADA/USDT', 'SOL/USDT', 
-                          'DOT/USDT', 'LINK/USDT', 'XRP/USDT', 'LTC/USDT', 'MATIC/USDT']
+                            'DOT/USDT', 'LINK/USDT', 'XRP/USDT', 'LTC/USDT', 'MATIC/USDT']
         try:
             with open('symbols.txt', 'w', encoding='utf-8') as f:
                 for symbol in default_symbols:
@@ -199,31 +201,193 @@ def safe_indicator_calculation(df, func, *args, **kwargs):
         logger.warning(f"Error calculating indicator: {e}")
         return None
 
+def calculate_fibonacci_levels(df, lookback=100):
+    try:
+        if df is None or len(df) < lookback:
+            return None
+        
+        recent_data = df.tail(lookback)
+        high_price = recent_data['high'].max()
+        low_price = recent_data['low'].min()
+        
+        diff = high_price - low_price
+        
+        fib_levels = {
+            'fib_0': high_price,
+            'fib_236': high_price - (diff * 0.236),
+            'fib_382': high_price - (diff * 0.382),
+            'fib_500': high_price - (diff * 0.5),
+            'fib_618': high_price - (diff * 0.618),
+            'fib_786': high_price - (diff * 0.786),
+            'fib_100': low_price
+        }
+        
+        return fib_levels
+    except Exception:
+        return None
+
+def calculate_parabolic_sar(df, af=0.02, max_af=0.2):
+    try:
+        if df is None or len(df) < 5:
+            return None
+        
+        high = df['high'].values
+        low = df['low'].values
+        close = df['close'].values
+        
+        sar = np.zeros(len(df))
+        trend = np.zeros(len(df))
+        af_val = np.zeros(len(df))
+        ep = np.zeros(len(df))
+        
+        sar[0] = low[0]
+        trend[0] = 1
+        af_val[0] = af
+        ep[0] = high[0]
+        
+        for i in range(1, len(df)):
+            if trend[i-1] == 1:
+                sar[i] = sar[i-1] + af_val[i-1] * (ep[i-1] - sar[i-1])
+                
+                if low[i] <= sar[i]:
+                    trend[i] = -1
+                    sar[i] = ep[i-1]
+                    ep[i] = low[i]
+                    af_val[i] = af
+                else:
+                    trend[i] = 1
+                    if high[i] > ep[i-1]:
+                        ep[i] = high[i]
+                        af_val[i] = min(af_val[i-1] + af, max_af)
+                    else:
+                        ep[i] = ep[i-1]
+                        af_val[i] = af_val[i-1]
+            else:
+                sar[i] = sar[i-1] - af_val[i-1] * (sar[i-1] - ep[i-1])
+                
+                if high[i] >= sar[i]:
+                    trend[i] = 1
+                    sar[i] = ep[i-1]
+                    ep[i] = high[i]
+                    af_val[i] = af
+                else:
+                    trend[i] = -1
+                    if low[i] < ep[i-1]:
+                        ep[i] = low[i]
+                        af_val[i] = min(af_val[i-1] + af, max_af)
+                    else:
+                        ep[i] = ep[i-1]
+                        af_val[i] = af_val[i-1]
+        
+        return pd.Series(sar, index=df.index, name='psar')
+    except Exception:
+        return None
+
+def calculate_ichimoku(df):
+    try:
+        if df is None or len(df) < 52:
+            return None
+        
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        
+        tenkan_sen = (high.rolling(window=9).max() + low.rolling(window=9).min()) / 2
+        kijun_sen = (high.rolling(window=26).max() + low.rolling(window=26).min()) / 2
+        
+        senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
+        senkou_span_b = ((high.rolling(window=52).max() + low.rolling(window=52).min()) / 2).shift(26)
+        
+        chikou_span = close.shift(-26)
+        
+        return {
+            'tenkan_sen': tenkan_sen,
+            'kijun_sen': kijun_sen,
+            'senkou_span_a': senkou_span_a,
+            'senkou_span_b': senkou_span_b,
+            'chikou_span': chikou_span
+        }
+    except Exception:
+        return None
+
+def calculate_money_flow_index(df, period=14):
+    try:
+        if df is None or len(df) < period + 1:
+            return None
+        
+        typical_price = (df['high'] + df['low'] + df['close']) / 3
+        money_flow = typical_price * df['volume']
+        
+        price_diff = typical_price.diff()
+        positive_flow = pd.Series(0.0, index=df.index)
+        negative_flow = pd.Series(0.0, index=df.index)
+        
+        positive_flow[price_diff > 0] = money_flow[price_diff > 0]
+        negative_flow[price_diff < 0] = money_flow[price_diff < 0]
+        
+        positive_mf = positive_flow.rolling(window=period).sum()
+        negative_mf = negative_flow.rolling(window=period).sum()
+        
+        money_ratio = positive_mf / negative_mf
+        mfi = 100 - (100 / (1 + money_ratio))
+        
+        return mfi
+    except Exception:
+        return None
+
+def calculate_commodity_channel_index(df, period=20):
+    try:
+        if df is None or len(df) < period:
+            return None
+        
+        typical_price = (df['high'] + df['low'] + df['close']) / 3
+        sma_tp = typical_price.rolling(window=period).mean()
+        mean_deviation = typical_price.rolling(window=period).apply(
+            lambda x: np.mean(np.abs(x - x.mean()))
+        )
+        
+        cci = (typical_price - sma_tp) / (0.015 * mean_deviation)
+        
+        return cci
+    except Exception:
+        return None
+
+def calculate_williams_r(df, period=14):
+    try:
+        if df is None or len(df) < period:
+            return None
+        
+        highest_high = df['high'].rolling(window=period).max()
+        lowest_low = df['low'].rolling(window=period).min()
+        
+        williams_r = -100 * ((highest_high - df['close']) / (highest_high - lowest_low))
+        
+        return williams_r
+    except Exception:
+        return None
+
 def calculate_indicators(df):
-    """Calculate technical indicators with enhanced error handling"""
     try:
         if df is None or len(df) < 200:
             logger.warning(f"Insufficient data for indicators: {len(df) if df is not None else 0} candles")
             return None
         
-        # Make a copy to avoid modifying original
         df = df.copy()
         
-        # Calculate basic moving averages
         df['sma20'] = safe_indicator_calculation(df, ta.sma, df['close'], length=20)
         df['sma50'] = safe_indicator_calculation(df, ta.sma, df['close'], length=50)
         df['sma200'] = safe_indicator_calculation(df, ta.sma, df['close'], length=200)
         
-        # Calculate EMAs
         df['ema12'] = safe_indicator_calculation(df, ta.ema, df['close'], length=12)
         df['ema26'] = safe_indicator_calculation(df, ta.ema, df['close'], length=26)
+        df['ema50'] = safe_indicator_calculation(df, ta.ema, df['close'], length=50)
         
-        # Calculate RSI
+        df['wma20'] = safe_indicator_calculation(df, ta.wma, df['close'], length=20)
+        
         rsi = safe_indicator_calculation(df, ta.rsi, df['close'], length=14)
         if rsi is not None:
             df['rsi'] = rsi
         
-        # Calculate MACD
         try:
             macd_data = ta.macd(df['close'], fast=12, slow=26, signal=9)
             if macd_data is not None:
@@ -231,7 +395,6 @@ def calculate_indicators(df):
         except Exception as e:
             logger.warning(f"Error calculating MACD: {e}")
         
-        # Calculate Bollinger Bands
         try:
             bbands_data = ta.bbands(df['close'], length=20, std=2)
             if bbands_data is not None:
@@ -239,7 +402,6 @@ def calculate_indicators(df):
         except Exception as e:
             logger.warning(f"Error calculating Bollinger Bands: {e}")
         
-        # Calculate Stochastic Oscillator
         try:
             stoch_data = ta.stoch(df['high'], df['low'], df['close'], k=14, d=3)
             if stoch_data is not None:
@@ -247,12 +409,38 @@ def calculate_indicators(df):
         except Exception as e:
             logger.warning(f"Error calculating Stochastic: {e}")
         
-        # Volume indicators
         volume_sma = safe_indicator_calculation(df, ta.sma, df['volume'], length=20)
         if volume_sma is not None:
             df['volume_sma'] = volume_sma
         
-        # Check if we have minimum required indicators
+        mfi = calculate_money_flow_index(df)
+        if mfi is not None:
+            df['mfi'] = mfi
+        
+        cci = calculate_commodity_channel_index(df)
+        if cci is not None:
+            df['cci'] = cci
+        
+        williams_r = calculate_williams_r(df)
+        if williams_r is not None:
+            df['williams_r'] = williams_r
+        
+        psar = calculate_parabolic_sar(df)
+        if psar is not None:
+            df['psar'] = psar
+        
+        ichimoku_data = calculate_ichimoku(df)
+        if ichimoku_data:
+            for key, value in ichimoku_data.items():
+                if value is not None:
+                    df[key] = value
+        
+        fib_levels = calculate_fibonacci_levels(df)
+        if fib_levels:
+            current_price = df['close'].iloc[-1]
+            for level_name, level_value in fib_levels.items():
+                df[level_name] = level_value
+        
         required_indicators = ['rsi', 'sma50', 'volume_sma']
         missing_indicators = [ind for ind in required_indicators if ind not in df.columns or df[ind].isna().all()]
         
@@ -266,7 +454,6 @@ def calculate_indicators(df):
         return None
 
 def check_signals(df, symbol):
-    """Enhanced signal detection with fallback methods"""
     if df is None or len(df) < 2:
         return None
     
@@ -274,85 +461,182 @@ def check_signals(df, symbol):
         last_row = df.iloc[-1]
         prev_row = df.iloc[-2]
         
-        # Check if we have RSI (minimum requirement)
         if 'rsi' not in df.columns or pd.isna(last_row['rsi']):
             logger.warning(f"No RSI data for {symbol}")
             return None
         
-        # Simple RSI-based signals as fallback
         rsi_value = last_row['rsi']
+        current_price = last_row['close']
         
-        # Try advanced MACD signals first
-        if 'MACD_12_26_9' in df.columns and 'MACDs_12_26_9' in df.columns:
-            if (not pd.isna(last_row['MACD_12_26_9']) and 
-                not pd.isna(last_row['MACDs_12_26_9']) and 
-                not pd.isna(prev_row['MACD_12_26_9']) and 
-                not pd.isna(prev_row['MACDs_12_26_9'])):
-                
-                # MACD crossover signals
-                macd_bullish = (prev_row['MACD_12_26_9'] <= prev_row['MACDs_12_26_9'] and 
-                               last_row['MACD_12_26_9'] > last_row['MACDs_12_26_9'])
-                
-                macd_bearish = (prev_row['MACD_12_26_9'] >= prev_row['MACDs_12_26_9'] and 
-                               last_row['MACD_12_26_9'] < last_row['MACDs_12_26_9'])
-                
-                # Volume confirmation
-                volume_confirm = True
-                if 'volume_sma' in df.columns and not pd.isna(last_row['volume_sma']):
-                    volume_confirm = last_row['volume'] > last_row['volume_sma'] * 1.1
-                
-                # Buy signal
-                if macd_bullish and rsi_value < 40 and volume_confirm:
-                    return {
-                        'type': 'buy',
-                        'strength': calculate_signal_strength(df, 'buy'),
-                        'rsi': rsi_value,
-                        'macd': last_row['MACD_12_26_9'],
-                        'method': 'MACD_RSI'
-                    }
-                
-                # Sell signal
-                if macd_bearish and rsi_value > 60 and volume_confirm:
-                    return {
-                        'type': 'sell',
-                        'strength': calculate_signal_strength(df, 'sell'),
-                        'rsi': rsi_value,
-                        'macd': last_row['MACD_12_26_9'],
-                        'method': 'MACD_RSI'
-                    }
+        buy_signals = 0
+        sell_signals = 0
+        signal_strength = 0
+        signal_details = []
         
-        # Fallback to simple RSI signals
-        if rsi_value < 25:  # Strong oversold
+        if rsi_value < 30:
+            buy_signals += 2
+            signal_strength += 2
+            signal_details.append(f"RSI Oversold: {rsi_value:.1f}")
+        elif rsi_value > 70:
+            sell_signals += 2
+            signal_strength += 2
+            signal_details.append(f"RSI Overbought: {rsi_value:.1f}")
+        
+        if ('MACD_12_26_9' in df.columns and 'MACDs_12_26_9' in df.columns and
+            not pd.isna(last_row['MACD_12_26_9']) and not pd.isna(last_row['MACDs_12_26_9']) and
+            not pd.isna(prev_row['MACD_12_26_9']) and not pd.isna(prev_row['MACDs_12_26_9'])):
+            
+            macd_bullish = (prev_row['MACD_12_26_9'] <= prev_row['MACDs_12_26_9'] and 
+                           last_row['MACD_12_26_9'] > last_row['MACDs_12_26_9'])
+            
+            macd_bearish = (prev_row['MACD_12_26_9'] >= prev_row['MACDs_12_26_9'] and 
+                           last_row['MACD_12_26_9'] < last_row['MACDs_12_26_9'])
+            
+            if macd_bullish:
+                buy_signals += 3
+                signal_strength += 3
+                signal_details.append("MACD Bullish Cross")
+            elif macd_bearish:
+                sell_signals += 3
+                signal_strength += 3
+                signal_details.append("MACD Bearish Cross")
+        
+        if ('BBL_20_2.0' in df.columns and 'BBU_20_2.0' in df.columns and
+            not pd.isna(last_row['BBL_20_2.0']) and not pd.isna(last_row['BBU_20_2.0'])):
+            
+            if current_price <= last_row['BBL_20_2.0']:
+                buy_signals += 2
+                signal_strength += 2
+                signal_details.append("Price at Lower Bollinger Band")
+            elif current_price >= last_row['BBU_20_2.0']:
+                sell_signals += 2
+                signal_strength += 2
+                signal_details.append("Price at Upper Bollinger Band")
+        
+        if ('STOCHk_14_3_3' in df.columns and 'STOCHd_14_3_3' in df.columns and
+            not pd.isna(last_row['STOCHk_14_3_3']) and not pd.isna(last_row['STOCHd_14_3_3'])):
+            
+            stoch_k = last_row['STOCHk_14_3_3']
+            stoch_d = last_row['STOCHd_14_3_3']
+            
+            if stoch_k < 20 and stoch_d < 20:
+                buy_signals += 2
+                signal_strength += 1
+                signal_details.append(f"Stochastic Oversold: K={stoch_k:.1f}")
+            elif stoch_k > 80 and stoch_d > 80:
+                sell_signals += 2
+                signal_strength += 1
+                signal_details.append(f"Stochastic Overbought: K={stoch_k:.1f}")
+        
+        if 'mfi' in df.columns and not pd.isna(last_row['mfi']):
+            mfi_value = last_row['mfi']
+            
+            if mfi_value < 20:
+                buy_signals += 2
+                signal_strength += 1
+                signal_details.append(f"MFI Oversold: {mfi_value:.1f}")
+            elif mfi_value > 80:
+                sell_signals += 2
+                signal_strength += 1
+                signal_details.append(f"MFI Overbought: {mfi_value:.1f}")
+        
+        if 'cci' in df.columns and not pd.isna(last_row['cci']):
+            cci_value = last_row['cci']
+            
+            if cci_value < -100:
+                buy_signals += 1
+                signal_details.append(f"CCI Oversold: {cci_value:.1f}")
+            elif cci_value > 100:
+                sell_signals += 1
+                signal_details.append(f"CCI Overbought: {cci_value:.1f}")
+        
+        if 'williams_r' in df.columns and not pd.isna(last_row['williams_r']):
+            wr_value = last_row['williams_r']
+            
+            if wr_value < -80:
+                buy_signals += 1
+                signal_details.append(f"Williams %R Oversold: {wr_value:.1f}")
+            elif wr_value > -20:
+                sell_signals += 1
+                signal_details.append(f"Williams %R Overbought: {wr_value:.1f}")
+        
+        if 'psar' in df.columns and not pd.isna(last_row['psar']):
+            psar_value = last_row['psar']
+            
+            if current_price > psar_value and prev_row['close'] <= df.iloc[-2]['psar']:
+                buy_signals += 2
+                signal_strength += 1
+                signal_details.append("PSAR Bullish Signal")
+            elif current_price < psar_value and prev_row['close'] >= df.iloc[-2]['psar']:
+                sell_signals += 2
+                signal_strength += 1
+                signal_details.append("PSAR Bearish Signal")
+        
+        if ('tenkan_sen' in df.columns and 'kijun_sen' in df.columns and
+            not pd.isna(last_row['tenkan_sen']) and not pd.isna(last_row['kijun_sen'])):
+            
+            if (last_row['tenkan_sen'] > last_row['kijun_sen'] and 
+                prev_row['tenkan_sen'] <= prev_row['kijun_sen']):
+                buy_signals += 2
+                signal_strength += 1
+                signal_details.append("Ichimoku Bullish Cross")
+            elif (last_row['tenkan_sen'] < last_row['kijun_sen'] and 
+                  prev_row['tenkan_sen'] >= prev_row['kijun_sen']):
+                sell_signals += 2
+                signal_strength += 1
+                signal_details.append("Ichimoku Bearish Cross")
+        
+        if ('sma20' in df.columns and 'sma50' in df.columns and
+            not pd.isna(last_row['sma20']) and not pd.isna(last_row['sma50'])):
+            
+            if current_price > last_row['sma20'] > last_row['sma50']:
+                buy_signals += 1
+                signal_details.append("Price Above SMA20 & SMA50")
+            elif current_price < last_row['sma20'] < last_row['sma50']:
+                sell_signals += 1
+                signal_details.append("Price Below SMA20 & SMA50")
+        
+        if 'volume_sma' in df.columns and not pd.isna(last_row['volume_sma']):
+            volume_ratio = last_row['volume'] / last_row['volume_sma']
+            if volume_ratio > 1.5:
+                signal_strength += 1
+                signal_details.append(f"High Volume: {volume_ratio:.1f}x")
+        
+        fibonacci_support_resistance = []
+        fib_keys = ['fib_236', 'fib_382', 'fib_500', 'fib_618']
+        for fib_key in fib_keys:
+            if fib_key in df.columns:
+                fib_level = last_row[fib_key]
+                price_diff_pct = abs(current_price - fib_level) / current_price * 100
+                if price_diff_pct < 1:
+                    fibonacci_support_resistance.append(f"{fib_key}: {fib_level:.6f}")
+        
+        if fibonacci_support_resistance:
+            signal_details.extend(fibonacci_support_resistance)
+        
+        min_signal_threshold = 3
+        
+        if buy_signals >= min_signal_threshold and buy_signals > sell_signals:
             return {
                 'type': 'buy',
-                'strength': 4,
+                'strength': min(signal_strength, 5),
                 'rsi': rsi_value,
-                'macd': 0,
-                'method': 'RSI_Simple'
+                'macd': last_row.get('MACD_12_26_9', 0),
+                'method': 'Multi_Indicator_Buy',
+                'details': signal_details,
+                'buy_score': buy_signals,
+                'sell_score': sell_signals
             }
-        elif rsi_value > 75:  # Strong overbought
+        elif sell_signals >= min_signal_threshold and sell_signals > buy_signals:
             return {
                 'type': 'sell',
-                'strength': 4,
+                'strength': min(signal_strength, 5),
                 'rsi': rsi_value,
-                'macd': 0,
-                'method': 'RSI_Simple'
-            }
-        elif rsi_value < 30:  # Oversold
-            return {
-                'type': 'buy',
-                'strength': 2,
-                'rsi': rsi_value,
-                'macd': 0,
-                'method': 'RSI_Simple'
-            }
-        elif rsi_value > 70:  # Overbought
-            return {
-                'type': 'sell',
-                'strength': 2,
-                'rsi': rsi_value,
-                'macd': 0,
-                'method': 'RSI_Simple'
+                'macd': last_row.get('MACD_12_26_9', 0),
+                'method': 'Multi_Indicator_Sell',
+                'details': signal_details,
+                'buy_score': buy_signals,
+                'sell_score': sell_signals
             }
         
         return None
@@ -413,7 +697,6 @@ def calculate_signal_strength(df, signal_type):
         return 2  # Default medium strength
 
 def calculate_signal_accuracy_score(df, signal_data, symbol):
-    """محاسبه امتیاز دقت سیگنال بر اساس عوامل مختلف"""
     try:
         if df is None or len(df) < 50 or not signal_data:
             return 0
@@ -422,7 +705,6 @@ def calculate_signal_accuracy_score(df, signal_data, symbol):
         prev_rows = df.iloc[-10:] if len(df) >= 10 else df
         accuracy_score = 0
         
-        # 1. امتیاز RSI (وزن: 25%)
         rsi_value = signal_data.get('rsi', 50)
         if signal_data['type'] == 'buy':
             if rsi_value < 20:
@@ -433,7 +715,7 @@ def calculate_signal_accuracy_score(df, signal_data, symbol):
                 accuracy_score += 15
             elif rsi_value < 35:
                 accuracy_score += 10
-        else:  # sell
+        else:
             if rsi_value > 80:
                 accuracy_score += 25
             elif rsi_value > 75:
@@ -443,7 +725,6 @@ def calculate_signal_accuracy_score(df, signal_data, symbol):
             elif rsi_value > 65:
                 accuracy_score += 10
         
-        # 2. امتیاز MACD (وزن: 20%)
         if ('MACD_12_26_9' in df.columns and 'MACDs_12_26_9' in df.columns and
             not pd.isna(last_row.get('MACD_12_26_9')) and not pd.isna(last_row.get('MACDs_12_26_9'))):
             
@@ -455,10 +736,9 @@ def calculate_signal_accuracy_score(df, signal_data, symbol):
                 accuracy_score += 20
             elif signal_data['type'] == 'sell' and macd_histogram < 0 and macd_line < signal_line:
                 accuracy_score += 20
-            elif abs(macd_histogram) > 0.001:  # سیگنال قوی MACD
+            elif abs(macd_histogram) > 0.001:
                 accuracy_score += 10
         
-        # 3. امتیاز حجم معاملات (وزن: 15%)
         if 'volume_sma' in df.columns and not pd.isna(last_row.get('volume_sma')):
             try:
                 volume_ratio = last_row['volume'] / last_row['volume_sma']
@@ -473,7 +753,6 @@ def calculate_signal_accuracy_score(df, signal_data, symbol):
             except (ZeroDivisionError, TypeError):
                 pass
         
-        # 4. امتیاز میانگین متحرک (وزن: 15%)
         if all(col in df.columns for col in ['sma20', 'sma50', 'sma200']):
             current_price = last_row['close']
             sma20 = last_row.get('sma20')
@@ -482,15 +761,13 @@ def calculate_signal_accuracy_score(df, signal_data, symbol):
             
             if not any(pd.isna(val) for val in [sma20, sma50, sma200]):
                 if signal_data['type'] == 'buy':
-                    # قیمت بالای تمام میانگین‌ها - سیگنال قوی خرید
                     if current_price > sma20 > sma50 > sma200:
                         accuracy_score += 15
                     elif current_price > sma20 > sma50:
                         accuracy_score += 10
                     elif current_price > sma20:
                         accuracy_score += 5
-                else:  # sell
-                    # قیمت پایین تمام میانگین‌ها - سیگنال قوی فروش
+                else:
                     if current_price < sma20 < sma50 < sma200:
                         accuracy_score += 15
                     elif current_price < sma20 < sma50:
@@ -498,7 +775,6 @@ def calculate_signal_accuracy_score(df, signal_data, symbol):
                     elif current_price < sma20:
                         accuracy_score += 5
         
-        # 5. امتیاز نوسان‌گیر استوکاستیک (وزن: 10%)
         if 'STOCHk_14_3_3' in df.columns and 'STOCHd_14_3_3' in df.columns:
             k_value = last_row.get('STOCHk_14_3_3')
             d_value = last_row.get('STOCHd_14_3_3')
@@ -513,12 +789,28 @@ def calculate_signal_accuracy_score(df, signal_data, symbol):
                 elif signal_data['type'] == 'sell' and k_value > 70:
                     accuracy_score += 5
         
-        # 6. امتیاز روند کلی (وزن: 10%)
+        if 'mfi' in df.columns and not pd.isna(last_row.get('mfi')):
+            mfi_value = last_row['mfi']
+            if signal_data['type'] == 'buy' and mfi_value < 20:
+                accuracy_score += 8
+            elif signal_data['type'] == 'sell' and mfi_value > 80:
+                accuracy_score += 8
+            elif signal_data['type'] == 'buy' and mfi_value < 30:
+                accuracy_score += 4
+            elif signal_data['type'] == 'sell' and mfi_value > 70:
+                accuracy_score += 4
+        
+        if 'cci' in df.columns and not pd.isna(last_row.get('cci')):
+            cci_value = last_row['cci']
+            if signal_data['type'] == 'buy' and cci_value < -100:
+                accuracy_score += 5
+            elif signal_data['type'] == 'sell' and cci_value > 100:
+                accuracy_score += 5
+        
         if len(prev_rows) >= 5:
             trend_direction = 0
             close_prices = prev_rows['close'].values
             
-            # بررسی روند صعودی یا نزولی
             for i in range(1, len(close_prices)):
                 if close_prices[i] > close_prices[i-1]:
                     trend_direction += 1
@@ -532,11 +824,14 @@ def calculate_signal_accuracy_score(df, signal_data, symbol):
             elif signal_data['type'] == 'sell' and trend_direction < 0:
                 accuracy_score += int(10 * trend_strength)
         
-        # 7. امتیاز اضافی برای نمادهای پرحجم (وزن: 5%)
         if symbol in ['BTC/USDT', 'ETH/USDT', 'BNB/USDT']:
             accuracy_score += 5
         
-        # محدود کردن امتیاز به 100
+        buy_score = signal_data.get('buy_score', 0)
+        sell_score = signal_data.get('sell_score', 0)
+        signal_dominance = max(buy_score, sell_score) - min(buy_score, sell_score)
+        accuracy_score += min(signal_dominance * 2, 10)
+        
         accuracy_score = min(accuracy_score, 100)
         
         logger.info(f"Accuracy score for {symbol}: {accuracy_score}")
@@ -649,7 +944,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         # تنظیم timeout برای کل تحلیل
         try:
-            signals = await asyncio.wait_for(analyze_market(), timeout=300)  # حداکثر 5 دقیقه
+            signals = await asyncio.wait_for(analyze_market(), timeout=1800)  # حداکثر 30 دقیقه
         except asyncio.TimeoutError:
             await update.message.reply_text(
                 "⏱️ تحلیل بیش از حد زمان برد. لطفا دوباره تلاش کنید."
@@ -690,14 +985,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             message += f"• قدرت سیگنال: {'⭐' * sig['strength']}\n\n"
             
             message += f"⏰ زمان تولید سیگنال: `{sig['timestamp']}`\n\n"
-            
-            # اضافه کردن توصیه‌های مدیریت ریسک
-            message += f"🎖️ **توصیه‌های مدیریت ریسک:**\n"
-            message += f"• حداکثر 2-3% از کل سرمایه ریسک کنید\n"
-            message += f"• حد ضرر را رعایت کنید\n"
-            message += f"• در صورت رسیدن به 50% سود، حد ضرر را به نقطه سربسر منتقل کنید\n\n"
-            
-            message += f"⚠️ **هشدار:** این تحلیل صرفاً جنبه اطلاع‌رسانی دارد و توصیه سرمایه‌گذاری نیست."
             
         else:
             message = (

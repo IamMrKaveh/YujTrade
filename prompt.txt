@@ -1,0 +1,625 @@
+import os
+import logging
+import asyncio
+import warnings
+from datetime import datetime, timedelta
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import pandas as pd
+import numpy as np
+import ccxt.async_support as ccxt
+import talib
+from scipy import stats
+from scipy.signal import find_peaks
+from collections import defaultdict
+import math
+
+# Suppress warnings
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+
+# Fix numpy compatibility issue
+import sys
+if hasattr(np, 'NaN'):
+    pass
+else:
+    np.NaN = np.nan
+
+# Now import pandas_ta after fixing numpy
+try:
+    import pandas_ta as ta
+except ImportError as e:
+    print(f"Error importing pandas_ta: {e}")
+    print("Please install with: pip install pandas-ta==0.3.14b")
+    sys.exit(1)
+
+# Configure logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Telegram bot token
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '7873285133:AAHOo3L7DewCgdVZbnx8Gs4xDJRnHs_R2VI')
+
+# Global exchange instance
+exchange = None
+
+# Enhanced analysis parameters
+ANALYSIS_PERIODS = {
+    '1h': 1000,   # More candles for better analysis
+    '4h': 500,
+    '1d': 200
+}
+
+def load_symbols():
+    """Load symbols from file with error handling"""
+    try:
+        with open('symbols.txt', 'r', encoding='utf-8') as f:
+            symbols = [line.strip().upper() for line in f.readlines() if line.strip()]
+        logger.info(f"Loaded {len(symbols)} symbols from symbols.txt")
+        return symbols
+    except FileNotFoundError:
+        logger.error("symbols.txt file not found. Using extended default symbols.")
+        # Extended default symbols for better coverage
+        default_symbols = [
+            'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'ADA/USDT', 'SOL/USDT', 
+            'DOT/USDT', 'LINK/USDT', 'XRP/USDT', 'LTC/USDT', 'MATIC/USDT',
+            'AVAX/USDT', 'ATOM/USDT', 'NEAR/USDT', 'FTM/USDT', 'ALGO/USDT',
+            'AAVE/USDT', 'UNI/USDT', 'MANA/USDT', 'SAND/USDT', 'CRV/USDT'
+        ]
+        try:
+            with open('symbols.txt', 'w', encoding='utf-8') as f:
+                for symbol in default_symbols:
+                    f.write(f"{symbol}\n")
+            logger.info("Created extended default symbols.txt file")
+        except Exception as e:
+            logger.error(f"Could not create symbols.txt: {e}")
+        return default_symbols
+    except Exception as e:
+        logger.error(f"Error loading symbols: {e}")
+        return ['BTC/USDT', 'ETH/USDT', 'BNB/USDT']
+
+# Load symbols at startup
+SYMBOLS = load_symbols()
+
+async def init_exchange():
+    """Initialize exchange connection"""
+    global exchange
+    if exchange is None:
+        try:
+            exchange = ccxt.coinex({
+                'apiKey': os.getenv('COINEX_API_KEY', ''),
+                'secret': os.getenv('COINEX_SECRET', ''),
+                'sandbox': False,
+                'enableRateLimit': True,
+                'timeout': 45000,  # Increased timeout
+                'options': {'defaultType': 'spot'}
+            })
+            logger.info("Exchange initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing exchange: {e}")
+            return None
+    return exchange
+
+async def get_multiple_timeframes_data(symbol):
+    """Fetch data from multiple timeframes for comprehensive analysis"""
+    timeframe_data = {}
+    
+    for timeframe, limit in ANALYSIS_PERIODS.items():
+        try:
+            exchange = await init_exchange()
+            if exchange is None:
+                continue
+            
+            # Validate symbol format
+            if '/' not in symbol:
+                symbol = f"{symbol}/USDT"
+            
+            ohlcv = await asyncio.wait_for(
+                exchange.fetch_ohlcv(symbol, timeframe, limit=limit),
+                timeout=20
+            )
+            
+            if not ohlcv or len(ohlcv) < 100:
+                logger.warning(f"Insufficient data for {symbol} on {timeframe}: {len(ohlcv) if ohlcv else 0} candles")
+                continue
+                
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+            
+            # Convert to numeric types
+            numeric_columns = ['open', 'high', 'low', 'close', 'volume']
+            for col in numeric_columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            # Remove any NaN values
+            df = df.dropna()
+            
+            if len(df) >= 100:
+                timeframe_data[timeframe] = df
+                logger.info(f"Successfully fetched {len(df)} candles for {symbol} on {timeframe}")
+            
+        except Exception as e:
+            logger.error(f"Error fetching {timeframe} data for {symbol}: {e}")
+            continue
+            
+        # Rate limiting
+        await asyncio.sleep(0.5)
+    
+    return timeframe_data
+
+async def get_order_book_analysis(symbol):
+    """Analyze order book for buy/sell pressure"""
+    try:
+        exchange = await init_exchange()
+        if exchange is None:
+            return {}
+        
+        # Validate symbol format
+        if '/' not in symbol:
+            symbol = f"{symbol}/USDT"
+            
+        order_book = await asyncio.wait_for(
+            exchange.fetch_order_book(symbol, limit=20),
+            timeout=10
+        )
+        
+        if not order_book or 'bids' not in order_book or 'asks' not in order_book:
+            return {}
+        
+        bids = order_book['bids'][:10]  # Top 10 buy orders
+        asks = order_book['asks'][:10]  # Top 10 sell orders
+        
+        # Calculate buy/sell pressure
+        total_bid_volume = sum([bid[1] for bid in bids])
+        total_ask_volume = sum([ask[1] for ask in asks])
+        
+        # Calculate weighted average prices
+        bid_weighted_price = sum([bid[0] * bid[1] for bid in bids]) / total_bid_volume if total_bid_volume > 0 else 0
+        ask_weighted_price = sum([ask[0] * ask[1] for ask in asks]) / total_ask_volume if total_ask_volume > 0 else 0
+        
+        # Calculate spread
+        best_bid = bids[0][0] if bids else 0
+        best_ask = asks[0][0] if asks else 0
+        spread = (best_ask - best_bid) / best_bid * 100 if best_bid > 0 else 0
+        
+        # Calculate order book imbalance
+        total_volume = total_bid_volume + total_ask_volume
+        buy_pressure = total_bid_volume / total_volume if total_volume > 0 else 0.5
+        
+        return {
+            'buy_pressure': buy_pressure,
+            'total_bid_volume': total_bid_volume,
+            'total_ask_volume': total_ask_volume,
+            'spread_percent': spread,
+            'bid_weighted_price': bid_weighted_price,
+            'ask_weighted_price': ask_weighted_price,
+            'order_book_strength': min(total_volume / 1000, 10)  # Normalize to 0-10
+        }
+        
+    except Exception as e:
+        logger.warning(f"Could not fetch order book for {symbol}: {e}")
+        return {}
+
+def calculate_advanced_indicators(df, timeframe='1h'):
+    """Calculate comprehensive technical indicators using both pandas_ta and talib"""
+    try:
+        if df is None or len(df) < 200:
+            logger.warning(f"Insufficient data for indicators: {len(df) if df is not None else 0} candles")
+            return None
+        
+        df = df.copy()
+        
+        # Convert to numpy arrays for talib
+        open_prices = df['open'].values
+        high_prices = df['high'].values
+        low_prices = df['low'].values
+        close_prices = df['close'].values
+        volume = df['volume'].values
+        
+        # === TREND INDICATORS ===
+        
+        # Multiple Moving Averages
+        for period in [7, 14, 21, 50, 100, 200]:
+            if len(df) > period:
+                df[f'sma_{period}'] = talib.SMA(close_prices, timeperiod=period)
+                df[f'ema_{period}'] = talib.EMA(close_prices, timeperiod=period)
+        
+        # MACD with different parameters
+        df['macd'], df['macd_signal'], df['macd_hist'] = talib.MACD(close_prices, fastperiod=12, slowperiod=26, signalperiod=9)
+        df['macd_fast'], df['macd_signal_fast'], df['macd_hist_fast'] = talib.MACD(close_prices, fastperiod=8, slowperiod=17, signalperiod=7)
+        
+        # Parabolic SAR
+        df['sar'] = talib.SAR(high_prices, low_prices, acceleration=0.02, maximum=0.2)
+        
+        # ADX (Average Directional Index)
+        df['adx'] = talib.ADX(high_prices, low_prices, close_prices, timeperiod=14)
+        df['plus_di'] = talib.PLUS_DI(high_prices, low_prices, close_prices, timeperiod=14)
+        df['minus_di'] = talib.MINUS_DI(high_prices, low_prices, close_prices, timeperiod=14)
+        
+        # === MOMENTUM INDICATORS ===
+        
+        # Multiple RSI periods
+        for period in [9, 14, 21]:
+            df[f'rsi_{period}'] = talib.RSI(close_prices, timeperiod=period)
+        
+        # Stochastic Oscillator variants
+        df['stoch_k'], df['stoch_d'] = talib.STOCH(high_prices, low_prices, close_prices, 
+                                                  fastk_period=14, slowk_period=3, slowd_period=3)
+        df['stoch_rsi_k'], df['stoch_rsi_d'] = talib.STOCHRSI(close_prices, timeperiod=14, 
+                                                             fastk_period=5, fastd_period=3)
+        
+        # Williams %R
+        df['williams_r'] = talib.WILLR(high_prices, low_prices, close_prices, timeperiod=14)
+        
+        # Commodity Channel Index
+        df['cci'] = talib.CCI(high_prices, low_prices, close_prices, timeperiod=20)
+        
+        # Rate of Change
+        df['roc'] = talib.ROC(close_prices, timeperiod=12)
+        
+        # Momentum
+        df['momentum'] = talib.MOM(close_prices, timeperiod=10)
+        
+        # === VOLATILITY INDICATORS ===
+        
+        # Bollinger Bands with multiple periods
+        for period in [20, 50]:
+            upper, middle, lower = talib.BBANDS(close_prices, timeperiod=period, nbdevup=2, nbdevdn=2, matype=0)
+            df[f'bb_upper_{period}'] = upper
+            df[f'bb_middle_{period}'] = middle
+            df[f'bb_lower_{period}'] = lower
+            df[f'bb_width_{period}'] = (upper - lower) / middle
+            df[f'bb_position_{period}'] = (close_prices - lower) / (upper - lower)
+        
+        # Average True Range
+        df['atr'] = talib.ATR(high_prices, low_prices, close_prices, timeperiod=14)
+        df['atr_percent'] = df['atr'] / close_prices * 100
+        
+        # Keltner Channels
+        df['kc_upper'], df['kc_lower'], df['kc_middle'] = ta.kc(df['high'], df['low'], df['close'], length=20).T.values
+        
+        # === VOLUME INDICATORS ===
+        
+        # Volume moving averages
+        for period in [10, 20, 50]:
+            df[f'volume_sma_{period}'] = talib.SMA(volume, timeperiod=period)
+        
+        # On Balance Volume
+        df['obv'] = talib.OBV(close_prices, volume)
+        
+        # Accumulation/Distribution Line
+        df['ad'] = talib.AD(high_prices, low_prices, close_prices, volume)
+        
+        # Chaikin Money Flow
+        df['cmf'] = ta.cmf(df['high'], df['low'], df['close'], df['volume'], length=20)
+        
+        # Volume Price Trend
+        df['vpt'] = ta.vpt(df['close'], df['volume'])
+        
+        # Money Flow Index
+        df['mfi'] = talib.MFI(high_prices, low_prices, close_prices, volume, timeperiod=14)
+        
+        # === CUSTOM INDICATORS ===
+        
+        # Volume Spike Detection
+        df['volume_spike'] = df['volume'] / df['volume_sma_20'] if 'volume_sma_20' in df.columns else 1
+        
+        # Price Action Patterns
+        df['hammer'] = talib.CDLHAMMER(open_prices, high_prices, low_prices, close_prices)
+        df['doji'] = talib.CDLDOJI(open_prices, high_prices, low_prices, close_prices)
+        df['engulfing'] = talib.CDLENGULFING(open_prices, high_prices, low_prices, close_prices)
+        df['morning_star'] = talib.CDLMORNINGSTAR(open_prices, high_prices, low_prices, close_prices)
+        df['evening_star'] = talib.CDLEVENINGSTAR(open_prices, high_prices, low_prices, close_prices)
+        
+        # Ichimoku Cloud components
+        ichimoku = ta.ichimoku(df['high'], df['low'], df['close'])
+        if ichimoku is not None and len(ichimoku) > 0:
+            for col in ichimoku.columns:
+                df[f'ichimoku_{col}'] = ichimoku[col]
+        
+        # Support and Resistance Levels
+        df = calculate_support_resistance(df)
+        
+        # Market Structure
+        df = calculate_market_structure(df)
+        
+        logger.info(f"Calculated {len([col for col in df.columns if col not in ['open', 'high', 'low', 'close', 'volume']])} technical indicators")
+        
+        return df
+        
+    except Exception as e:
+        logger.error(f"Error calculating indicators: {e}")
+        return df
+
+def calculate_support_resistance(df):
+    """Calculate dynamic support and resistance levels"""
+    try:
+        if len(df) < 50:
+            return df
+        
+        # Find peaks and troughs for support/resistance
+        highs = df['high'].values
+        lows = df['low'].values
+        
+        # Find resistance levels (peaks)
+        resistance_peaks, _ = find_peaks(highs, distance=10, prominence=np.std(highs) * 0.5)
+        
+        # Find support levels (troughs)  
+        support_peaks, _ = find_peaks(-lows, distance=10, prominence=np.std(lows) * 0.5)
+        
+        # Calculate recent support/resistance levels
+        if len(resistance_peaks) > 0:
+            recent_resistance = np.mean(highs[resistance_peaks[-3:]]) if len(resistance_peaks) >= 3 else highs[resistance_peaks[-1]]
+            df['resistance_level'] = recent_resistance
+        
+        if len(support_peaks) > 0:
+            recent_support = np.mean(lows[support_peaks[-3:]]) if len(support_peaks) >= 3 else lows[support_peaks[-1]]
+            df['support_level'] = recent_support
+        
+        # Calculate distance to support/resistance
+        current_price = df['close'].iloc[-1]
+        if 'resistance_level' in df.columns:
+            df['resistance_distance'] = (df['resistance_level'] - current_price) / current_price * 100
+        if 'support_level' in df.columns:
+            df['support_distance'] = (current_price - df['support_level']) / current_price * 100
+            
+    except Exception as e:
+        logger.warning(f"Error calculating support/resistance: {e}")
+    
+    return df
+
+def calculate_market_structure(df):
+    """Calculate market structure indicators"""
+    try:
+        # Higher Highs / Lower Lows analysis
+        df['hh'] = (df['high'] > df['high'].shift(1)) & (df['high'].shift(1) > df['high'].shift(2))
+        df['ll'] = (df['low'] < df['low'].shift(1)) & (df['low'].shift(1) < df['low'].shift(2))
+        
+        # Trend strength
+        df['trend_strength'] = ta.adx(df['high'], df['low'], df['close'], length=14)
+        
+        # Market regime detection
+        short_ma = df['close'].rolling(10).mean()
+        long_ma = df['close'].rolling(50).mean()
+        df['regime'] = np.where(short_ma > long_ma, 1, -1)  # 1 = bullish, -1 = bearish
+        
+        return df
+        
+    except Exception as e:
+        logger.warning(f"Error calculating market structure: {e}")
+        return df
+
+def calculate_signal_strength_advanced(df_data, signal_data, symbol, order_book_data=None):
+    """Advanced signal strength calculation with multiple timeframe analysis"""
+    try:
+        if not df_data or not signal_data:
+            return 2
+        
+        total_score = 0
+        max_score = 100
+        
+        # Use 1h data as primary
+        df = df_data.get('1h')
+        if df is None or len(df) < 50:
+            return 2
+        
+        last_row = df.iloc[-1]
+        
+        # === RSI ANALYSIS (Weight: 15) ===
+        rsi_scores = []
+        for period in [9, 14, 21]:
+            if f'rsi_{period}' in df.columns and not pd.isna(last_row[f'rsi_{period}']):
+                rsi_val = last_row[f'rsi_{period}']
+                if signal_data['type'] == 'Long':
+                    if rsi_val < 20: rsi_scores.append(15)
+                    elif rsi_val < 25: rsi_scores.append(12)
+                    elif rsi_val < 30: rsi_scores.append(10)
+                    elif rsi_val < 35: rsi_scores.append(6)
+                else:  # Short
+                    if rsi_val > 80: rsi_scores.append(15)
+                    elif rsi_val > 75: rsi_scores.append(12)
+                    elif rsi_val > 70: rsi_scores.append(10)
+                    elif rsi_val > 65: rsi_scores.append(6)
+        
+        if rsi_scores:
+            total_score += max(rsi_scores)
+        
+        # === MACD ANALYSIS (Weight: 12) ===
+        if all(col in df.columns for col in ['macd', 'macd_signal', 'macd_hist']) and len(df) > 2:
+            macd_line = last_row['macd']
+            signal_line = last_row['macd_signal']
+            hist = last_row['macd_hist']
+            prev_hist = df.iloc[-2]['macd_hist']
+            
+            if not any(pd.isna(val) for val in [macd_line, signal_line, hist, prev_hist]):
+                # MACD crossover
+                macd_bullish = prev_hist <= 0 and hist > 0
+                macd_bearish = prev_hist >= 0 and hist < 0
+                
+                if signal_data['type'] == 'Long' and macd_bullish:
+                    total_score += 12
+                elif signal_data['type'] == 'Short' and macd_bearish:
+                    total_score += 12
+                elif signal_data['type'] == 'Long' and hist > 0:
+                    total_score += 6
+                elif signal_data['type'] == 'Short' and hist < 0:
+                    total_score += 6
+        
+        # === VOLUME ANALYSIS (Weight: 10) ===
+        if 'volume_sma_20' in df.columns and not pd.isna(last_row['volume_sma_20']):
+            volume_ratio = last_row['volume'] / last_row['volume_sma_20']
+            if volume_ratio > 3: total_score += 10
+            elif volume_ratio > 2: total_score += 8
+            elif volume_ratio > 1.5: total_score += 6
+            elif volume_ratio > 1.2: total_score += 3
+        
+        # === BOLLINGER BANDS ANALYSIS (Weight: 8) ===
+        if all(col in df.columns for col in ['bb_upper_20', 'bb_lower_20']):
+            bb_pos = last_row.get('bb_position_20', 0.5)
+            if signal_data['type'] == 'Long' and bb_pos < 0.2:
+                total_score += 8
+            elif signal_data['type'] == 'Short' and bb_pos > 0.8:
+                total_score += 8
+            elif signal_data['type'] == 'Long' and bb_pos < 0.3:
+                total_score += 4
+            elif signal_data['type'] == 'Short' and bb_pos > 0.7:
+                total_score += 4
+        
+        # === TREND ANALYSIS (Weight: 10) ===
+        trend_score = 0
+        current_price = last_row['close']
+        
+        # Multiple MA alignment
+        ma_periods = [7, 14, 21, 50]
+        aligned_mas = 0
+        
+        for period in ma_periods:
+            if f'ema_{period}' in df.columns and not pd.isna(last_row[f'ema_{period}']):
+                ma_val = last_row[f'ema_{period}']
+                if signal_data['type'] == 'Long' and current_price > ma_val:
+                    aligned_mas += 1
+                elif signal_data['type'] == 'Short' and current_price < ma_val:
+                    aligned_mas += 1
+        
+        trend_score = (aligned_mas / len(ma_periods)) * 10
+        total_score += trend_score
+        
+        # === ADX TREND STRENGTH (Weight: 6) ===
+        if 'adx' in df.columns and not pd.isna(last_row['adx']):
+            adx_val = last_row['adx']
+            if adx_val > 40: total_score += 6
+            elif adx_val > 25: total_score += 4
+            elif adx_val > 20: total_score += 2
+        
+        # === STOCHASTIC ANALYSIS (Weight: 6) ===
+        if all(col in df.columns for col in ['stoch_k', 'stoch_d']):
+            stoch_k = last_row.get('stoch_k')
+            stoch_d = last_row.get('stoch_d')
+            
+            if not pd.isna(stoch_k) and not pd.isna(stoch_d):
+                if signal_data['type'] == 'Long' and stoch_k < 20 and stoch_d < 20:
+                    total_score += 6
+                elif signal_data['type'] == 'Short' and stoch_k > 80 and stoch_d > 80:
+                    total_score += 6
+        
+        # === ORDER BOOK ANALYSIS (Weight: 8) ===
+        if order_book_data:
+            buy_pressure = order_book_data.get('buy_pressure', 0.5)
+            order_book_strength = order_book_data.get('order_book_strength', 0)
+            
+            if signal_data['type'] == 'Long' and buy_pressure > 0.6:
+                total_score += min(8, int(order_book_strength))
+            elif signal_data['type'] == 'Short' and buy_pressure < 0.4:
+                total_score += min(8, int(order_book_strength))
+        
+        # === CANDLESTICK PATTERNS (Weight: 5) ===
+        pattern_score = 0
+        patterns = ['hammer', 'doji', 'engulfing', 'morning_star', 'evening_star']
+        
+        for pattern in patterns:
+            if pattern in df.columns and not pd.isna(last_row[pattern]):
+                if last_row[pattern] != 0:
+                    if signal_data['type'] == 'Long' and pattern in ['hammer', 'morning_star', 'engulfing']:
+                        pattern_score += 2
+                    elif signal_data['type'] == 'Short' and pattern in ['evening_star', 'engulfing']:
+                        pattern_score += 2
+        
+        total_score += min(pattern_score, 5)
+        
+        # === MULTI-TIMEFRAME CONFIRMATION (Weight: 10) ===
+        mtf_score = 0
+        if '4h' in df_data and len(df_data['4h']) > 50:
+            df_4h = df_data['4h']
+            df_4h_last = df_4h.iloc[-1]
+            
+            # Check if 4h timeframe supports the signal
+            if 'rsi_14' in df_4h.columns and not pd.isna(df_4h_last['rsi_14']):
+                rsi_4h = df_4h_last['rsi_14']
+                if signal_data['type'] == 'Long' and rsi_4h < 50:
+                    mtf_score += 5
+                elif signal_data['type'] == 'Short' and rsi_4h > 50:
+                    mtf_score += 5
+            
+            if all(col in df_4h.columns for col in ['ema_21', 'ema_50']):
+                ema21_4h = df_4h_last['ema_21']
+                ema50_4h = df_4h_last['ema_50']
+                current_4h = df_4h_last['close']
+                
+                if not any(pd.isna(val) for val in [ema21_4h, ema50_4h]):
+                    if signal_data['type'] == 'Long' and ema21_4h > ema50_4h and current_4h > ema21_4h:
+                        mtf_score += 5
+                    elif signal_data['type'] == 'Short' and ema21_4h < ema50_4h and current_4h < ema21_4h:
+                        mtf_score += 5
+        
+        total_score += mtf_score
+        
+        # === VOLATILITY ANALYSIS (Weight: 5) ===
+        if 'atr_percent' in df.columns and not pd.isna(last_row['atr_percent']):
+            atr_pct = last_row['atr_percent']
+            # Higher volatility = higher potential but also higher risk
+            if 2 < atr_pct < 8:  # Optimal volatility range
+                total_score += 5
+            elif 1 < atr_pct < 10:
+                total_score += 3
+        
+        # === SUPPORT/RESISTANCE ANALYSIS (Weight: 6) ===
+        if 'support_level' in df.columns and 'resistance_level' in df.columns:
+            support_dist = last_row.get('support_distance', 0)
+            resistance_dist = last_row.get('resistance_distance', 0)
+            
+            if signal_data['type'] == 'Long' and 0 < support_dist < 3:  # Near support
+                total_score += 6
+            elif signal_data['type'] == 'Short' and 0 < resistance_dist < 3:  # Near resistance
+                total_score += 6
+        
+        # Normalize score to 1-100 scale
+        final_score = min(total_score, max_score)
+        
+        logger.info(f"Advanced signal strength for {symbol}: {final_score}/100")
+        return final_score
+        
+    except Exception as e:
+        logger.error(f"Error calculating advanced signal strength for {symbol}: {e}")
+        return 50
+
+def check_advanced_signals(df_data, symbol, order_book_data=None):
+    """Enhanced signal detection with multiple indicators and timeframes"""
+    if not df_data:
+        return None
+    
+    # Use 1h as primary timeframe
+    df = df_data.get('1h')
+    if df is None or len(df) < 100:
+        return None
+    
+    try:
+        last_row = df.iloc[-1]
+        prev_row = df.iloc[-2] if len(df) > 1 else last_row
+        
+        signals = []
+        
+        # === SIGNAL DETECTION METHODS ===
+        
+        # 1. RSI Multi-Period Divergence
+        rsi_signals = detect_rsi_signals(df, signal_type=None)
+        if rsi_signals:
+            signals.extend(rsi_signals)
+        
+        # 2. MACD Crossover with Volume Confirmation
+        macd_signals = detect_macd_signals(df, signal_type=None)
+        if macd_signals:
+            signals.extend(macd_signals)
+        
+        # 3. Bollinger Bands Squeeze and Breakout
+        bb_signals = detect_bollinger_signals(df)
+        if bb_signals:
+            signals.extend(bb_signals)
+        
+        # 4. Stochastic RSI Oversold/Overbought
+        stoch_rsi_signals = detect_stochastic_rsi_signals(df)
+        if stoch_rsi_signals:
