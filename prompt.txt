@@ -1,4 +1,5 @@
-# This file contains various functions for calculating technical indicators,
+file indicators.py :
+
 analyzing market data, and managing trading strategies.
 
 def safe_indicator_calculation(df, func, *args, **kwargs):
@@ -90,7 +91,25 @@ def ensemble_signal_scoring(signals_dict, weights=None):
 
 def adaptive_threshold_calculator(df, indicator_values, percentile_low=20, percentile_high=80):
 
+def calculate_market_microstructure(df, period=20):
+
+def calculate_support_resistance_levels(df, window=20, min_touches=3):
+
+def detect_dark_cloud_cover(df):
+
+def detect_piercing_line(df):
+
+def detect_harami_patterns(df):
+
+def calculate_vwap(df):
+
 def filter_false_signals(df, signal_data, min_volume_ratio=1.2, min_trend_strength=0.1):
+
+def calculate_market_structure_score(df, lookback=20):
+
+==
+
+file main.py :
 
 def calculate_indicators(df):
 
