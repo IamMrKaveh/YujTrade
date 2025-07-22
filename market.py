@@ -44,119 +44,162 @@ SYMBOLS = load_symbols()
 
 async def analyze_market():
     """تحلیل بازار و بازگرداندن بهترین سیگنال با اطلاعات تکمیلی"""
-    all_signals = []
-    successful_analyses = 0
-    failed_analyses = 0
-    
-    try:
-        # Check if SYMBOLS exists and is not empty
-        if not SYMBOLS or len(SYMBOLS) == 0:
-            logger.warning("No symbols available for analysis")
-            return []
-        
-        logger.info(f"Starting market analysis for {len(SYMBOLS)} symbols")
-        
-        # بررسی اتصال به صرافی
-        global exchange
-        if not exchange:
-            try:
-                exchange = init_exchange()
-                if not exchange:
-                    logger.error("Exchange initialization returned None")
-                    return []
-            except Exception as e:
-                logger.error(f"Failed to initialize exchange: {e}")
-                return []
-        
-        # پردازش نمادها به صورت دسته‌ای با مدیریت بهتر خطا
-        batch_size = min(3, len(SYMBOLS))  # Ensure batch_size doesn't exceed symbol count
-        total_batches = (len(SYMBOLS) - 1) // batch_size + 1
-        
-        for i in range(0, len(SYMBOLS), batch_size):
-            try:
-                batch_symbols = SYMBOLS[i:i+batch_size]
-                current_batch = i // batch_size + 1
-                logger.info(f"Processing batch {current_batch}/{total_batches}")
-                
-                # پردازش موازی در هر دسته
-                batch_tasks = []
-                for symbol in batch_symbols:
-                    if symbol:  # Ensure symbol is not None or empty
-                        batch_tasks.append(_analyze_single_symbol(symbol))
-                
-                if not batch_tasks:
-                    logger.warning(f"No valid symbols in batch {current_batch}")
-                    failed_analyses += len(batch_symbols)
-                    continue
-                
-                try:
-                    # اجرای موازی با timeout
-                    batch_results = await asyncio.wait_for(
-                        asyncio.gather(*batch_tasks, return_exceptions=True),
-                        timeout=300  # 5 دقیقه برای هر دسته
-                    )
-                    
-                    for j, result in enumerate(batch_results):
-                        if isinstance(result, Exception):
-                            failed_analyses += 1
-                            symbol_name = batch_symbols[j] if j < len(batch_symbols) else "Unknown"
-                            logger.error(f"Analysis error for {symbol_name}: {result}")
-                        elif result is not None and isinstance(result, dict):
-                            all_signals.append(result)
-                            successful_analyses += 1
-                        else:
-                            failed_analyses += 1
-                            
-                except asyncio.TimeoutError:
-                    logger.warning(f"Batch {current_batch} timed out")
-                    failed_analyses += len(batch_symbols)
-                except Exception as e:
-                    logger.error(f"Error processing batch {current_batch}: {e}")
-                    failed_analyses += len(batch_symbols)
-                
-                # تاخیر بین دسته‌ها برای رعایت محدودیت نرخ
-                if i + batch_size < len(SYMBOLS):
-                    await asyncio.sleep(3)
-                    
-            except Exception as e:
-                logger.error(f"Error in batch processing: {e}")
-                failed_analyses += len(batch_symbols) if 'batch_symbols' in locals() else batch_size
-                continue
-        
-        # فیلتر و مرتب‌سازی سیگنال‌های معتبر
-        try:
-            valid_signals = []
-            for sig in all_signals:
-                if _validate_signal(sig):
-                    valid_signals.append(sig)
-            
-            if not valid_signals:
-                logger.info("No valid signals found")
-                return []
-            
-            # مرتب‌سازی بر اساس امتیاز ترکیبی
-            valid_signals.sort(key=_calculate_combined_score, reverse=True)
-            best_signal = valid_signals[0]
-            
-            logger.info(f"Analysis complete. Success: {successful_analyses}, Failed: {failed_analyses}, "
-                        f"Valid signals: {len(valid_signals)}, Best signal: {best_signal.get('symbol', 'Unknown')} "
-                        f"(Score: {best_signal.get('accuracy_score', 0)})")
-            
-            return [best_signal]
-            
-        except Exception as e:
-            logger.error(f"Error in signal processing: {e}")
-            return []
-            
-    except Exception as e:
-        logger.error(f"Critical error in analyze_market: {e}")
+    if not _validate_symbols():
         return []
+    
+    if not _ensure_exchange_connection():
+        return []
+    
+    analysis_stats = {'successful': 0, 'failed': 0}
+    all_signals = await _process_all_symbols_in_batches(analysis_stats)
+    
+    return _process_and_return_best_signal(all_signals, analysis_stats)
+
+def _validate_symbols():
+    """بررسی وجود نمادها"""
+    if not SYMBOLS or len(SYMBOLS) == 0:
+        logger.warning("No symbols available for analysis")
+        return False
+    
+    logger.info(f"Starting market analysis for {len(SYMBOLS)} symbols")
+    return True
+
+def _ensure_exchange_connection():
+    """بررسی و تضمین اتصال به صرافی"""
+    global exchange
+    if not exchange:
+        try:
+            exchange = init_exchange()
+            if not exchange:
+                logger.error("Exchange initialization returned None")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to initialize exchange: {e}")
+            return False
+    return True
+
+async def _process_all_symbols_in_batches(analysis_stats):
+    """پردازش تمام نمادها به صورت دسته‌ای"""
+    all_signals = []
+    batch_size = min(3, len(SYMBOLS))
+    total_batches = (len(SYMBOLS) - 1) // batch_size + 1
+    
+    for i in range(0, len(SYMBOLS), batch_size):
+        try:
+            batch_symbols = SYMBOLS[i:i+batch_size]
+            current_batch = i // batch_size + 1
+            
+            batch_signals = await _process_single_batch(
+                batch_symbols, current_batch, total_batches, analysis_stats
+            )
+            all_signals.extend(batch_signals)
+            
+            # تاخیر بین دسته‌ها
+            if i + batch_size < len(SYMBOLS):
+                await asyncio.sleep(3)
+                
+        except Exception as e:
+            logger.error(f"Error in batch processing: {e}")
+            analysis_stats['failed'] += len(batch_symbols) if 'batch_symbols' in locals() else batch_size
+    
+    return all_signals
+
+async def _process_single_batch(batch_symbols, current_batch, total_batches, analysis_stats):
+    """پردازش یک دسته از نمادها"""
+    logger.info(f"Processing batch {current_batch}/{total_batches}")
+    
+    batch_tasks = _create_batch_tasks(batch_symbols)
+    if not batch_tasks:
+        logger.warning(f"No valid symbols in batch {current_batch}")
+        analysis_stats['failed'] += len(batch_symbols)
+        return []
+    
+    return await _execute_batch_analysis(batch_tasks, batch_symbols, current_batch, analysis_stats)
+
+def _create_batch_tasks(batch_symbols):
+    """ایجاد تسک‌های تحلیل برای دسته"""
+    batch_tasks = []
+    for symbol in batch_symbols:
+        if symbol:  # Ensure symbol is not None or empty
+            batch_tasks.append(_analyze_single_symbol(symbol))
+    return batch_tasks
+
+async def _execute_batch_analysis(batch_tasks, batch_symbols, current_batch, analysis_stats):
+    """اجرای تحلیل دسته‌ای با مدیریت خطا"""
+    try:
+        batch_results = await asyncio.wait_for(
+            asyncio.gather(*batch_tasks, return_exceptions=True),
+            timeout=300  # 5 دقیقه برای هر دسته
+        )
+        
+        return _process_batch_results(batch_results, batch_symbols, analysis_stats)
+        
+    except asyncio.TimeoutError:
+        logger.warning(f"Batch {current_batch} timed out")
+        analysis_stats['failed'] += len(batch_symbols)
+        return []
+    except Exception as e:
+        logger.error(f"Error processing batch {current_batch}: {e}")
+        analysis_stats['failed'] += len(batch_symbols)
+        return []
+
+def _process_batch_results(batch_results, batch_symbols, analysis_stats):
+    """پردازش نتایج دسته‌ای"""
+    signals = []
+    
+    for j, result in enumerate(batch_results):
+        if isinstance(result, Exception):
+            analysis_stats['failed'] += 1
+            symbol_name = batch_symbols[j] if j < len(batch_symbols) else "Unknown"
+            logger.error(f"Analysis error for {symbol_name}: {result}")
+        elif result is not None and isinstance(result, dict):
+            signals.append(result)
+            analysis_stats['successful'] += 1
+        else:
+            analysis_stats['failed'] += 1
+    
+    return signals
+
+def _process_and_return_best_signal(all_signals, analysis_stats):
+    """پردازش و بازگرداندن بهترین سیگنال"""
+    try:
+        valid_signals = [sig for sig in all_signals if _validate_signal(sig)]
+        
+        if not valid_signals:
+            _log_no_valid_signals(all_signals)
+            return []
+        
+        # مرتب‌سازی و انتخاب بهترین
+        valid_signals.sort(key=_calculate_combined_score, reverse=True)
+        best_signal = valid_signals[0]
+        
+        _log_analysis_complete(analysis_stats, valid_signals, best_signal)
+        return [best_signal]
+        
+    except Exception as e:
+        logger.error(f"Error in signal processing: {e}")
+        return []
+
+def _log_no_valid_signals(all_signals):
+    """لاگ کردن اطلاعات در صورت نبود سیگنال معتبر"""
+    logger.info(f"No valid signals found from {len(all_signals)} analyzed signals")
+    if all_signals:
+        scores = [sig.get('accuracy_score', 0) for sig in all_signals if sig.get('accuracy_score')]
+        if scores:
+            logger.info(f"Signal scores range: {min(scores):.1f} - {max(scores):.1f}, Average: {sum(scores)/len(scores):.1f}")
+
+def _log_analysis_complete(analysis_stats, valid_signals, best_signal):
+    """لاگ کردن تکمیل تحلیل"""
+    logger.info(f"Analysis complete. Success: {analysis_stats['successful']}, Failed: {analysis_stats['failed']}, "
+                f"Valid signals: {len(valid_signals)}, Best signal: {best_signal.get('symbol', 'Unknown')} "
+                f"(Score: {best_signal.get('accuracy_score', 0)})")
 
 async def _analyze_single_symbol(symbol):
     """تحلیل یک نماد منفرد با مدیریت کامل خطا"""
     try:
         # تاخیر تصادفی برای جلوگیری از همزمانی درخواست‌ها
-        await asyncio.sleep(np.random.uniform(0.5, 2.0))
+        rng = np.random.default_rng(999999)
+        await asyncio.sleep(rng.uniform(0.5, 2.0))
         
         logger.debug(f"Analyzing {symbol}...")
         
@@ -183,8 +226,8 @@ async def _analyze_single_symbol(symbol):
             logger.warning(f"Failed to get current price for {symbol}")
             return None
         
-        # محاسبه امتیاز دقت
-        accuracy_score = calculate_signal_accuracy_score(df, signal_data, symbol)
+        # محاسبه امتیاز دقت از signal_data
+        accuracy_score = signal_data.get('accuracy_score', 0)
         
         # فیلتر امتیاز حداقلی
         if accuracy_score < 45:  # افزایش حداقل امتیاز
@@ -197,7 +240,7 @@ async def _analyze_single_symbol(symbol):
         )
         
         logger.info(f"Valid signal found for {symbol}: {enhanced_signal['type']} "
-                   f"(Score: {accuracy_score})")
+                    f"(Score: {accuracy_score})")
         
         return enhanced_signal
         
@@ -362,38 +405,48 @@ def _validate_signal(signal):
     if not signal or not isinstance(signal, dict):
         return False
     
+    if not _validate_required_fields(signal):
+        return False
+    
+    if not _validate_price_logic(signal):
+        return False
+    
+    return signal['accuracy_score'] >= 45
+
+def _validate_required_fields(signal):
+    """بررسی وجود و صحت فیلدهای ضروری"""
     required_fields = ['symbol', 'type', 'entry', 'target', 'stop_loss', 'accuracy_score']
     
     for field in required_fields:
         if field not in signal:
             return False
         
-        # بررسی مقادیر عددی
-        if field in ['entry', 'target', 'stop_loss', 'accuracy_score']:
-            try:
-                value = float(signal[field])
-                if not (value > 0 and np.isfinite(value)):
-                    return False
-            except (ValueError, TypeError):
-                return False
+        if not _validate_numeric_field(signal, field):
+            return False
     
-    # بررسی منطقی قیمت‌ها
+    return True
+
+def _validate_numeric_field(signal, field):
+    """بررسی صحت فیلدهای عددی"""
+    if field not in ['entry', 'target', 'stop_loss', 'accuracy_score']:
+        return True
+    
+    try:
+        value = float(signal[field])
+        return value > 0 and np.isfinite(value)
+    except (ValueError, TypeError):
+        return False
+
+def _validate_price_logic(signal):
+    """بررسی منطقی قیمت‌ها"""
     entry = signal['entry']
     target = signal['target']
     stop_loss = signal['stop_loss']
     
     if signal['type'] == 'Long':
-        if not (target > entry > stop_loss):
-            return False
+        return target > entry > stop_loss
     else:  # Short
-        if not (stop_loss > entry > target):
-            return False
-    
-    # بررسی امتیاز دقت
-    if signal['accuracy_score'] < 45:
-        return False
-    
-    return True
+        return target < entry < stop_loss
 
 def _calculate_combined_score(signal):
     """محاسبه امتیاز ترکیبی برای مرتب‌سازی"""

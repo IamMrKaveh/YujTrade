@@ -6,6 +6,7 @@ from datetime import datetime
 from telegram import Update
 from telegram.ext import ContextTypes
 from market import analyze_market
+import sys
 
 # Suppress warnings
 warnings.filterwarnings('ignore', category=UserWarning)
@@ -33,6 +34,7 @@ OVER_BUY = "🔴 (خرید بیش از حد)"
 
 OVER_SELL = "🟢 (فروش بیش از حد)"
 
+BALANCED = "🟡 (متعادل)"
 NATURAL_ZONE = "🟡 (محدوده طبیعی)"
 
 ASCENDING = "⬆️ (صعودی)"
@@ -52,7 +54,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         # تنظیم timeout برای کل تحلیل
         try:
-            signals = await asyncio.wait_for(analyze_market(), timeout=1800)  # حداکثر 30 دقیقه
+            # Check if analyze_market is async or sync
+            result = analyze_market()
+            if asyncio.iscoroutine(result):
+                signals = await asyncio.wait_for(result, timeout=1800)  # حداکثر 30 دقیقه
+            else:
+                signals = result
         except asyncio.TimeoutError:
             await update.message.reply_text(
                 "⏱️ تحلیل بیش از حد زمان برد. لطفا دوباره تلاش کنید."
@@ -93,7 +100,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             elif sig['rsi'] > 70:
                 message += OVER_BUY
             else:
-                message += "🟡 (متعادل)"
+                message += BALANCED
             message += "\n"
             
             message += f"• MACD: `{sig['macd']:.6f}` "
@@ -111,7 +118,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 elif sig['stoch_k'] > 80:
                     message += OVER_BUY
                 else:
-                    message += "🟡 (متعادل)"
+                    message += BALANCED
                 message += "\n"
             
             if 'mfi' in sig:
@@ -121,7 +128,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 elif sig['mfi'] > 80:
                     message += "🔴 (جریان پول ورودی قوی)"
                 else:
-                    message += "🟡 (متعادل)"
+                    message += BALANCED
                 message += "\n"
             
             if 'cci' in sig:
@@ -141,7 +148,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 elif sig['williams_r'] > -20:
                     message += OVER_BUY
                 else:
-                    message += "🟡 (متعادل)"
+                    message += BALANCED
                 message += "\n"
             
             if 'volume_ratio' in sig:
@@ -181,12 +188,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 message += f"• برتری: {sig['buy_score'] - sig['sell_score']:+d} به نفع {'خرید' if sig['buy_score'] > sig['sell_score'] else 'فروش'}\n"
             
             message += f"\n⏰ زمان تولید سیگنال: `{sig['timestamp']}`\n"
-            
-            # اضافه کردن هشدار ریسک
-            message += "\n⚠️ **مدیریت ریسک:**\n"
-            message += f"• نسبت سود به ضرر: {profit_pct/loss_pct:.1f}:1\n"
-            message += f"• احتمال موفقیت: {sig['accuracy_score']}%\n"
-            message += "• ریسک توصیه شده: حداکثر 2-3% از سرمایه\n"
             
         else:
             message = (

@@ -1,0 +1,163 @@
+# ===== بهبودهای کارایی =====
+
+# ===== بهبود دقت سیگنال‌ها =====
+
+def multi_timeframe_confirmation(df_1h, df_4h, df_1d, signal_type):
+    """تایید سیگنال در چندین تایم فریم"""
+    confirmations = 0
+    
+    # بررسی هر تایم فریم
+    for df in [df_1h, df_4h, df_1d]:
+        if df is not None and len(df) > 20:
+            trend = calculate_trend_strength(df)
+            if trend and trend['direction'] == signal_type:
+                confirmations += 1
+    
+    return confirmations >= 2  # حداقل 2 تایم فریم تایید کند
+
+def smart_volume_filter(df, signal_strength, period=20):
+    """فیلتر هوشمند حجم بر اساس قدرت سیگنال"""
+    if 'volume' not in df.columns or len(df) < period:
+        return True
+    
+    current_volume = df['volume'].iloc[-1]
+    avg_volume = df['volume'].rolling(period).mean().iloc[-1]
+    
+    # حجم مورد نیاز بر اساس قدرت سیگنال
+    required_ratio = 1.0 + (signal_strength / 100) * 0.5
+    
+    return current_volume >= (avg_volume * required_ratio)
+
+# ===== مدیریت ریسک پیشرفته =====
+
+def kelly_criterion_position_sizing(win_rate, avg_win, avg_loss, capital):
+    """محاسبه اندازه پوزیشن با معیار کلی"""
+    if avg_loss == 0:
+        return 0
+    
+    win_loss_ratio = avg_win / avg_loss
+    kelly_percentage = (win_rate * win_loss_ratio - (1 - win_rate)) / win_loss_ratio
+    
+    # محدود کردن به حداکثر 25% سرمایه
+    return min(max(kelly_percentage * capital, 0), capital * 0.25)
+
+def portfolio_heat_check(open_positions, max_portfolio_risk=0.15):
+    """بررسی گرمای کل پرتفولیو"""
+    total_risk = sum(pos['risk_amount'] for pos in open_positions)
+    return total_risk <= max_portfolio_risk
+
+# ===== Machine Learning Features =====
+
+def extract_features_for_ml(df, lookback=30):
+    """استخراج ویژگی برای مدل‌های یادگیری ماشین"""
+    features = {}
+    
+    if len(df) < lookback:
+        return None
+    
+    # ویژگی‌های قیمت
+    close = df['close']
+    features['price_change_pct'] = close.pct_change(5).iloc[-1]
+    features['volatility'] = close.rolling(10).std().iloc[-1]
+    
+    # ویژگی‌های تکنیکال
+    rsi = calculate_rsi(df, 14)
+    if rsi is not None:
+        features['rsi'] = rsi.iloc[-1]
+    
+    macd_data = calculate_macd(df)
+    if macd_data:
+        features['macd_signal'] = 1 if macd_data['macd'].iloc[-1] > macd_data['signal'].iloc[-1] else 0
+    
+    # ویژگی‌های حجم
+    if 'volume' in df.columns:
+        volume_sma = df['volume'].rolling(20).mean()
+        features['volume_ratio'] = df['volume'].iloc[-1] / volume_sma.iloc[-1]
+    
+    return features
+
+# ===== Backtesting Engine =====
+
+def performance_metrics(trades_history):
+    """محاسبه معیارهای عملکرد"""
+    if not trades_history:
+        return None
+    
+    returns = [trade['return_pct'] for trade in trades_history]
+    
+    win_rate = len([r for r in returns if r > 0]) / len(returns)
+    avg_win = np.mean([r for r in returns if r > 0]) if any(r > 0 for r in returns) else 0
+    avg_loss = np.mean([r for r in returns if r < 0]) if any(r < 0 for r in returns) else 0
+    
+    profit_factor = abs(sum([r for r in returns if r > 0]) / sum([r for r in returns if r < 0])) if any(r < 0 for r in returns) else float('inf')
+    
+    max_drawdown = calculate_max_drawdown(returns)
+    sharpe_ratio = np.mean(returns) / np.std(returns) if np.std(returns) != 0 else 0
+    
+    return {
+        'win_rate': win_rate,
+        'avg_win': avg_win,
+        'avg_loss': avg_loss,
+        'profit_factor': profit_factor,
+        'max_drawdown': max_drawdown,
+        'sharpe_ratio': sharpe_ratio,
+        'total_trades': len(trades_history)
+    }
+
+def calculate_max_drawdown(returns):
+    """محاسبه حداکثر افت"""
+    cumulative = np.cumprod(1 + np.array(returns))
+    running_max = np.maximum.accumulate(cumulative)
+    drawdown = (cumulative - running_max) / running_max
+    return abs(min(drawdown))
+
+# ===== Real-time Monitoring =====
+
+def real_time_risk_monitor(current_positions, market_data):
+    """نظارت لحظه‌ای بر ریسک"""
+    alerts = []
+    
+    for position in current_positions:
+        # بررسی حد ضرر
+        if position['type'] == 'long':
+            current_loss = (position['entry_price'] - market_data['price']) / position['entry_price']
+            if current_loss > 0.05:  # 5% ضرر
+                alerts.append(f"Position {position['symbol']} approaching stop loss")
+        
+        # بررسی نوسانات غیرطبیعی
+        if market_data.get('volatility', 0) > 0.1:  # 10% نوسان
+            alerts.append(f"High volatility detected in {position['symbol']}")
+    
+    return alerts
+
+# ===== Memory Management =====
+
+def optimize_dataframe_memory(df):
+    """بهینه‌سازی حافظه DataFrame"""
+    for col in df.columns:
+        if df[col].dtype == 'float64':
+            df[col] = df[col].astype('float32')
+        elif df[col].dtype == 'int64':
+            df[col] = df[col].astype('int32')
+    return df
+
+# ===== Configuration =====
+
+CONFIG = {
+    'risk_management': {
+        'max_position_size': 0.1,  # 10% سرمایه
+        'max_portfolio_risk': 0.15,  # 15% کل پرتفولیو
+        'stop_loss_atr_multiplier': 2.0,
+        'min_risk_reward_ratio': 1.5
+    },
+    'signal_filters': {
+        'min_volume_ratio': 1.2,
+        'min_trend_strength': 0.1,
+        'require_multi_timeframe': True
+    },
+    'performance': {
+        'use_caching': True,
+        'optimize_memory': True,
+        'max_cache_size': 128
+    }
+}
