@@ -1,41 +1,9 @@
-import os
-import logging
-import asyncio
-import warnings
-import sys
-from datetime import datetime
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler
-import numpy as np
-from indicators import *
-from exchanges import *
-from telegrams import *
-from market import *
+
+from imports import logger, BOT_TOKEN, SYMBOLS, start, status, show_symbols, help_command, close_exchange, asyncio, warnings, ApplicationBuilder, CommandHandler
+
 # Suppress warnings
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
-
-# Fix numpy compatibility issue
-if not hasattr(np, 'NaN'):
-    np.NaN = np.nan
-
-# Now import pandas_ta after fixing numpy
-try:
-    import pandas_ta as ta
-except ImportError as e:
-    print(f"Error importing pandas_ta: {e}")
-    print("Please install with: pip install pandas-ta==0.3.14b")
-    sys.exit(1)
-
-# Configure logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# Telegram bot token
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'token')
 
 
 def main() -> None:
@@ -82,8 +50,10 @@ def main() -> None:
         # Cleanup
         try:
             asyncio.run(close_exchange())
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error closing exchange: {e}")
+            print(f"Error closing exchange: {e}")
+        logger.info("Bot shutdown complete")
 
 if __name__ == '__main__':
     main()
