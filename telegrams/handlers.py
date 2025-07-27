@@ -1,9 +1,14 @@
+import asyncio
+from telegram import Update
+from telegram.ext import ContextTypes
+
 from exchange.exchange_config import SYMBOLS
-from imports import logger, Update, asyncio, ContextTypes
-from .message_builder import _build_status_message, _send_error_message, _send_status_message
-from .system_info import _get_system_info, _test_exchange_connection
+from logger_config import logger
+from market.main import analyze_market
 from .background import _background_analysis
 from .constants import ERROR_MESSAGE, WAIT_MESSAGE
+from .message_builder import _build_signal_message, _build_status_message, _send_error_message, _send_status_message
+from .system_info import _get_system_info, _test_exchange_connection
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """مدیریت دستور /start با ارائه بهترین سیگنال"""

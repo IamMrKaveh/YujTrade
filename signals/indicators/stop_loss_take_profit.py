@@ -1,6 +1,6 @@
-from signals.indicators.cache_utils import _cached_indicator_calculation
-from signals.indicators.support_resistance import _find_nearest_support, _find_nearest_resistance
-from signals.indicators.volatility_indicators import _calculate_atr
+from .cache_utils import _cached_indicator_calculation
+from .support_resistance import _find_nearest_support, _find_nearest_resistance
+from .volatility_indicators import _calculate_atr
 
 def _get_default_stops(entry_price, position_type):
     """Get default stop loss and take profit values"""

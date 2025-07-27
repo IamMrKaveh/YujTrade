@@ -1,5 +1,5 @@
-from imports import np
-from signals.indicators.volume_indicators import _check_volume_filter
+import numpy as np
+from .volume_indicators import _check_volume_filter
 
 def _ensemble_signal_scoring(signals_dict, weights=None):
     """ترکیب چندین سیگنال با وزن‌دهی"""

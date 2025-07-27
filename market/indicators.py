@@ -1,4 +1,5 @@
-from imports import logger, pd
+from logger_config import logger
+import pandas as pd
 
 def _add_additional_indicators(signal, last_row, df):
     """اضافه کردن شاخص‌های اضافی به صورت ایمن"""

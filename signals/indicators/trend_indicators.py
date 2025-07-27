@@ -1,7 +1,10 @@
-from imports import jit, logger, pd, np
-from signals.indicators.moving_averages import _fast_ema
-from signals.indicators.volatility_indicators import _calculate_average_true_range
-from signals.indicators.cache_utils import _cached_indicator_calculation
+from logger_config import logger
+from numba import jit
+import numpy as np
+import pandas as pd
+from .moving_averages import _fast_ema
+from .volatility_indicators import _calculate_average_true_range
+from .cache_utils import _cached_indicator_calculation
 
 
 @jit(nopython=True)

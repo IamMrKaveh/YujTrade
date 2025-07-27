@@ -1,3 +1,4 @@
+from logger_config import logger
 import pandas as pd
 
 def _calculate_rsi_strength(last_row, signal_type):
@@ -29,7 +30,8 @@ def _calculate_volume_strength(last_row):
             return 2
         elif ratio > 1.5:
             return 1
-    except:
+    except Exception as e:
+        logger.error(f"Error calculating volume strength: {e}")
         return 0
     return 0
 

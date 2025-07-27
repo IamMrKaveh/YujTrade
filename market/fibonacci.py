@@ -1,4 +1,5 @@
-from imports import pd, logger
+from logger_config import logger
+import pandas as pd
 
 def _get_nearby_fibonacci_levels(df, current_price):
     """دریافت سطوح فیبوناچی نزدیک"""

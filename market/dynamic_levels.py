@@ -1,4 +1,4 @@
-from imports import logger
+from logger_config import logger
 
 def _calculate_dynamic_levels_long(entry_price, volatility_data, symbol):
     """محاسبه سطوح داینامیک برای موقعیت Long"""

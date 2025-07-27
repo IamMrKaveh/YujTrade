@@ -1,7 +1,26 @@
+import asyncio
+import sys
+import warnings
+import numpy as np
+from telegram.ext import ApplicationBuilder, CommandHandler
+from sklearn import logger
 
-from imports import logger, BOT_TOKEN, SYMBOLS, start, status, show_symbols, help_command, close_exchange, asyncio, warnings, ApplicationBuilder, CommandHandler
+from exchange.exchange_config import SYMBOLS, close_exchange
+from telegrams.constants import BOT_TOKEN
+from telegrams.handlers import help_command, show_symbols, start, status
 
-# Suppress warnings
+if not hasattr(np, 'NaN'):
+    np.NaN = np.nan
+
+# Now import pandas_ta after fixing numpy
+try:
+    import pandas_ta as ta
+except ImportError as e:
+    print(f"Error importing pandas_ta: {e}")
+    print("Please install with: pip install pandas-ta")
+    sys.exit(1)
+
+
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
 

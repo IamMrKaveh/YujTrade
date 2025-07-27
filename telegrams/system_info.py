@@ -1,5 +1,9 @@
+import asyncio
+from datetime import datetime
+import sys
 from exchange.exchange_config import SYMBOLS, init_exchange
-from imports import logger, asyncio, datetime, sys
+from logger_config import logger
+
 
 async def _test_exchange_connection():
     """Test exchange connection and return status and error"""

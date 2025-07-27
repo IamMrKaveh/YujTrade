@@ -1,4 +1,6 @@
-from imports import ccxt, os, logger
+import os
+import ccxt.async_support as ccxt
+from logger_config import logger
 
 exchange = None
 

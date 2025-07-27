@@ -1,4 +1,4 @@
-from imports import logger
+from logger_config import logger
 
 def _adaptive_position_sizing(capital, risk_percent, entry_price, stop_loss, market_conditions=None):
     """محاسبه اندازه پوزیشن تطبیقی"""

@@ -1,6 +1,20 @@
+from logger_config import logger
+import hashlib
 
+NUMBA_AVAILABLE = True
 
-from imports import logger, NUMBA_AVAILABLE, jit, np, pd, hashlib
+try:
+    from numba import jit
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    logger.warning("Numba not available. Using standard calculations.")
+    
+    # Define dummy jit decorator if numba is not available
+    def jit():
+        def decorator(func):
+            return func
+        return decorator
 
 
 # Cache for storing calculated indicators

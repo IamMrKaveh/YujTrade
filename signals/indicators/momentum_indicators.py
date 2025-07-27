@@ -1,6 +1,22 @@
-from imports import NUMBA_AVAILABLE, pd, jit, np, ta
-from signals.indicators.moving_averages import _cached_indicator_calculation
+import sys
+from numba import jit
+import numpy as np
+import pandas as pd
 from logger_config import logger
+from .cache_utils import NUMBA_AVAILABLE
+from .moving_averages import _cached_indicator_calculation
+
+# Fix numpy compatibility issue
+if not hasattr(np, 'NaN'):
+    np.NaN = np.nan
+
+# Now import pandas_ta after fixing numpy
+try:
+    import pandas_ta as ta
+except ImportError as e:
+    print(f"Error importing pandas_ta: {e}")
+    print("Please install with: pip install pandas-ta==0.3.14b")
+    sys.exit(1)
 
 @jit(nopython=True)
 def _fast_rsi_calculation(prices, period):

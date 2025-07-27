@@ -1,4 +1,4 @@
-from imports import pd
+import pandas as pd
 
 def _calculate_correlation_with_btc(df, btc_df, period=20):
     """محاسبه همبستگی با بیت کوین"""

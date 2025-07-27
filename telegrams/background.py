@@ -1,8 +1,9 @@
-from imports import logger, Update, asyncio
+import asyncio
+from telegram import Update
+from logger_config import logger
 from market.main import analyze_market
-from .constants import NO_SIGNAL_FOUND, WAIT_TOO_LONG_MESSAGE, ERROR_MESSAGE
+from .constants import ERROR_MESSAGE, NO_SIGNAL_FOUND, WAIT_TOO_LONG_MESSAGE
 from .message_builder import _build_signal_message
-
 
 async def _background_analysis(update: Update, user_id: int, username: str) -> None:
     """Run market analysis in background and send results"""

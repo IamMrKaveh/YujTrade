@@ -1,4 +1,11 @@
-from imports import logger, np, pd
+import sys
+from logger_config import logger
+import numpy as np
+import pandas as pd
+
+# Fix numpy compatibility issue
+if not hasattr(np, 'NaN'):
+    np.NaN = np.nan
 
 def _calculate_trend_direction(df):
     """محاسبه جهت ترند"""

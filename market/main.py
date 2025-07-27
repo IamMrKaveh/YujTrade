@@ -1,6 +1,9 @@
-from imports import logger, SYMBOLS, init_exchange
-from batch_processing import _process_all_symbols_in_batches
-from signal_processing import _process_and_return_best_signal
+from exchange.exchange_config import SYMBOLS, init_exchange
+from logger_config import logger
+from market.batch_processing import _process_all_symbols_in_batches
+from market.signal_processing import _process_and_return_best_signal
+
+
 
 exchange = None
 

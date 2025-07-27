@@ -1,6 +1,7 @@
-import pandas as pd
 from logger_config import logger
-from .accuracy import calculate_signal_accuracy_score
+import pandas as pd
+
+from signals.accuracy import calculate_signal_accuracy_score
 
 def _create_signal_result(signal_results, last_row, rsi_value, df=None, symbol=None):
     buy_signals = signal_results['buy_signals']
@@ -66,13 +67,13 @@ def check_signals(df, symbol):
             'pattern_signals': 0
         }
 
-        _analyze_rsi(last_row, signal_results)
-        _analyze_macd(df, last_row, prev_row, signal_results)
-        _analyze_bollinger_bands(df, last_row, current_price, signal_results)
-        _analyze_oscillators(df, last_row, signal_results)
-        _analyze_trend_indicators(df, last_row, prev_row, current_price, signal_results)
-        _analyze_patterns(df, last_row, signal_results)
-        _analyze_support_resistance(df, last_row, current_price, signal_results)
+        # _analyze_rsi(last_row, signal_results)
+        # _analyze_macd(df, last_row, prev_row, signal_results)
+        # _analyze_bollinger_bands(df, last_row, current_price, signal_results)
+        # _analyze_oscillators(df, last_row, signal_results)
+        # _analyze_trend_indicators(df, last_row, prev_row, current_price, signal_results)
+        # _analyze_patterns(df, last_row, signal_results)
+        # _analyze_support_resistance(df, last_row, current_price, signal_results)
 
         return _create_signal_result(signal_results, last_row, rsi_value, df, symbol)
 

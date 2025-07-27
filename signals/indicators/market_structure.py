@@ -1,6 +1,8 @@
-from imports import logger, pd, np
-from signals.indicators.support_resistance import _find_swing_points, _get_recent_high, _get_recent_low
-from signals.indicators.cache_utils import _cached_indicator_calculation
+from logger_config import logger
+import numpy as np
+import pandas as pd
+from .support_resistance import _find_swing_points, _get_recent_high, _get_recent_low
+from .cache_utils import _cached_indicator_calculation
 
 def _detect_breaks(structure_breaks, current_price, swing_highs, swing_lows):
     """Detect bullish and bearish breaks"""

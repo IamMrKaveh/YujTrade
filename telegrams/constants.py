@@ -1,5 +1,5 @@
 # Telegram bot token
-from imports import os
+import os
 
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'token')
 
@@ -33,7 +33,7 @@ NO_TREND = "⚪️ (بدون جهت)"
 
 NEAR_FIBONACCI_LEVELS = "\n🎯 **سطوح فیبوناچی نزدیک:**\n"
 
-SIGNNAL_POINTS = "\n🎯 **امتیاز سیگنال‌ها:**\n"
+SIGNAL_POINTS = "\n🎯 **امتیاز سیگنال‌ها:**\n"
 
 NO_SIGNAL_FOUND = "❌ متأسفانه در حال حاضر هیچ سیگنال معاملاتی با دقت بالا یافت نشد.\n\n" + \
                 "🔍 **دلایل احتمالی:**\n" + \

@@ -1,5 +1,7 @@
+import asyncio
+import ccxt.async_support as ccxt
 from exchange.exchange_config import _validate_symbol_format, init_exchange
-from imports import ccxt, logger, asyncio
+from logger_config import logger
 
 async def get_current_price(symbol):
     """Fetch current price with improved error handling"""

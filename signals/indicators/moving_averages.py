@@ -1,6 +1,8 @@
-from imports import NUMBA_AVAILABLE, jit, np, pd
-from signals.indicators.cache_utils import _cached_indicator_calculation
+from numba import jit
+import numpy as np
+import pandas as pd
 from logger_config import logger
+from .cache_utils import _cached_indicator_calculation, NUMBA_AVAILABLE
 
 @jit(nopython=True)
 def _fast_sma(prices, period):

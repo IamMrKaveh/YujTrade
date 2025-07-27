@@ -1,4 +1,8 @@
-from imports import SYMBOLS, logger, asyncio
+
+import asyncio
+from exchange.exchange_config import SYMBOLS
+from logger_config import logger
+from market.single_symbol_analysis import _analyze_single_symbol
 
 async def _process_all_symbols_in_batches(analysis_stats):
     """پردازش تمام نمادها به صورت دسته‌ای"""

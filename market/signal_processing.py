@@ -1,4 +1,12 @@
-from imports import logger, np
+from logger_config import logger
+from market.scoring import _calculate_combined_score
+
+import numpy as np
+
+# Fix numpy compatibility issue
+if not hasattr(np, 'NaN'):
+    np.NaN = np.nan
+
 
 
 def _process_and_return_best_signal(all_signals, analysis_stats):

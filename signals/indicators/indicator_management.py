@@ -1,14 +1,31 @@
-from imports import logger, pd, np, ta
-from signals.indicators.candlestick_patterns import _detect_dark_cloud_cover, _detect_engulfing_patterns, _detect_hammer_doji_patterns, _detect_harami_patterns, _detect_piercing_line, _detect_star_patterns
-from signals.indicators.correlation import _calculate_correlation_with_btc
-from signals.indicators.fibonacci import _calculate_fibonacci_levels
-from signals.indicators.market_structure import _calculate_market_microstructure, _calculate_market_structure_score, _detect_market_regime, _detect_market_structure_breaks
-from signals.indicators.momentum_indicators import _calculate_awesome_oscillator, _calculate_commodity_channel_index, _calculate_dpo, _calculate_money_flow_index, _calculate_rate_of_change, _calculate_trix, _calculate_ultimate_oscillator, _calculate_williams_r
-from signals.indicators.moving_averages import _calculate_kama
-from signals.indicators.support_resistance import _calculate_pivot_points, _calculate_support_resistance, _calculate_support_resistance_levels
-from signals.indicators.trend_indicators import _calculate_adx, _calculate_aroon_oscillator, _calculate_donchian_channels, _calculate_ichimoku, _calculate_keltner_channels, _calculate_parabolic_sar, _calculate_supertrend
-from signals.indicators.volatility_indicators import _calculate_average_true_range, _calculate_standard_deviation
-from signals.indicators.volume_indicators import _calculate_accumulation_distribution, _calculate_ad_line, _calculate_chaikin_money_flow, _calculate_ease_of_movement, _calculate_obv, _calculate_volume_price_trend, _calculate_vwap
+import sys
+from logger_config import logger
+import numpy as np
+import pandas as pd
+
+# Fix numpy compatibility issue
+if not hasattr(np, 'NaN'):
+    np.NaN = np.nan
+
+# Now import pandas_ta after fixing numpy
+try:
+    import pandas_ta as ta
+except ImportError as e:
+    print(f"Error importing pandas_ta: {e}")
+    print("Please install with: pip install pandas-ta==0.3.14b")
+    sys.exit(1)
+
+
+from .candlestick_patterns import _detect_dark_cloud_cover, _detect_engulfing_patterns, _detect_hammer_doji_patterns, _detect_harami_patterns, _detect_piercing_line, _detect_star_patterns
+from .correlation import _calculate_correlation_with_btc
+from .fibonacci import _calculate_fibonacci_levels
+from .market_structure import _calculate_market_microstructure, _calculate_market_structure_score, _detect_market_regime, _detect_market_structure_breaks
+from .momentum_indicators import _calculate_awesome_oscillator, _calculate_commodity_channel_index, _calculate_dpo, _calculate_money_flow_index, _calculate_rate_of_change, _calculate_trix, _calculate_ultimate_oscillator, _calculate_williams_r
+from .moving_averages import _calculate_kama
+from .support_resistance import _calculate_pivot_points, _calculate_support_resistance, _calculate_support_resistance_levels
+from .trend_indicators import _calculate_adx, _calculate_aroon_oscillator, _calculate_donchian_channels, _calculate_ichimoku, _calculate_keltner_channels, _calculate_parabolic_sar, _calculate_supertrend
+from .volatility_indicators import _calculate_average_true_range, _calculate_standard_deviation
+from .volume_indicators import _calculate_accumulation_distribution, _calculate_ad_line, _calculate_chaikin_money_flow, _calculate_ease_of_movement, _calculate_obv, _calculate_volume_price_trend, _calculate_vwap
 
 
 

@@ -1,10 +1,9 @@
-from imports import logger
-from .indicators_status import (_get_cci_status, _get_mfi_status, _get_rsi_status,
-                                _get_stoch_status, _get_trend_status, _get_volume_status,
-                                _get_williams_status)
-from .constants import (BEST_OPPORTUNITY_MESSAGE, TECHNICAL_ANALYZE, 
-                        NEAR_FIBONACCI_LEVELS, SIGNNAL_POINTS,
-                        DESCENDING, ASCENDING)
+from logger_config import logger
+from telegrams.constants import ASCENDING, BEST_OPPORTUNITY_MESSAGE, DESCENDING, NEAR_FIBONACCI_LEVELS, SIGNAL_POINTS, TECHNICAL_ANALYZE
+from telegrams.indicators_status import (_get_cci_status, 
+                                        _get_mfi_status, _get_rsi_status,
+                                        _get_stoch_status, _get_trend_status,
+                                        _get_volume_status, _get_williams_status)
 
 def _build_signal_message(sig):
     """Build complete signal message"""
@@ -73,7 +72,7 @@ def _add_additional_info(message, sig):
             message += f"• {level}\n"
     
     if 'buy_score' in sig and 'sell_score' in sig:
-        message += SIGNNAL_POINTS
+        message += SIGNAL_POINTS
         message += f"• امتیاز خرید: `{sig['buy_score']}`\n"
         message += f"• امتیاز فروش: `{sig['sell_score']}`\n"
         score_diff = sig['buy_score'] - sig['sell_score']

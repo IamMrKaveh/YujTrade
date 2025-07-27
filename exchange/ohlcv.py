@@ -1,6 +1,10 @@
+import asyncio
+
+import ccxt.async_support as ccxt
+import pandas as pd
 from exchange.exchange_config import _validate_symbol_format, init_exchange
 from exchange.timeframes import _get_optimal_limit, _validate_timeframe
-from imports import logger, ccxt, asyncio, pd
+from logger_config import logger
 
 async def get_klines(symbol, interval='1h', limit=None):
     """

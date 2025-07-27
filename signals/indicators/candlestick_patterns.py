@@ -1,5 +1,6 @@
-from imports import jit, logger, pd, np
-from signals.indicators.cache_utils import _cached_indicator_calculation
+from logger_config import logger
+import pandas as pd
+from .cache_utils import _cached_indicator_calculation
 
 def _detect_hammer_doji_patterns_internal(df):
     """Internal function for detecting Hammer and Doji patterns"""

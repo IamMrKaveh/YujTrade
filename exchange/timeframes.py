@@ -1,4 +1,4 @@
-from imports import logger
+from logger_config import logger
 
 AVAILABLE_TIMEFRAMES = {
     '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m',

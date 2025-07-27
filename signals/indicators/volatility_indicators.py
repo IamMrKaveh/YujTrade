@@ -1,6 +1,9 @@
-from imports import NUMBA_AVAILABLE, jit, np, pd, logger
-from signals.indicators.moving_averages import _fast_sma
-from signals.indicators.cache_utils import _cached_indicator_calculation
+from logger_config import logger
+from numba import jit
+import numpy as np
+import pandas as pd
+from .moving_averages import _fast_sma
+from .cache_utils import _cached_indicator_calculation, NUMBA_AVAILABLE
 
 @jit(nopython=True)
 def _fast_bollinger_bands(prices, period, std_dev):

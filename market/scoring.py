@@ -1,4 +1,9 @@
-from imports import logger, np
+from logger_config import logger
+import numpy as np
+
+# Fix numpy compatibility issue
+if not hasattr(np, 'NaN'):
+    np.NaN = np.nan
 
 def _calculate_combined_score(signal):
     """محاسبه امتیاز ترکیبی برای مرتب‌سازی"""
