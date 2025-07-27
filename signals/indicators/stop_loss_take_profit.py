@@ -131,7 +131,52 @@ def _ensure_minimum_risk_reward(entry_price, stop_loss, take_profit, position_ty
 def _calculate_dynamic_stops(df, entry_price, position_type='long', base_risk=2.0):
     """محاسبه حد ضرر و حد سود پویا بر اساس ترند و نوسانات"""
     
-    return _cached_indicator_calculation(df, 'dynamic_stops', _calculate_dynamic_stops, entry_price, position_type, base_risk)
+    def _dynamic_stops_calc():
+        try:
+            if df is None or len(df) < 20:
+                return _get_default_stops(entry_price, position_type)
+            
+            # Get volatility data using ATR
+            atr = _calculate_atr(df, 14)
+            if atr is None or atr.empty:
+                return _get_default_stops(entry_price, position_type)
+            
+            volatility_data = {'volatility_score': atr.iloc[-1] / entry_price * 100}
+            trend_data = {'strength': 50}  # Default trend strength
+            
+            # Calculate risk multipliers
+            risk_multiplier, _ = _calculate_risk_multipliers(
+                trend_data, volatility_data, base_risk
+            )
+            
+            # Get ATR value
+            atr_value = _get_atr_value(df, entry_price, risk_multiplier)
+            
+            # Calculate stops based on position type
+            if position_type == 'long':
+                stop_loss, take_profit = _calculate_long_stops(
+                    entry_price, atr_value, None
+                )
+            else:
+                stop_loss, take_profit = _calculate_short_stops(
+                    entry_price, atr_value, None
+                )
+            
+            # Ensure minimum risk-reward ratio
+            take_profit, risk_reward_ratio = _ensure_minimum_risk_reward(
+                entry_price, stop_loss, take_profit, position_type
+            )
+            
+            return {
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'risk_reward_ratio': risk_reward_ratio
+            }
+            
+        except Exception:
+            return _get_default_stops(entry_price, position_type)
+    
+    return _cached_indicator_calculation(df, 'dynamic_stops', _dynamic_stops_calc)
 
 def _calculate_trailing_stop(df, entry_price, current_price, position_type='long', atr_multiplier=2.0):
     """محاسبه حد ضرر متحرک"""

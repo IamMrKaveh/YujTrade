@@ -1,1002 +1,198 @@
-توابع استخراج شده از فایل: D:\source\Projects\My Projects\Full Projects\Python\YujTrade\indicators.py
-==========
-
-نام تابع: _get_dataframe_hash
-پارامترها: df, columns
-توضیحات: Create a hash for DataFrame to use as cache key
-
-
-----------
-
-نام تابع: _clean_cache
-پارامترها: 
-توضیحات: Clean cache if it gets too large using LRU strategy
-
-
-----------
-
-نام تابع: _cached_simple_calculation
-پارامترها: df_hash, indicator_name
-توضیحات: Create a simple cache key for calculations
-
-
-----------
-
-نام تابع: _cached_indicator_calculation
-پارامترها: df, indicator_name, calculation_func
-توضیحات: Generic cached calculation for indicators with improved error handling
-
-
-----------
-
-نام تابع: _get_cache_key_sma
-پارامترها: args, values_hash
-توضیحات: Generate cache key for SMA
-
-
-----------
-
-نام تابع: _get_cache_key_ema
-پارامترها: args, values_hash
-توضیحات: Generate cache key for EMA
-
-
-----------
-
-نام تابع: _get_cache_key_rsi
-پارامترها: args, values_hash
-توضیحات: Generate cache key for RSI
-
-
-----------
-
-نام تابع: _get_cache_key_stdev
-پارامترها: args, values_hash
-توضیحات: Generate cache key for STDEV
-
-
-----------
-
-نام تابع: _get_cache_key_macd
-پارامترها: args, values_hash
-توضیحات: Generate cache key for MACD
-
-
-----------
-
-نام تابع: _get_cache_key_bollinger_bands
-پارامترها: args, values_hash
-توضیحات: Generate cache key for Bollinger Bands
-
-
-----------
-
-نام تابع: _get_cache_key_atr
-پارامترها: args, values_hash
-توضیحات: Generate cache key for ATR
-
-
-----------
-
-نام تابع: _get_cache_key_keltner_channels
-پارامترها: args, values_hash
-توضیحات: Generate cache key for Keltner Channels
-
-
-----------
-
-نام تابع: _get_cache_key_supertrend
-پارامترها: args, values_hash
-توضیحات: Generate cache key for Supertrend
-
-
-----------
-
-نام تابع: _get_cache_key_adx
-پارامترها: args, values_hash
-توضیحات: Generate cache key for ADX
-
-
-----------
-
-نام تابع: _get_cache_key_generic
-پارامترها: calculation_type, args, values_hash
-توضیحات: Generate generic cache key
-
-
-----------
-
-نام تابع: _fast_sma
-پارامترها: prices, period
-توضیحات: محاسبه سریع میانگین متحرک
-
-
-----------
-
-نام تابع: _fast_ema
-پارامترها: prices, alpha
-توضیحات: محاسبه سریع میانگین متحرک نمایی
-
-
-----------
-
-نام تابع: _fast_rsi_calculation
-پارامترها: prices, period
-توضیحات: محاسبه سریع RSI
-
-
-----------
-
-نام تابع: _fast_bollinger_bands
-پارامترها: prices, period, std_dev
-توضیحات: محاسبه سریع باندهای بولینگر
-
-
-----------
-
-نام تابع: _fast_macd_calculation
-پارامترها: prices, fast_period, slow_period, signal_period
-توضیحات: محاسبه سریع MACD
-
-
-----------
-
-نام تابع: _calculate_sma
-پارامترها: df, column, period
-توضیحات: بدون توضیحات
-
-
-----------
-
-نام تابع: _calculate_optimized_sma
-پارامترها: df, column, period
-توضیحات: محاسبه بهینه میانگین متحرک
-
-
-----------
-
-نام تابع: _calculate_rsi
-پارامترها: df, period
-توضیحات: بدون توضیحات
-
-
-----------
-
-نام تابع: _calculate_optimized_rsi
-پارامترها: df, period
-توضیحات: محاسبه بهینه RSI
-
-
-----------
-
-نام تابع: _calculate_bollinger_bands
-پارامترها: df, period, std_dev
-توضیحات: بدون توضیحات
-
-
-----------
-
-نام تابع: _calculate_optimized_bollinger_bands
-پارامترها: df, period, std_dev
-توضیحات: محاسبه بهینه باندهای بولینگر
-
-
-----------
-
-نام تابع: _calculate_trend_strength
-پارامترها: df, period
-توضیحات: محاسبه قدرت ترند
-
-
-----------
-
-نام تابع: _calculate_market_volatility
-پارامترها: df, period
-توضیحات: محاسبه نوسانات بازار
-
-
-----------
-
-نام تابع: _calculate_market_volatility
-پارامترها: df, period
-توضیحات: محاسبه نوسانات بازار
-
-
-----------
-
-نام تابع: _calculate_trend_strength
-پارامترها: df, period
-توضیحات: محاسبه قدرت ترند
-
-
-----------
-
-نام تابع: _get_default_stops
-پارامترها: entry_price, position_type
-توضیحات: Get default stop loss and take profit values
-
-
-----------
-
-نام تابع: _calculate_risk_multipliers
-پارامترها: trend_data, volatility_data, base_risk
-توضیحات: Calculate risk and reward multipliers based on trend and volatility
-
-
-----------
-
-نام تابع: _get_atr_value
-پارامترها: df, entry_price, risk_multiplier
-توضیحات: Get ATR value adjusted by risk multiplier
-
-
-----------
-
-نام تابع: _find_nearest_support
-پارامترها: support_levels, entry_price, default_value
-توضیحات: Find nearest support level below entry price
-
-
-----------
-
-نام تابع: _find_nearest_resistance
-پارامترها: resistance_levels, entry_price, default_value
-توضیحات: Find nearest resistance level above entry price
-
-
-----------
-
-نام تابع: _calculate_long_stops
-پارامترها: entry_price, atr_value, support_resistance
-توضیحات: Calculate stop loss and take profit for long positions
-
-
-----------
-
-نام تابع: _calculate_short_stops
-پارامترها: entry_price, atr_value, support_resistance
-توضیحات: Calculate stop loss and take profit for short positions
-
-
-----------
-
-نام تابع: _ensure_minimum_risk_reward
-پارامترها: entry_price, stop_loss, take_profit, position_type, min_ratio
-توضیحات: Ensure minimum risk-reward ratio
-
-
-----------
-
-نام تابع: _calculate_dynamic_stops
-پارامترها: df, entry_price, position_type, base_risk
-توضیحات: محاسبه حد ضرر و حد سود پویا بر اساس ترند و نوسانات
-
-
-----------
-
-نام تابع: _calculate_dynamic_stops
-پارامترها: df, entry_price, position_type, base_risk
-توضیحات: محاسبه حد ضرر و حد سود پویا بر اساس ترند و نوسانات
-
-
-----------
-
-نام تابع: _calculate_trailing_stop
-پارامترها: df, entry_price, current_price, position_type, atr_multiplier
-توضیحات: محاسبه حد ضرر متحرک
-
-
-----------
-
-نام تابع: _adaptive_position_sizing
-پارامترها: capital, risk_percent, entry_price, stop_loss, market_conditions
-توضیحات: محاسبه اندازه پوزیشن تطبیقی
-
-
-----------
-
-نام تابع: _calculate_fibonacci_levels
-پارامترها: df, lookback
-توضیحات: بدون توضیحات
-
-
-----------
-
-نام تابع: _calculate_fibonacci_levels
-پارامترها: df, lookback
-توضیحات: محاسبه سطوح فیبوناچی
-
-
-----------
-
-نام تابع: _initialize_sar_arrays
-پارامترها: df, af, high, low
-توضیحات: Initialize arrays for Parabolic SAR calculation
-
-
-----------
-
-نام تابع: _handle_uptrend_sar
-پارامترها: i, sar, trend, af_val, ep, high, low, af, max_af
-توضیحات: Handle Parabolic SAR calculation for uptrend
-
-
-----------
-
-نام تابع: _handle_downtrend_sar
-پارامترها: i, sar, trend, af_val, ep, high, low, af, max_af
-توضیحات: Handle Parabolic SAR calculation for downtrend
-
-
-----------
-
-نام تابع: _calculate_parabolic_sar
-پارامترها: df, af, max_af
-توضیحات: بدون توضیحات
-
-
-----------
-
-نام تابع: _calculate_parabolic_sar
-پارامترها: df, af, max_af
-توضیحات: محاسبه Parabolic SAR
-
-
-----------
-
-نام تابع: _calculate_ichimoku
-پارامترها: df
-توضیحات: بدون توضیحات
-
-
-----------
-
-نام تابع: _calculate_ichimoku
-پارامترها: df
-توضیحات: بدون توضیحات
-
-
-----------
-
-نام تابع: _calculate_money_flow_index
-پارامترها: df, period
-توضیحات: بدون توضیحات
-
-
-----------
-
-نام تابع: _calculate_commodity_channel_index
-پارامترها: df, period
-توضیحات: بدون توضیحات
-
-
-----------
-
-نام تابع: _calculate_williams_r
-پارامترها: df, period
-توضیحات: بدون توضیحات
-
-
-----------
-
-نام تابع: _calculate_ultimate_oscillator
-پارامترها: df, period1, period2, period3
-توضیحات: محاسبه Ultimate Oscillator
-
-
-----------
-
-نام تابع: _calculate_rate_of_change
-پارامترها: df, period
-توضیحات: محاسبه Rate of Change (ROC)
-
-
-----------
-
-نام تابع: _calculate_awesome_oscillator
-پارامترها: df, fast_period, slow_period
-توضیحات: محاسبه Awesome Oscillator
-
-
-----------
-
-نام تابع: _calculate_trix
-پارامترها: df, period
-توضیحات: محاسبه TRIX
-
-
-----------
-
-نام تابع: _calculate_dpo
-پارامترها: df, period
-توضیحات: محاسبه Detrended Price Oscillator
-
-
-----------
-
-نام تابع: _calculate_obv
-پارامترها: df
-توضیحات: محاسبه On-Balance Volume
-
-
-----------
-
-نام تابع: _calculate_accumulation_distribution
-پارامترها: df
-توضیحات: محاسبه Accumulation/Distribution Line
-
-
-----------
-
-نام تابع: _calculate_ad_line
-پارامترها: df
-توضیحات: محاسبه Accumulation/Distribution Line
-
-
-----------
-
-نام تابع: _calculate_chaikin_money_flow
-پارامترها: df, period
-توضیحات: محاسبه Chaikin Money Flow
-
-
-----------
-
-نام تابع: _calculate_volume_price_trend
-پارامترها: df
-توضیحات: محاسبه Volume Price Trend
-
-
-----------
-
-نام تابع: _calculate_ease_of_movement
-پارامترها: df, period
-توضیحات: محاسبه Ease of Movement
-
-
-----------
-
-نام تابع: _calculate_average_true_range
-پارامترها: df, period
-توضیحات: محاسبه Average True Range
-
-
-----------
-
-نام تابع: _calculate_atr
-پارامترها: df, period
-توضیحات: Internal ATR calculation function
-
-
-----------
-
-نام تابع: _calculate_keltner_channels_internal
-پارامترها: df, period, multiplier
-توضیحات: Internal Keltner Channels calculation function
-
-
-----------
-
-نام تابع: _calculate_keltner_channels
-پارامترها: df, period, multiplier
-توضیحات: محاسبه Keltner Channels with caching
-
-
-----------
-
-نام تابع: _calculate_donchian_channels
-پارامترها: df, period
-توضیحات: محاسبه Donchian Channels
-
-
-----------
-
-نام تابع: _calculate_standard_deviation
-پارامترها: df, period
-توضیحات: محاسبه Standard Deviation
-
-
-----------
-
-نام تابع: _calculate_price_std
-پارامترها: df, period
-توضیحات: محاسبه انحراف معیار قیمت
-
-
-----------
-
-نام تابع: _calculate_final_upper_band
-پارامترها: upper_band, final_upper_band, close, i
-توضیحات: Calculate final upper band for Supertrend
-
-
-----------
-
-نام تابع: _calculate_final_lower_band
-پارامترها: lower_band, final_lower_band, close, i
-توضیحات: Calculate final lower band for Supertrend
-
-
-----------
-
-نام تابع: _calculate_direction
-پارامترها: direction, close, final_upper_band, final_lower_band, i
-توضیحات: Calculate direction for Supertrend
-
-
-----------
-
-نام تابع: _calculate_supertrend_value
-پارامترها: direction, final_upper_band, final_lower_band, i
-توضیحات: Calculate Supertrend value based on direction
-
-
-----------
-
-نام تابع: _initialize_supertrend_arrays
-پارامترها: upper_band, lower_band
-توضیحات: Initialize arrays for Supertrend calculation
-
-
-----------
-
-نام تابع: _calculate_supertrend_internal
-پارامترها: df, period, multiplier
-توضیحات: Internal Supertrend calculation function
-
-
-----------
-
-نام تابع: _calculate_supertrend
-پارامترها: df, period, multiplier
-توضیحات: محاسبه Supertrend with caching
-
-
-----------
-
-نام تابع: _calculate_aroon_oscillator
-پارامترها: df, period
-توضیحات: بدون توضیحات
-
-
-----------
-
-نام تابع: _calculate_aroon
-پارامترها: df, period
-توضیحات: محاسبه Aroon Oscillator
-
-
-----------
-
-نام تابع: _calculate_adx_internal
-پارامترها: df, period
-توضیحات: Internal ADX calculation function
-
-
-----------
-
-نام تابع: _calculate_adx
-پارامترها: df, period
-توضیحات: محاسبه Average Directional Index (ADX) with caching
-
-
-----------
-
-نام تابع: _calculate_kama
-پارامترها: df, period, fast_sc, slow_sc
-توضیحات: محاسبه Kaufman Adaptive Moving Average
-
-
-----------
-
-نام تابع: _detect_hammer_doji_patterns_internal
-پارامترها: df
-توضیحات: Internal function for detecting Hammer and Doji patterns
-
-
-----------
-
-نام تابع: _detect_hammer_doji_patterns
-پارامترها: df
-توضیحات: تشخیص الگوهای Hammer و Doji with caching
-
-
-----------
-
-نام تابع: _detect_engulfing_patterns
-پارامترها: df
-توضیحات: تشخیص الگوهای Engulfing
-
-
-----------
-
-نام تابع: _detect_star_patterns
-پارامترها: df
-توضیحات: تشخیص الگوهای Morning/Evening Star
-
-
-----------
-
-نام تابع: _detect_morning_evening_star
-پارامترها: df
-توضیحات: تشخیص الگوهای Morning/Evening Star
-
-
-----------
-
-نام تابع: _calculate_pivot_points_internal
-پارامترها: df
-توضیحات: Internal Pivot Points calculation function
-
-
-----------
-
-نام تابع: _calculate_pivot_points
-پارامترها: df
-توضیحات: محاسبه Pivot Points with caching
-
-
-----------
-
-نام تابع: _calculate_support_resistance_internal
-پارامترها: df, window
-توضیحات: Internal calculation for Support/Resistance levels
-
-
-----------
-
-نام تابع: _calculate_support_resistance
-پارامترها: df, window
-توضیحات: محاسبه سطوح Support و Resistance with caching
-
-
-----------
-
-نام تابع: _find_swing_points
-پارامترها: high, low, swing_strength
-توضیحات: Helper function to find swing highs and lows
-
-
-----------
-
-نام تابع: _get_recent_high
-پارامترها: swing_highs
-توضیحات: Get the most recent significant high
-
-
-----------
-
-نام تابع: _get_recent_low
-پارامترها: swing_lows
-توضیحات: Get the most recent significant low
-
-
-----------
-
-نام تابع: _detect_breaks
-پارامترها: structure_breaks, current_price, swing_highs, swing_lows
-توضیحات: Detect bullish and bearish breaks
-
-
-----------
-
-نام تابع: _detect_market_structure_breaks
-پارامترها: df, swing_strength
-توضیحات: تشخیص Market Structure Breaks
-
-
-----------
-
-نام تابع: _calculate_correlation_with_btc
-پارامترها: df, btc_df, period
-توضیحات: محاسبه همبستگی با بیت کوین
-
-
-----------
-
-نام تابع: _detect_market_regime
-پارامترها: df, lookback
-توضیحات: تشخیص رژیم بازار
-
-
-----------
-
-نام تابع: _calculate_position_size_atr
-پارامترها: capital, risk_percent, atr_value, atr_multiplier
-توضیحات: محاسبه اندازه پوزیشن بر اساس ATR
-
-
-----------
-
-نام تابع: _calculate_dynamic_stop_loss
-پارامترها: df, entry_price, position_type, atr_multiplier
-توضیحات: محاسبه حد ضرر پویا
-
-
-----------
-
-نام تابع: _optimize_risk_reward_ratio
-پارامترها: entry_price, target_price, stop_loss, min_ratio
-توضیحات: بهینه‌سازی نسبت ریسک-ریوارد
-
-
-----------
-
-نام تابع: _ensemble_signal_scoring
-پارامترها: signals_dict, weights
-توضیحات: ترکیب چندین سیگنال با وزن‌دهی
-
-
-----------
-
-نام تابع: _adaptive_threshold_calculator
-پارامترها: df, indicator_values, percentile_low, percentile_high
-توضیحات: محاسبه آستانه‌های تطبیقی
-
-
-----------
-
-نام تابع: _calculate_market_microstructure_internal
-پارامترها: df, period
-توضیحات: Internal market microstructure calculation function
-
-
-----------
-
-نام تابع: _calculate_market_microstructure
-پارامترها: df, period
-توضیحات: محاسبه ساختار میکرو بازار with caching
-
-
-----------
-
-نام تابع: _find_pivot_points
-پارامترها: high, low, window
-توضیحات: Helper function to find pivot highs and lows
-
-
-----------
-
-نام تابع: _cluster_levels
-پارامترها: levels, tolerance
-توضیحات: Helper function to cluster similar price levels
-
-
-----------
-
-نام تابع: _extract_strong_levels
-پارامترها: clusters, min_touches
-توضیحات: Helper function to extract strong levels from clusters
-
-
-----------
-
-نام تابع: _calculate_support_resistance_levels_internal
-پارامترها: df, window, min_touches
-توضیحات: Internal calculation for detailed Support/Resistance levels
-
-
-----------
-
-نام تابع: _calculate_support_resistance_levels
-پارامترها: df, window, min_touches
-توضیحات: محاسبه سطوح حمایت و مقاومت دقیق with caching
-
-
-----------
-
-نام تابع: _detect_dark_cloud_cover
-پارامترها: df
-توضیحات: تشخیص الگوی Dark Cloud Cover
-
-
-----------
-
-نام تابع: _detect_piercing_line
-پارامترها: df
-توضیحات: تشخیص الگوی Piercing Line
-
-
-----------
-
-نام تابع: _detect_harami_patterns
-پارامترها: df
-توضیحات: تشخیص الگوهای Harami
-
-
-----------
-
-نام تابع: _calculate_vwap_internal
-پارامترها: df
-توضیحات: Internal VWAP calculation function
-
-
-----------
-
-نام تابع: _calculate_vwap
-پارامترها: df
-توضیحات: محاسبه Volume Weighted Average Price with caching
-
-
-----------
-
-نام تابع: _check_volume_filter
-پارامترها: df, min_volume_ratio
-توضیحات: Check if volume meets minimum ratio requirement
-
-
-----------
-
-نام تابع: _extract_signal_type
-پارامترها: signal_data
-توضیحات: Extract signal type from signal data
-
-
-----------
-
-نام تابع: _check_trend_filter
-پارامترها: df, signal_data, min_trend_strength
-توضیحات: Check if trend strength supports the signal
-
-
-----------
-
-نام تابع: _filter_false_signals
-پارامترها: df, signal_data, min_volume_ratio, min_trend_strength
-توضیحات: فیلتر سیگنال‌های کاذب
-
-
-----------
-
-نام تابع: _calculate_market_structure_score
-پارامترها: df, lookback
-توضیحات: Calculate market structure quality score
-
-
-----------
-
-نام تابع: _safe_indicator_calculation
-پارامترها: func
-توضیحات: Safely calculate indicators with error handling
-
-
-----------
-
-نام تابع: _add_basic_indicators
-پارامترها: df
-توضیحات: Add basic moving averages and momentum indicators
-
-
-----------
-
-نام تابع: _add_advanced_indicators
-پارامترها: df
-توضیحات: Add MACD, Bollinger Bands, and Stochastic
-
-
-----------
-
-نام تابع: _add_momentum_indicators
-پارامترها: df
-توضیحات: Add momentum-based indicators
-
-
-----------
-
-نام تابع: _add_trend_indicators
-پارامترها: df
-توضیحات: Add trend-based indicators
-
-
-----------
-
-نام تابع: _add_volume_indicators
-پارامترها: df
-توضیحات: Add volume-based indicators
-
-
-----------
-
-نام تابع: _add_volatility_indicators
-پارامترها: df
-توضیحات: Add volatility-based indicators
-
-
-----------
-
-نام تابع: _add_candlestick_patterns
-پارامترها: df
-توضیحات: Add candlestick pattern indicators
-
-
-----------
-
-نام تابع: _add_pivot_and_structure_data
-پارامترها: df
-توضیحات: Add pivot points and structure break data
-
-
-----------
-
-نام تابع: _add_support_resistance_data
-پارامترها: df
-توضیحات: Add support and resistance level data
-
-
-----------
-
-نام تابع: _add_correlation_and_regime_data
-پارامترها: df, btc_df
-توضیحات: Add correlation with BTC and market regime data
-
-
-----------
-
-نام تابع: _add_market_structure_indicators
-پارامترها: df, btc_df
-توضیحات: Add market structure and correlation indicators
-
-
-----------
-
-نام تابع: _create_custom_strategy
-پارامترها: 
-توضیحات: Create a custom pandas_ta strategy with all indicators
-
-
-----------
-
-نام تابع: _validate_data
-پارامترها: df
-توضیحات: Validate input data for indicator calculation
-
-
-----------
-
-نام تابع: _apply_pandas_ta_strategy
-پارامترها: df
-توضیحات: Apply pandas_ta strategy to calculate indicators
-
-
-----------
-
-نام تابع: _fallback_indicator_calculation
-پارامترها: df
-توضیحات: Fallback method using individual indicator calculations
-
-
-----------
-
-نام تابع: _fill_nan_values
-پارامترها: df
-توضیحات: Fill NaN values with appropriate defaults
-
-
-----------
-
-نام تابع: calculate_indicators
-پارامترها: df, btc_df
-توضیحات: Calculate comprehensive technical indicators using pandas_ta strategy.
-Args:
-    df (pd.DataFrame): Input DataFrame with OHLCV data.
-    btc_df (pd.DataFrame, optional): Bitcoin OHLCV data for correlation calculation.
-Returns:
-    pd.DataFrame: DataFrame with calculated indicators or None if errors occur.
-
-
-----------
-
-نام تابع: jit
-پارامترها: 
-توضیحات: بدون توضیحات
-
-
-----------
-
-نام تابع: decorator
-پارامترها: func
-توضیحات: بدون توضیحات
-
-
-----------
-
+این فایل کشینگ من هست :
+from logger_config import logger
+import hashlib
+from collections import OrderedDict
+from threading import RLock
+
+NUMBA_AVAILABLE = True
+
+try:
+    from numba import jit
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    logger.warning("Numba not available. Using standard calculations.")
+    
+    def jit():
+        def decorator(func):
+            return func
+        return decorator
+
+
+class LRUCache:
+    def __init__(self, max_size=1000):
+        self.max_size = max_size
+        self.cache = OrderedDict()
+        self.lock = RLock()
+        self.hit_count = 0
+        self.miss_count = 0
+    
+    def get(self, key):
+        with self.lock:
+            if key in self.cache:
+                self.cache.move_to_end(key)
+                self.hit_count += 1
+                return self.cache[key]
+            self.miss_count += 1
+            return None
+    
+    def put(self, key, value):
+        with self.lock:
+            if key in self.cache:
+                self.cache.move_to_end(key)
+            else:
+                if len(self.cache) >= self.max_size:
+                    self.cache.popitem(last=False)
+            self.cache[key] = value
+    
+    def clear(self):
+        with self.lock:
+            self.cache.clear()
+            self.hit_count = 0
+            self.miss_count = 0
+    
+    def stats(self):
+        total = self.hit_count + self.miss_count
+        hit_rate = self.hit_count / total if total > 0 else 0
+        return {
+            'size': len(self.cache),
+            'hits': self.hit_count,
+            'misses': self.miss_count,
+            'hit_rate': hit_rate
+        }
+
+
+_indicator_cache = LRUCache(max_size=1000)
+
+
+def get_fast_hash(data, length=None):
+    if data is None:
+        return None
+    
+    try:
+        if hasattr(data, 'values'):
+            if length is None:
+                length = len(data)
+            
+            if length > 100:
+                step = length // 50
+                sample_data = data.values[::step]
+            else:
+                sample_data = data.values
+            
+            hash_input = f"{length}_{sample_data.tobytes()}"
+        else:
+            hash_input = str(data)
+        
+        return hashlib.blake2b(hash_input.encode(), digest_size=8).hexdigest()
+    except Exception as e:
+        logger.error(f"Error getting fast hash: {e}")
+        return None
+
+
+def get_dataframe_signature(df, columns=None):
+    if df is None or len(df) == 0:
+        return None
+    
+    try:
+        if columns is None:
+            numeric_cols = df.select_dtypes(include='number').columns.tolist()
+            columns = numeric_cols[:5] if numeric_cols else ['close']
+        
+        available_cols = [col for col in columns if col in df.columns]
+        if not available_cols:
+            return None
+        
+        df_subset = df[available_cols]
+        length = len(df_subset)
+        
+        if length > 1000:
+            indices = [0, length//4, length//2, 3*length//4, length-1]
+            sample_data = df_subset.iloc[indices]
+        else:
+            sample_data = df_subset
+        
+        data_hash = get_fast_hash(sample_data.values.flatten())
+        return f"{length}_{data_hash}" if data_hash else None
+    except Exception as e:
+        logger.error(f"Error getting DataFrame signature: {e}")
+        return None
+
+
+def create_cache_key(indicator_name, df_signature, *args, **kwargs):
+    if df_signature is None:
+        return None
+    
+    try:
+        key_parts = [indicator_name, df_signature]
+        
+        if args:
+            args_str = '_'.join(str(arg) for arg in args)
+            key_parts.append(args_str)
+        
+        if kwargs:
+            filtered_kwargs = {k: v for k, v in kwargs.items() if k != 'df'}
+            if filtered_kwargs:
+                kwargs_str = '_'.join(f"{k}:{v}" for k, v in sorted(filtered_kwargs.items()))
+                key_parts.append(kwargs_str)
+        
+        return '_'.join(key_parts)
+    except Exception as e:
+        logger.error(f"Error creating cache key for {indicator_name}: {e}")
+        return None
+
+
+def cached_calculation(indicator_name):
+    def decorator(func):
+        def wrapper(df, *args, **kwargs):
+            try:
+                if df is None or len(df) == 0:
+                    return None
+                
+                df_signature = get_dataframe_signature(df)
+                cache_key = create_cache_key(indicator_name, df_signature, *args, **kwargs)
+                
+                if cache_key:
+                    cached_result = _indicator_cache.get(cache_key)
+                    if cached_result is not None:
+                        return cached_result
+                
+                result = func(df, *args, **kwargs)
+                
+                if result is not None and cache_key:
+                    _indicator_cache.put(cache_key, result)
+                
+                return result
+            except Exception as e:
+                logger.warning(f"Cache error for {indicator_name}: {e}")
+                return func(df, *args, **kwargs)
+        
+        return wrapper
+    return decorator
+
+
+def clear_cache():
+    _indicator_cache.clear()
+
+
+def get_cache_stats():
+    return _indicator_cache.stats()
+
+
+class CacheConfig:
+    @staticmethod
+    def set_max_size(size):
+        global _indicator_cache
+        stats = _indicator_cache.stats()
+        _indicator_cache = LRUCache(max_size=size)
+        logger.info(f"Cache size changed to {size}. Previous stats: {stats}")
+    
+    @staticmethod
+    def enable_detailed_logging():
+        logger.setLevel('DEBUG')
+    
+    @staticmethod 
+    def disable_detailed_logging():
+        logger.setLevel('INFO')
+
+لطفا توابع زیر را به گونه ای ویرایش کن تا به بهترین شکل در محاسبات از کشینگ استفاده کنند.

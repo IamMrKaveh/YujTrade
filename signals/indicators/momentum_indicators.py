@@ -3,7 +3,7 @@ from numba import jit
 import numpy as np
 import pandas as pd
 from logger_config import logger
-from .cache_utils import NUMBA_AVAILABLE
+from .cache_utils import NUMBA_AVAILABLE, cached_calculation
 from .moving_averages import _cached_indicator_calculation
 
 # Fix numpy compatibility issue
@@ -78,6 +78,7 @@ def _calculate_optimized_rsi(df, period=14):
     
     return _cached_indicator_calculation(df, 'rsi', _calculate_rsi, period)
 
+@cached_calculation('money_flow_index')
 def _calculate_money_flow_index(df, period=14):
     try:
         if df is None or len(df) < period + 1:
@@ -102,7 +103,7 @@ def _calculate_money_flow_index(df, period=14):
         return mfi
     except Exception:
         return None
-
+@cached_calculation('commodity_channel_index')
 def _calculate_commodity_channel_index(df, period=20):
     try:
         if df is None or len(df) < period:
@@ -119,7 +120,7 @@ def _calculate_commodity_channel_index(df, period=20):
         return cci
     except Exception:
         return None
-
+@cached_calculation('williams_r')
 def _calculate_williams_r(df, period=14):
     try:
         if df is None or len(df) < period:
@@ -133,7 +134,7 @@ def _calculate_williams_r(df, period=14):
         return williams_r
     except Exception:
         return None
-
+@cached_calculation('ultimate_oscillator')
 def _calculate_ultimate_oscillator(df, period1=7, period2=14, period3=28):
     """محاسبه Ultimate Oscillator"""
     try:
@@ -174,7 +175,7 @@ def _calculate_ultimate_oscillator(df, period1=7, period2=14, period3=28):
     except Exception as e:
         logger.warning(f"Error calculating Ultimate Oscillator: {e}")
         return None
-
+@cached_calculation('rate_of_change')
 def _calculate_rate_of_change(df, period=14):
     """محاسبه Rate of Change (ROC)"""
     try:
@@ -188,7 +189,7 @@ def _calculate_rate_of_change(df, period=14):
     except Exception as e:
         logger.warning(f"Error calculating ROC: {e}")
         return None
-
+@cached_calculation('awesome_oscillator')
 def _calculate_awesome_oscillator(df, fast_period=5, slow_period=34):
     """محاسبه Awesome Oscillator"""
     try:
@@ -212,7 +213,7 @@ def _calculate_awesome_oscillator(df, fast_period=5, slow_period=34):
     except Exception as e:
         logger.warning(f"Error calculating Awesome Oscillator: {e}")
         return None
-
+@cached_calculation('trix')
 def _calculate_trix(df, period=14):
     """محاسبه TRIX"""
     try:
@@ -233,7 +234,7 @@ def _calculate_trix(df, period=14):
     except Exception as e:
         logger.warning(f"Error calculating TRIX: {e}")
         return None
-
+@cached_calculation('dpo')
 def _calculate_dpo(df, period=20):
     """محاسبه Detrended Price Oscillator"""
     try:

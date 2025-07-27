@@ -1,107 +1,103 @@
 import asyncio
+from typing import Optional
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from exchange.exchange_config import SYMBOLS
 from logger_config import logger
 from market.main import analyze_market
-from .background import _background_analysis
+from .background import BackgroundAnalyzer
 from .constants import ERROR_MESSAGE, WAIT_MESSAGE
-from .message_builder import _build_signal_message, _build_status_message, _send_error_message, _send_status_message
-from .system_info import _get_system_info, _test_exchange_connection
+from .message_builder import MessageBuilder
+from .system_info import SystemInfo
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """مدیریت دستور /start با ارائه بهترین سیگنال"""
-    try:
-        user_id = update.effective_user.id
-        username = update.effective_user.username or "Unknown"
-        logger.info(f"User {username} ({user_id}) started analysis")
-        
-        # Send immediate response to user
-        await update.message.reply_text(WAIT_MESSAGE)
-        
-        # Run analysis in background task to avoid blocking the bot
-        _ = asyncio.create_task(_background_analysis(update, user_id, username))
-        
-    except Exception as e:
-        logger.error(f"Error in start command: {e}")
-        await update.message.reply_text(ERROR_MESSAGE + f"جزئیات خطا: {str(e)}")
+async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /start command with improved performance"""
+    user_info = self._extract_user_info(update)
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /status command with improved error handling and logging"""
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "Unknown"
-    
     try:
-        logger.info(f"Status command requested by user {username} ({user_id})")
-        
-        exchange_status, exchange_error = await _test_exchange_connection()
-        symbols_count, current_time, python_version = _get_system_info()
-        
-        message = _build_status_message(exchange_status, exchange_error, symbols_count, current_time, python_version)
-        await _send_status_message(update, message, username)
-        
-    except Exception as e:
-        logger.error(f"Critical error in status command for user {username} ({user_id}): {e}", exc_info=True)
-        await _send_error_message(update, e)
+        logger.info(
+            f"User {user_info['username']} ({user_info['id']}) started analysis")
 
-async def show_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /symbols command"""
-    try:
-        message = f"📋 *نمادهای تحت نظارت:* ({len(SYMBOLS)} نماد)\n\n"
-        
-        # Group symbols in rows of 3
-        for i in range(0, len(SYMBOLS), 3):
-            row_symbols = SYMBOLS[i:i+3]
-            message += " | ".join([f"`{symbol}`" for symbol in row_symbols]) + "\n"
-        
-        message += "\n💡 برای تغییر نمادها، فایل `symbols.txt` را ویرایش کنید.\n"
-        message += f"🎯 هر نماد با {len(['RSI', 'MACD', 'Stochastic', 'MFI', 'CCI', 'Williams %R', 'Fibonacci', 'Volume'])} شاخص تکنیکال تحلیل می‌شود."
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Error in symbols command: {e}")
-        await update.message.reply_text("خطایی در نمایش نمادها رخ داد.")
+        # Send immediate response
+        await self._send_safe_message(update, WAIT_MESSAGE)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /help command"""
-    try:
-        message = (
-            "🤖 *راهنمای ربات تحلیل تکنیکال پیشرفته*\n\n"
-            "این ربات با استفاده از 8+ اندیکاتور تکنیکال، بهترین فرصت‌های معاملاتی را شناسایی می‌کند.\n\n"
-            "📋 *دستورات:*\n"
-            "`/start` - شروع تحلیل بازار\n"
-            "`/status` - نمایش وضعیت ربات\n"
-            "`/symbols` - لیست نمادهای تحت نظارت\n"
-            "`/help` - نمایش این راهنما\n\n"
-            "📊 *اندیکاتورهای تحلیلی:*\n"
-            "🔹 **RSI** - شناسایی مناطق فروش/خرید بیش از حد\n"
-            "🔹 **MACD** - تشخیص تغییر روند بازار\n"
-            "🔹 **Stochastic** - نوسانگر قدرتمند برای ورود/خروج\n"
-            "🔹 **MFI** - تحلیل جریان پول هوشمند\n"
-            "🔹 **CCI** - شاخص قدرت روند\n"
-            "🔹 **Williams %R** - تایید سیگنال‌های اصلی\n"
-            "🔹 **Fibonacci** - سطوح حمایت و مقاومت\n"
-            "🔹 **Volume Analysis** - تحلیل حجم معاملات\n\n"
-            "🎯 *ویژگی‌های خاص:*\n"
-            "• سیستم امتیازدهی پیشرفته (0-100)\n"
-            "• تحلیل چندگانه شاخص‌ها\n"
-            "• محاسبه نسبت سود به ضرر\n"
-            "• شناسایی قدرت روند\n"
-            "• تشخیص سطوح فیبوناچی\n"
-            "• مدیریت ریسک هوشمند\n\n"
-            "⚠️ *هشدار مهم:*\n"
-            "این سیگنال‌ها صرفاً جهت اطلاع‌رسانی هستند و توصیه سرمایه‌گذاری محسوب نمی‌شوند. "
-            "لطفاً قبل از هر معامله، تحلیل‌های خود را انجام دهید.\n\n"
-            "💰 *مدیریت ریسک:*\n"
-            "• حداکثر 2-3% از سرمایه را ریسک کنید\n"
-            "• همیشه Stop Loss تعیین کنید\n"
-            "• از سیگنال‌های بالای 60 امتیاز استفاده کنید"
+        # Start background analysis without blocking
+        _ = asyncio.create_task(
+            self.background_analyzer.run_analysis(update, user_info)
         )
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
-        
+
     except Exception as e:
-        logger.error(f"Error in help command: {e}")
-        await update.message.reply_text("خطایی در نمایش راهنما رخ داد.")
+        logger.error(
+            f"Error in start command for user {user_info['username']} ({user_info['id']}): {e}", exc_info=True)
+        await self._handle_command_error(update, e, "start command")
+
+    async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /status command with optimized system checks"""
+        user_info = self._extract_user_info(update)
+
+        try:
+            logger.info(
+                f"Status requested by {user_info['username']} ({user_info['id']})")
+
+            # Run system checks concurrently
+            system_data = await self.system_info.get_complete_status()
+            message = self.message_builder.build_status_message(system_data)
+
+            await self._send_safe_message(update, message, parse_mode='Markdown')
+
+        except Exception as e:
+            logger.error(
+                f"Error in status command for user {user_info['username']} ({user_info['id']}): {e}", exc_info=True)
+            await self._handle_command_error(update, e, "status command", user_info['username'])
+
+    async def show_symbols(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /symbols command with optimized formatting"""
+        try:
+            message = self.message_builder.build_symbols_message(SYMBOLS)
+            await self._send_safe_message(update, message, parse_mode='Markdown')
+
+        except Exception as e:
+            logger.error(f"Error in symbols command: {e}", exc_info=True)
+            await self._handle_command_error(update, e, "symbols command")
+
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /help command"""
+        try:
+            message = self.message_builder.build_help_message()
+            await self._send_safe_message(update, message, parse_mode='Markdown')
+
+        except Exception as e:
+            await self._handle_command_error(update, e, "help command")
+
+    def _extract_user_info(self, update: Update) -> dict:
+        """Extract user information safely"""
+        return {
+            'id': update.effective_user.id,
+            'username': update.effective_user.username or "Unknown"
+        }
+
+    async def _send_safe_message(self, update: Update, message: str, **kwargs) -> bool:
+        """Send message with fallback for markdown errors"""
+        try:
+            await update.message.reply_text(message, **kwargs)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to send formatted message: {e}")
+            # Fallback to plain text
+            plain_message = message.replace(
+                '*', '').replace('`', '').replace('_', '')
+            try:
+                await update.message.reply_text(plain_message)
+                return True
+            except Exception as fallback_e:
+                logger.error(f"Failed to send fallback message: {fallback_e}")
+                return False
+
+    async def _handle_command_error(self, update: Update, error: Exception,
+                                    command: str, username: str = "Unknown") -> None:
+        """Handle command errors consistently"""
+        logger.error(
+            f"Error in {command} for user {username}: {error}", exc_info=True)
+        error_msg = f"{ERROR_MESSAGE}جزئیات خطا: {str(error)[:100]}"
+        await self._send_safe_message(update, error_msg)

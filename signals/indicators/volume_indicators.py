@@ -1,8 +1,9 @@
 from logger_config import logger
 import numpy as np
 import pandas as pd
-from .cache_utils import _cached_indicator_calculation
+from .cache_utils import cached_calculation
 
+@cached_calculation('obv')
 def _calculate_obv(df):
     """محاسبه On-Balance Volume"""
     try:
@@ -27,7 +28,7 @@ def _calculate_obv(df):
     except Exception as e:
         logger.warning(f"Error calculating OBV: {e}")
         return None
-
+@cached_calculation('accumulation_distribution')
 def _calculate_accumulation_distribution(df):
     """محاسبه Accumulation/Distribution Line"""
     try:
@@ -54,7 +55,7 @@ def _calculate_accumulation_distribution(df):
     except Exception as e:
         logger.warning(f"Error calculating A/D Line: {e}")
         return None
-
+@cached_calculation('ad_line')
 def _calculate_ad_line(df):
     """محاسبه Accumulation/Distribution Line"""
     try:
@@ -79,7 +80,7 @@ def _calculate_ad_line(df):
         return ad_line
     except Exception:
         return None
-
+@cached_calculation('chaikin_money_flow')
 def _calculate_chaikin_money_flow(df, period=20):
     """محاسبه Chaikin Money Flow"""
     try:
@@ -105,7 +106,7 @@ def _calculate_chaikin_money_flow(df, period=20):
     except Exception as e:
         logger.warning(f"Error calculating CMF: {e}")
         return None
-
+@cached_calculation('volume_price_trend')
 def _calculate_volume_price_trend(df):
     """محاسبه Volume Price Trend"""
     try:
@@ -125,7 +126,7 @@ def _calculate_volume_price_trend(df):
     except Exception as e:
         logger.warning(f"Error calculating VPT: {e}")
         return None
-
+@cached_calculation('ease_of_movement')
 def _calculate_ease_of_movement(df, period=14):
     """محاسبه Ease of Movement"""
     try:
@@ -153,9 +154,9 @@ def _calculate_ease_of_movement(df, period=14):
     except Exception as e:
         logger.warning(f"Error calculating EMV: {e}")
         return None
-
-def _calculate_vwap_internal(df):
-    """Internal VWAP calculation function"""
+@cached_calculation('vwap')
+def _calculate_vwap(df):
+    """محاسبه Volume Weighted Average Price"""
     try:
         if df is None or len(df) < 1:
             return None
@@ -193,10 +194,6 @@ def _calculate_vwap_internal(df):
     except Exception as e:
         logger.warning(f"Error calculating VWAP: {e}")
         return None
-
-def _calculate_vwap(df):
-    """محاسبه Volume Weighted Average Price with caching"""
-    return _cached_indicator_calculation(df, 'vwap', _calculate_vwap_internal)
 
 def _check_volume_filter(df, min_volume_ratio):
     """Check if volume meets minimum ratio requirement"""

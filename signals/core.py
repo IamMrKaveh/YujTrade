@@ -1,7 +1,7 @@
 from logger_config import logger
 import pandas as pd
 
-from signals.accuracy import calculate_signal_accuracy_score
+from .accuracy import calculate_signal_accuracy_score
 
 def _create_signal_result(signal_results, last_row, rsi_value, df=None, symbol=None):
     buy_signals = signal_results['buy_signals']

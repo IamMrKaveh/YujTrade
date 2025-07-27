@@ -1,9 +1,11 @@
 from logger_config import logger
 import pandas as pd
-from .cache_utils import _cached_indicator_calculation
 
-def _detect_hammer_doji_patterns_internal(df):
-    """Internal function for detecting Hammer and Doji patterns"""
+from .cache_utils import cached_calculation
+
+@cached_calculation('hammer_doji_patterns')
+def _detect_hammer_doji_patterns(df):
+    """تشخیص الگوهای Hammer و Doji with caching"""
     try:
         if df is None or len(df) < 3:
             return None
@@ -46,10 +48,7 @@ def _detect_hammer_doji_patterns_internal(df):
         logger.warning(f"Error detecting Hammer/Doji patterns: {e}")
         return None
 
-def _detect_hammer_doji_patterns(df):
-    """تشخیص الگوهای Hammer و Doji with caching"""
-    return _cached_indicator_calculation(df, 'hammer_doji_patterns', _detect_hammer_doji_patterns_internal)
-
+@cached_calculation('engulfing_patterns')
 def _detect_engulfing_patterns(df):
     """تشخیص الگوهای Engulfing"""
     try:
@@ -88,6 +87,7 @@ def _detect_engulfing_patterns(df):
         logger.warning(f"Error detecting Engulfing patterns: {e}")
         return None
 
+@cached_calculation('star_patterns')
 def _detect_star_patterns(df):
     """تشخیص الگوهای Morning/Evening Star"""
     try:
@@ -128,6 +128,7 @@ def _detect_star_patterns(df):
         logger.warning(f"Error detecting Star patterns: {e}")
         return None
 
+@cached_calculation('morning_evening_star')
 def _detect_morning_evening_star(df):
     """تشخیص الگوهای Morning/Evening Star"""
     try:
@@ -161,6 +162,7 @@ def _detect_morning_evening_star(df):
     except Exception:
         return None
 
+@cached_calculation('dark_cloud_cover')
 def _detect_dark_cloud_cover(df):
     """تشخیص الگوی Dark Cloud Cover"""
     try:
@@ -196,6 +198,7 @@ def _detect_dark_cloud_cover(df):
         logger.warning(f"Error detecting Dark Cloud Cover: {e}")
         return None
 
+@cached_calculation('piercing_line')
 def _detect_piercing_line(df):
     """تشخیص الگوی Piercing Line"""
     try:
@@ -231,6 +234,7 @@ def _detect_piercing_line(df):
         logger.warning(f"Error detecting Piercing Line: {e}")
         return None
 
+@cached_calculation('harami_patterns')
 def _detect_harami_patterns(df):
     """تشخیص الگوهای Harami"""
     try:
@@ -274,6 +278,8 @@ def _detect_harami_patterns(df):
         
         return patterns
     except Exception as e:
+        logger.warning(f"Error detecting Harami patterns: {e}")
+        return None
         logger.warning(f"Error detecting Harami patterns: {e}")
         return None
 

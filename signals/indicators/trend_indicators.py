@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from .moving_averages import _fast_ema
 from .volatility_indicators import _calculate_average_true_range
-from .cache_utils import _cached_indicator_calculation
+from .cache_utils import cached_calculation
 
 
 @jit(nopython=True)
@@ -23,40 +23,41 @@ def _fast_macd_calculation(prices, fast_period, slow_period, signal_period):
     
     return macd_line, signal_line, histogram
 
+@cached_calculation('trend_strength')
 def _calculate_trend_strength(df, period=20):
     """محاسبه قدرت ترند"""
-    return _cached_indicator_calculation(df, 'trend_strength', _calculate_trend_strength, period)
-
-def _calculate_keltner_channels_internal(df, period, multiplier):
-    """Internal Keltner Channels calculation function"""
     try:
         if df is None or len(df) < period:
             return None
         
         close = df['close']
-        atr = _calculate_average_true_range(df, period)
+        sma = close.rolling(window=period).mean()
+        trend_strength = ((close - sma) / sma) * 100
         
-        if atr is None:
-            return None
-        
-        middle_line = close.rolling(window=period).mean()
-        upper_channel = middle_line + (multiplier * atr)
-        lower_channel = middle_line - (multiplier * atr)
-        
-        return {
-            'keltner_upper': upper_channel,
-            'keltner_middle': middle_line,
-            'keltner_lower': lower_channel
-        }
+        return trend_strength
     except Exception as e:
-        logger.warning(f"Error calculating Keltner Channels: {e}")
+        logger.warning(f"Error calculating trend strength: {e}")
         return None
 
-def _calculate_keltner_channels(df, period=20, multiplier=2):
-    """محاسبه Keltner Channels with caching"""
+@cached_calculation('donchian_channels')
+def _calculate_donchian_channels(df, period=20):
+    """محاسبه Donchian Channels"""
     try:
-        return _cached_indicator_calculation(df, 'keltner_channels', _calculate_keltner_channels_internal, period, multiplier)
-    
+        if df is None or len(df) < period:
+            return None
+        
+        high = df['high']
+        low = df['low']
+        
+        upper_channel = high.rolling(window=period).max()
+        lower_channel = low.rolling(window=period).min()
+        middle_channel = (upper_channel + lower_channel) / 2
+        
+        return {
+            'donchian_upper': upper_channel,
+            'donchian_middle': middle_channel,
+            'donchian_lower': lower_channel
+        }
     except Exception as e:
         logger.warning(f"Error calculating Keltner Channels: {e}")
         return None
@@ -83,8 +84,9 @@ def _calculate_donchian_channels(df, period=20):
         logger.warning(f"Error calculating Donchian Channels: {e}")
         return None
 
-def _calculate_supertrend_internal(df, period, multiplier):
-    """Internal Supertrend calculation function"""
+@cached_calculation('supertrend')
+def _calculate_supertrend(df, period=10, multiplier=3.0):
+    """محاسبه Supertrend with caching"""
     try:
         if df is None or len(df) < period:
             return None
@@ -98,40 +100,62 @@ def _calculate_supertrend_internal(df, period, multiplier):
         if atr is None:
             return None
         
-        # محاسبه Basic Bands
+        # محاسبه Basic Upper و Lower Bands
         hl2 = (high + low) / 2
         upper_band = hl2 + (multiplier * atr)
         lower_band = hl2 - (multiplier * atr)
         
         # Initialize arrays
-        final_upper_band, final_lower_band, supertrend, direction = _initialize_supertrend_arrays(upper_band, lower_band)
+        final_upper_band = np.zeros(len(df))
+        final_lower_band = np.zeros(len(df))
+        supertrend = np.zeros(len(df))
+        direction = np.zeros(len(df))
         
-        # Calculate for each period
+        # Set initial values
+        final_upper_band[0] = upper_band.iloc[0]
+        final_lower_band[0] = lower_band.iloc[0]
+        direction[0] = 1
+        supertrend[0] = final_lower_band[0]
+        
+        # Calculate Supertrend
         for i in range(1, len(df)):
-            # Calculate final bands
-            final_upper = _calculate_final_upper_band(upper_band, final_upper_band, close, i)
-            final_lower = _calculate_final_lower_band(lower_band, final_lower_band, close, i)
+            # Calculate final upper band
+            if upper_band.iloc[i] < final_upper_band[i-1] or close.iloc[i-1] > final_upper_band[i-1]:
+                final_upper_band[i] = upper_band.iloc[i]
+            else:
+                final_upper_band[i] = final_upper_band[i-1]
             
-            final_upper_band.append(final_upper)
-            final_lower_band.append(final_lower)
+            # Calculate final lower band
+            if lower_band.iloc[i] > final_lower_band[i-1] or close.iloc[i-1] < final_lower_band[i-1]:
+                final_lower_band[i] = lower_band.iloc[i]
+            else:
+                final_lower_band[i] = final_lower_band[i-1]
             
             # Calculate direction
-            new_direction = _calculate_direction(direction, close, final_upper_band, final_lower_band, i)
-            direction.append(new_direction)
+            if direction[i-1] == -1 and close.iloc[i] < final_lower_band[i]:
+                direction[i] = -1
+            elif direction[i-1] == 1 and close.iloc[i] > final_upper_band[i]:
+                direction[i] = 1
+            elif direction[i-1] == -1 and close.iloc[i] >= final_lower_band[i]:
+                direction[i] = 1
+            elif direction[i-1] == 1 and close.iloc[i] <= final_upper_band[i]:
+                direction[i] = -1
+            else:
+                direction[i] = direction[i-1]
             
             # Calculate Supertrend value
-            supertrend_value = _calculate_supertrend_value(direction, final_upper_band, final_lower_band, i)
-            supertrend.append(supertrend_value)
+            if direction[i] == 1:
+                supertrend[i] = final_lower_band[i]
+            else:
+                supertrend[i] = final_upper_band[i]
         
         return pd.Series(supertrend, index=df.index)
+    
     except Exception as e:
         logger.warning(f"Error calculating Supertrend: {e}")
         return None
-
-def _calculate_supertrend(df, period=10, multiplier=3.0):
-    """محاسبه Supertrend with caching"""
-    return _cached_indicator_calculation(df, 'supertrend', _calculate_supertrend_internal, period, multiplier)
-
+        
+@cached_calculation('aroon_oscillator')
 def _calculate_aroon_oscillator(df, period=14):
     try:
         if df is None or len(df) < period:
@@ -169,6 +193,82 @@ def _calculate_aroon_oscillator(df, period=14):
             'aroon_oscillator': aroon_oscillator
         }
     except Exception:
+        return None
+
+@cached_calculation('aroon')
+def _calculate_aroon(df, period=14):
+    """محاسبه Aroon Oscillator"""
+    try:
+        if df is None or len(df) < period:
+            return None
+            
+        high = df['high']
+        low = df['low']
+        
+        # پیدا کردن موقعیت بالاترین و پایین‌ترین قیمت
+        aroon_up = ((period - high.rolling(period).apply(lambda x: period - 1 - x.argmax())) / period) * 100
+        aroon_down = ((period - low.rolling(period).apply(lambda x: period - 1 - x.argmin())) / period) * 100
+        
+        aroon_oscillator = aroon_up - aroon_down
+        
+        return {
+            'aroon_up': aroon_up,
+            'aroon_down': aroon_down,
+            'aroon_oscillator': aroon_oscillator
+        }
+        
+    except Exception as e:
+        logger.warning(f"Error calculating Aroon: {e}")
+        return None
+
+@cached_calculation('adx')
+def _calculate_adx_internal(df, period):
+    """Internal ADX calculation function"""
+    try:
+        if df is None or len(df) < period:
+            return None
+        
+        high = df['high']
+        low = df['low']
+        
+        # True Range
+        atr = _calculate_average_true_range(df, period)
+        if atr is None:
+            return None
+        
+        # Directional Movement
+        up_move = high - high.shift(1)
+        down_move = low.shift(1) - low
+        
+        plus_dm = pd.Series(0, index=df.index)
+        minus_dm = pd.Series(0, index=df.index)
+        
+        plus_dm[up_move > down_move] = up_move[up_move > down_move]
+        plus_dm[plus_dm < 0] = 0
+        
+        minus_dm[down_move > up_move] = down_move[down_move > up_move]
+        minus_dm[minus_dm < 0] = 0
+        
+        # Smoothed DM
+        plus_dm_smooth = plus_dm.rolling(window=period).mean()
+        minus_dm_smooth = minus_dm.rolling(window=period).mean()
+        
+        # DI calculations
+        plus_di = 100 * (plus_dm_smooth / atr)
+        minus_di = 100 * (minus_dm_smooth / atr)
+        
+        # ADX calculation
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        dx = dx.fillna(0)
+        adx = dx.rolling(window=period).mean()
+        
+        return {
+            'plus_di': plus_di,
+            'minus_di': minus_di,
+            'adx': adx
+        }
+    except Exception as e:
+        logger.warning(f"Error calculating ADX: {e}")
         return None
 
 def _calculate_aroon(df, period=14):
@@ -244,17 +344,6 @@ def _calculate_adx_internal(df, period):
     except Exception as e:
         logger.warning(f"Error calculating ADX: {e}")
         return None
-        
-def _calculate_adx(df, period=14):
-    """محاسبه Average Directional Index (ADX) with caching"""
-    return _cached_indicator_calculation(df, 'adx', _calculate_adx_internal, period)
-
-def _calculate_ichimoku(df):
-    return _cached_indicator_calculation(df, 'ichimoku', _calculate_ichimoku)
-
-def _calculate_parabolic_sar(df, af=0.02, max_af=0.2):
-    """محاسبه Parabolic SAR"""
-    return _cached_indicator_calculation(df, 'parabolic_sar', _calculate_parabolic_sar, af, max_af)
 
 def _initialize_sar_arrays(df, af, high, low):
     """Initialize arrays for Parabolic SAR calculation"""

@@ -1,9 +1,8 @@
 from logger_config import logger
-from numba import jit
 import numpy as np
 import pandas as pd
 from .moving_averages import _fast_sma
-from .cache_utils import _cached_indicator_calculation, NUMBA_AVAILABLE
+from .cache_utils import NUMBA_AVAILABLE, cached_calculation, jit
 
 @jit(nopython=True)
 def _fast_bollinger_bands(prices, period, std_dev):
@@ -23,6 +22,7 @@ def _fast_bollinger_bands(prices, period, std_dev):
     
     return sma, upper_band, lower_band
 
+@cached_calculation('bollinger_bands')
 def _calculate_bollinger_bands(df, period, std_dev):
     try:
         if df is None or len(df) < period:
@@ -45,12 +45,7 @@ def _calculate_bollinger_bands(df, period, std_dev):
     except Exception as e:
         logger.warning(f"Error in optimized Bollinger Bands calculation: {e}")
         return None
-        
-def _calculate_optimized_bollinger_bands(df, period=20, std_dev=2):
-    """محاسبه بهینه باندهای بولینگر"""
-    
-    return _cached_indicator_calculation(df, 'bollinger_bands', _calculate_bollinger_bands, period, std_dev)
-
+@cached_calculation('average_true_range')
 def _calculate_average_true_range(df, period=14):
     """محاسبه Average True Range"""
     try:
@@ -73,7 +68,7 @@ def _calculate_average_true_range(df, period=14):
     except Exception as e:
         logger.warning(f"Error calculating ATR: {e}")
         return None
-
+@cached_calculation('atr')
 def _calculate_atr(df, period):
     """Internal ATR calculation function"""
     try:
@@ -101,7 +96,7 @@ def _calculate_atr(df, period):
     except Exception as e:
         logger.warning(f"Error calculating ATR: {e}")
         return None
-
+@cached_calculation('standard_deviation')
 def _calculate_standard_deviation(df, period=20):
     """محاسبه Standard Deviation"""
     try:
@@ -115,7 +110,7 @@ def _calculate_standard_deviation(df, period=20):
     except Exception as e:
         logger.warning(f"Error calculating Standard Deviation: {e}")
         return None
-
+@cached_calculation('price_std')
 def _calculate_price_std(df, period=20):
     """محاسبه انحراف معیار قیمت"""
     try:
@@ -126,10 +121,7 @@ def _calculate_price_std(df, period=20):
         std_dev = close.rolling(period).std()
         
         return std_dev
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Error calculating Price Standard Deviation: {e}")
         return None
-
-def _calculate_market_volatility(df, period=20):
-    """محاسبه نوسانات بازار"""
-    return _cached_indicator_calculation(df, 'market_volatility', _calculate_market_volatility, period)
 

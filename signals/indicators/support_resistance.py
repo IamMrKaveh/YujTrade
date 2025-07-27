@@ -1,5 +1,5 @@
 from logger_config import logger
-from .cache_utils import _cached_indicator_calculation
+from .cache_utils import cached_calculation
 
 def _calculate_pivot_points_internal(df):
     """Internal Pivot Points calculation function"""
@@ -29,9 +29,10 @@ def _calculate_pivot_points_internal(df):
         logger.warning(f"Error calculating Pivot Points: {e}")
         return None
 
+@cached_calculation('pivot_points')
 def _calculate_pivot_points(df):
     """محاسبه Pivot Points with caching"""
-    return _cached_indicator_calculation(df, 'pivot_points', _calculate_pivot_points_internal)
+    return _calculate_pivot_points_internal(df)
             
 def _calculate_support_resistance_internal(df, window):
     """Internal calculation for Support/Resistance levels"""
@@ -67,10 +68,11 @@ def _calculate_support_resistance_internal(df, window):
         logger.warning(f"Error calculating Support/Resistance: {e}")
         return None
 
+@cached_calculation('support_resistance')
 def _calculate_support_resistance(df, window=20):
     """محاسبه سطوح Support و Resistance with caching"""
     try:
-        return _cached_indicator_calculation(df, 'support_resistance', _calculate_support_resistance_internal, window)
+        return _calculate_support_resistance_internal(df, window)
     except Exception as e:
         logger.warning(f"Error calculating Support/Resistance: {e}")
         return None
@@ -143,10 +145,11 @@ def _calculate_support_resistance_levels_internal(df, window, min_touches):
             'support_strength': []
         }
 
+@cached_calculation('support_resistance_levels')
 def _calculate_support_resistance_levels(df, window=20, min_touches=3):
     """محاسبه سطوح حمایت و مقاومت دقیق with caching"""
     try:
-        return _cached_indicator_calculation(df, 'support_resistance_levels', _calculate_support_resistance_levels_internal, window, min_touches)
+        return _calculate_support_resistance_levels_internal(df, window, min_touches)
     except Exception as e:
         logger.warning(f"Error calculating support/resistance levels: {e}")
         return None

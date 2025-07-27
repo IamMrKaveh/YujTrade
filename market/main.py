@@ -3,8 +3,6 @@ from logger_config import logger
 from market.batch_processing import _process_all_symbols_in_batches
 from market.signal_processing import _process_and_return_best_signal
 
-
-
 exchange = None
 
 async def analyze_market():

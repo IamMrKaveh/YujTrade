@@ -5,10 +5,10 @@ from logger_config import logger
 import numpy as np
 import asyncio
 
-from market.dynamic_levels import _calculate_dynamic_levels_long, _calculate_dynamic_levels_short
-from market.fibonacci import _get_nearby_fibonacci_levels
-from market.indicators import _add_additional_indicators
-from market.trend_volatility import _calculate_trend_direction, _calculate_volatility_metrics
+from .dynamic_levels import _calculate_dynamic_levels_long, _calculate_dynamic_levels_short
+from .fibonacci import _get_nearby_fibonacci_levels
+from .indicators import _add_additional_indicators
+from .trend_volatility import _calculate_trend_direction, _calculate_volatility_metrics
 from signals.core import check_signals
 from signals.indicators.indicator_management import calculate_indicators
 

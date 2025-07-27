@@ -1,5 +1,5 @@
 from logger_config import logger
-from market.scoring import _calculate_combined_score
+from .scoring import _calculate_combined_score
 
 import numpy as np
 
