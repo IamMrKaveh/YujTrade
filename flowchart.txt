@@ -1,0 +1,75 @@
+شروع
+  ↓
+بارگذاری تنظیمات
+  ↓
+راه‌اندازی ربات تلگرام
+  ↓
+برای هر تایم فریم:
+  ↓
+  دریافت کندل‌های 60 ارز از کوینکس
+  ↓
+  محاسبه اندیکاتورها برای هر ارز
+  ↓
+  تحلیل و تولید سیگنال‌ها
+  ↓
+  محاسبه Stop Loss و Take Profit
+  ↓
+  ارسال پیام به کاربران تلگرام
+  ↓
+انتظار برای دور بعدی
+  ↓
+تکرار
+
+==================================================================
+
+telegram_crypto_bot/
+├── main.py                 # نقطه ورود اصلی
+├── config/
+│   ├── __init__.py
+│   ├── settings.py         # تنظیمات و کانفیگ
+│   └── constants.py        # ثابت‌ها (تایم فریم‌ها، ارزها)
+├── services/
+│   ├── __init__.py
+│   ├── coinex_api.py       # سرویس API کوینکس
+│   ├── indicator_service.py # محاسبات اندیکاتورها
+│   ├── signal_service.py   # تولید سیگنال
+│   └── telegram_service.py # ارسال پیام تلگرام
+├── models/
+│   ├── __init__.py
+│   ├── base.py             # مدل پایه
+│   ├── candle.py          # مدل کندل
+│   ├── indicators.py       # مدل اندیکاتورها
+│   ├── market.py           # مدل بازار
+│   ├── notification.py     # مدل نوتیفیکیشن
+│   ├── signal.py          # مدل سیگنال
+│   ├── strategy.py         # مدل استراتژی
+│   └── timeframe.py       # مدل تایم فریم
+│   └── user.py              # مدل کاربر
+├── utils/
+│   ├── __init__.py
+│   ├── helpers.py         # توابع کمکی
+│   └── validators.py      # اعتبارسنجی داده‌ها
+├── handlers/
+│   ├── __init__.py
+│   └── bot_handlers.py    # هندلرهای ربات تلگرام
+├── indicators/
+│   ├── __init__.py
+│   ├── cache_utils.py  # کش اندیکاتورها
+│   ├── candlestick_patterns.py  # الگوهای کندل
+│   ├── correlation.py # همبستگی
+│   ├── fibonacci.py  # فیبوناچی
+│   ├── indicator_management.py  # مدیریت اندیکاتورها
+│   ├── market_structure.py  # ساختار بازار
+│   ├── momentum_indicators.py  # اندیکاتورهای مومنتوم
+│   ├── moving_averages.py  # میانگین‌های متحرک
+│   ├── position_sizing.py  # مدیریت اندازه موقعیت
+│   ├── signal_processing.py  # پردازش سیگنال
+│   ├── stop_loss_take_profit.py  # محاسبه Stop Loss و Take Profit
+│   ├── support_resistance.py  # حمایت و مقاومت
+│   ├── trend_indicators.py  # اندیکاتورهای روند
+│   └── volatility_indicators.py # اندیکاتورهای نوسان
+│   └── volume_indicators.py # اندیکاتورهای حجم
+└── requirements.txt
+
+===================================================================
+
