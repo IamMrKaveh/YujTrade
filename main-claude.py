@@ -3,16 +3,20 @@ from dataclasses import dataclass
 from enum import Enum
 import pandas as pd
 import ccxt.async_support as ccxt
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
-from logger_config import logger
-from config.constants import BOT_TOKEN, SYMBOLS, TIME_FRAMES
-
-from typing import Dict, List, Tuple, Optional, Protocol
 import warnings
+from typing import Dict, List, Tuple, Optional, Protocol, Any, Union
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import asyncio
+from contextlib import asynccontextmanager
+import json
+from pathlib import Path
+from config.constants import BOT_TOKEN, SYMBOLS, TIME_FRAMES
+from logger_config import logger
+
 
 warnings.filterwarnings('ignore')
 
@@ -21,1389 +25,1149 @@ class SignalType(Enum):
     SELL = "sell"
     HOLD = "hold"
 
+class TrendDirection(Enum):
+    BULLISH = "bullish"
+    BEARISH = "bearish"
+    SIDEWAYS = "sideways"
 
-class MarketTrend(Enum):
-    BULLISH = "صعودی"
-    BEARISH = "نزولی" 
-    SIDEWAYS = "خنثی"
-
+class MarketCondition(Enum):
+    OVERSOLD = "oversold"
+    OVERBOUGHT = "overbought"
+    NEUTRAL = "neutral"
 
 @dataclass
-class Signal:
+class TradingSignal:
+    symbol: str
     signal_type: SignalType
     entry_price: float
     exit_price: float
-    timestamp: pd.Timestamp
-    confidence: float
+    stop_loss: float
+    timestamp: datetime
+    timeframe: str
+    confidence_score: float
     reasons: List[str]
     risk_reward_ratio: float
-    stop_loss: Optional[float] = None
-
+    predicted_profit: float
+    volume_analysis: Dict[str, float]
+    market_context: Dict[str, Any]
 
 @dataclass
 class MarketAnalysis:
-    trend: MarketTrend
+    trend: TrendDirection
     volatility: float
-    momentum: float
-    strength: float
+    volume_trend: str
     support_levels: List[float]
     resistance_levels: List[float]
-    risk_level: str
+    momentum_score: float
+    market_condition: MarketCondition
 
+@dataclass
+class IndicatorResult:
+    name: str
+    value: float
+    signal_strength: float
+    interpretation: str
 
-class IndicatorCalculator(Protocol):
-    def calculate(self, data: pd.Series, **kwargs) -> pd.Series:
+class IndicatorInterface(Protocol):
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
         ...
 
-
-class TechnicalIndicators:
-    @staticmethod
-    def sma(data: pd.Series, period: int) -> pd.Series:
-        return data.rolling(window=period, min_periods=period//2).mean()
-    
-    @staticmethod
-    def ema(data: pd.Series, period: int) -> pd.Series:
-        return data.ewm(span=period, adjust=False).mean()
-    
-    @staticmethod
-    def wma(data: pd.Series, period: int) -> pd.Series:
-        weights = np.arange(1, period + 1)
-        return data.rolling(window=period).apply(
-            lambda x: np.dot(x, weights) / weights.sum(), raw=True
-        )
-    
-    @staticmethod
-    def rsi(data: pd.Series, period: int = 14) -> pd.Series:
-        delta = data.diff()
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        
-        avg_gain = gain.rolling(window=period).mean()
-        avg_loss = loss.rolling(window=period).mean()
-        
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi.fillna(50)
-    
-    @staticmethod
-    def macd(data: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[pd.Series, pd.Series, pd.Series]:
-        ema_fast = TechnicalIndicators.ema(data, fast)
-        ema_slow = TechnicalIndicators.ema(data, slow)
-        macd_line = ema_fast - ema_slow
-        signal_line = TechnicalIndicators.ema(macd_line, signal)
-        histogram = macd_line - signal_line
-        return macd_line, signal_line, histogram
-    
-    @staticmethod
-    def bollinger_bands(data: pd.Series, period: int = 20, std_dev: float = 2.0) -> Tuple[pd.Series, pd.Series, pd.Series]:
-        sma = TechnicalIndicators.sma(data, period)
-        std = data.rolling(window=period).std()
-        upper_band = sma + (std * std_dev)
-        lower_band = sma - (std * std_dev)
-        return upper_band, sma, lower_band
-    
-    @staticmethod
-    def stochastic(high: pd.Series, low: pd.Series, close: pd.Series, 
-                  k_period: int = 14, d_period: int = 3, smooth_k: int = 3) -> Tuple[pd.Series, pd.Series]:
-        lowest_low = low.rolling(window=k_period).min()
-        highest_high = high.rolling(window=k_period).max()
-        
-        k_raw = 100 * ((close - lowest_low) / (highest_high - lowest_low))
-        k_percent = k_raw.rolling(window=smooth_k).mean()
-        d_percent = k_percent.rolling(window=d_period).mean()
-        
-        return k_percent.fillna(50), d_percent.fillna(50)
-    
-    @staticmethod
-    def williams_r(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-        highest_high = high.rolling(window=period).max()
-        lowest_low = low.rolling(window=period).min()
-        wr = -100 * ((highest_high - close) / (highest_high - lowest_low))
-        return wr.fillna(-50)
-    
-    @staticmethod
-    def cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> pd.Series:
-        tp = (high + low + close) / 3
-        sma_tp = tp.rolling(window=period).mean()
-        mad = tp.rolling(window=period).apply(lambda x: np.abs(x - x.mean()).mean())
-        cci = (tp - sma_tp) / (0.015 * mad)
-        return cci.fillna(0)
-    
-    @staticmethod
-    def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(window=period).mean()
-        return atr.fillna(tr.mean())
-    
-    @staticmethod
-    def adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-        plus_dm = high.diff()
-        minus_dm = -low.diff()
-        
-        plus_dm[plus_dm < 0] = 0
-        minus_dm[minus_dm < 0] = 0
-        
-        tr = TechnicalIndicators.atr(high, low, close, 1)
-        plus_di = 100 * (plus_dm.rolling(window=period).mean() / tr.rolling(window=period).mean())
-        minus_di = 100 * (minus_dm.rolling(window=period).mean() / tr.rolling(window=period).mean())
-        
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = dx.rolling(window=period).mean()
-        return adx.fillna(25)
-    
-    @staticmethod
-    def mfi(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series, period: int = 14) -> pd.Series:
-        typical_price = (high + low + close) / 3
-        money_flow = typical_price * volume
-        
-        positive_flow = money_flow.where(typical_price > typical_price.shift(), 0).rolling(window=period).sum()
-        negative_flow = money_flow.where(typical_price < typical_price.shift(), 0).rolling(window=period).sum()
-        
-        mfi = 100 - (100 / (1 + positive_flow / negative_flow))
-        return mfi.fillna(50)
-
-
-class PatternDetector:
-    @staticmethod
-    def detect_hammer(open_price: pd.Series, high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
-        body = abs(close - open_price)
-        lower_shadow = open_price.combine(close, min) - low
-        upper_shadow = high - open_price.combine(close, max)
-        
-        hammer = (
-            (lower_shadow > 2 * body) &
-            (upper_shadow < 0.3 * body) &
-            (body > 0)
-        )
-        return hammer
-    
-    @staticmethod
-    def detect_doji(open_price: pd.Series, high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
-        body = abs(close - open_price)
-        total_range = high - low
-        
-        doji = body < (0.1 * total_range)
-        return doji
-    
-    @staticmethod
-    def detect_engulfing(open_price: pd.Series, high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
-        prev_open = open_price.shift(1)
-        prev_close = close.shift(1)
-        
-        bullish_engulfing = (
-            (prev_close < prev_open) &
-            (close > open_price) &
-            (open_price < prev_close) &
-            (close > prev_open)
-        )
-        
-        bearish_engulfing = (
-            (prev_close > prev_open) &
-            (close < open_price) &
-            (open_price > prev_close) &
-            (close < prev_open)
-        )
-        
-        return bullish_engulfing | bearish_engulfing
-
-
-class VolumeAnalyzer:
-    @staticmethod
-    def on_balance_volume(close: pd.Series, volume: pd.Series) -> pd.Series:
-        obv = (np.sign(close.diff()) * volume).fillna(0).cumsum()
-        return obv
-    
-    @staticmethod
-    def volume_weighted_average_price(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series) -> pd.Series:
-        typical_price = (high + low + close) / 3
-        vwap = (typical_price * volume).cumsum() / volume.cumsum()
-        return vwap
-    
-    @staticmethod
-    def accumulation_distribution(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series) -> pd.Series:
-        clv = ((close - low) - (high - close)) / (high - low)
-        clv = clv.fillna(0)
-        ad = (clv * volume).cumsum()
-        return ad
-
-
-class SupportResistanceFinder:
-    @staticmethod
-    def find_pivot_points(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 5) -> Dict[str, List[float]]:
-        highs = high.rolling(window=window*2+1, center=True).max()
-        lows = low.rolling(window=window*2+1, center=True).min()
-        
-        resistance_points = []
-        support_points = []
-        
-        for i in range(window, len(high) - window):
-            if high.iloc[i] == highs.iloc[i] and high.iloc[i] > high.iloc[i-window:i].max() and high.iloc[i] > high.iloc[i+1:i+window+1].max():
-                resistance_points.append(float(high.iloc[i]))
-            
-            if low.iloc[i] == lows.iloc[i] and low.iloc[i] < low.iloc[i-window:i].min() and low.iloc[i] < low.iloc[i+1:i+window+1].min():
-                support_points.append(float(low.iloc[i]))
-        
-        return {
-            'resistance': sorted(set(resistance_points), reverse=True)[:5],
-            'support': sorted(set(support_points))[-5:]
-        }
-    
-    @staticmethod
-    def find_fibonacci_levels(high: pd.Series, low: pd.Series, period: int = 50) -> Dict[str, float]:
-        recent_high = high.tail(period).max()
-        recent_low = low.tail(period).min()
-        diff = recent_high - recent_low
-        
-        levels = {
-            'level_0': recent_low,
-            'level_236': recent_low + 0.236 * diff,
-            'level_382': recent_low + 0.382 * diff,
-            'level_50': recent_low + 0.5 * diff,
-            'level_618': recent_low + 0.618 * diff,
-            'level_786': recent_low + 0.786 * diff,
-            'level_100': recent_high
-        }
-        
-        return levels
-
-
-class MarketRegimeDetector:
-    @staticmethod
-    def detect_volatility_regime(returns: pd.Series, window: int = 20) -> pd.Series:
-        rolling_vol = returns.rolling(window=window).std() * np.sqrt(252)
-        vol_median = rolling_vol.median()
-        
-        regime = pd.Series(index=returns.index, dtype=str)
-        regime[rolling_vol < vol_median * 0.7] = 'low_vol'
-        regime[rolling_vol > vol_median * 1.3] = 'high_vol'
-        regime[(rolling_vol >= vol_median * 0.7) & (rolling_vol <= vol_median * 1.3)] = 'normal_vol'
-        
-        return regime.fillna('normal_vol')
-    
-    @staticmethod
-    def detect_trend_strength(close: pd.Series, period: int = 20) -> pd.Series:
-        sma = close.rolling(window=period).mean()
-        distance = abs(close - sma) / sma
-        
-        strength = pd.Series(index=close.index, dtype=str)
-        strength[distance < 0.02] = 'weak'
-        strength[distance > 0.05] = 'strong'
-        strength[(distance >= 0.02) & (distance <= 0.05)] = 'moderate'
-        
-        return strength.fillna('moderate')
-
-
-class SignalGenerator(ABC):
+class TechnicalIndicator(ABC):
     @abstractmethod
-    def generate(self, df: pd.DataFrame) -> List[Signal]:
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
         pass
 
-
-class TrendFollowingSignals(SignalGenerator):
-    def generate(self, df: pd.DataFrame) -> List[Signal]:
-        signals = []
-        
-        for i in range(max(50, len(df) - 10), len(df)):
-            if i < 1:
-                continue
-                
-            current = df.iloc[i]
-            previous = df.iloc[i-1]
-            
-            confidence = 0
-            reasons = []
-            
-            if (current['sma_20'] > current['sma_50'] and 
-                previous['sma_20'] <= previous['sma_50']):
-                confidence += 25
-                reasons.append("تقاطع طلایی SMA")
-            
-            if (current['ema_12'] > current['ema_26'] and
-                current['close'] > current['ema_12']):
-                confidence += 20
-                reasons.append("ترند EMA صعودی")
-            
-            if current['adx'] > 25 and current['sma_20'] > current['sma_50']:
-                confidence += 15
-                reasons.append("ترند قوی صعودی")
-            
-            if confidence >= 40:
-                entry_price = current['close']
-                atr_value = current.get('atr', entry_price * 0.02)
-                
-                signals.append(Signal(
-                    signal_type=SignalType.BUY,
-                    entry_price=entry_price,
-                    exit_price=entry_price + (2 * atr_value),
-                    timestamp=current['timestamp'],
-                    confidence=confidence / 60,
-                    reasons=reasons,
-                    risk_reward_ratio=2.0,
-                    stop_loss=entry_price - atr_value
-                ))
-        
-        return signals
-
-
-class MeanReversionSignals(SignalGenerator):
-    def generate(self, df: pd.DataFrame) -> List[Signal]:
-        signals = []
-        
-        for i in range(max(50, len(df) - 10), len(df)):
-            if i < 1:
-                continue
-                
-            current = df.iloc[i]
-            confidence = 0
-            reasons = []
-            
-            if current['rsi'] < 30:
-                confidence += 30
-                reasons.append("RSI oversold")
-            
-            if current['close'] <= current['bb_lower']:
-                confidence += 25
-                reasons.append("نزدیک باند پایین بولینگر")
-            
-            if current['stoch_k'] < 20 and current['stoch_d'] < 20:
-                confidence += 20
-                reasons.append("استوکاستیک oversold")
-            
-            if current['williams_r'] < -80:
-                confidence += 15
-                reasons.append("Williams %R oversold")
-            
-            if confidence >= 50:
-                entry_price = current['close']
-                target_price = current.get('bb_middle', entry_price * 1.03)
-                
-                signals.append(Signal(
-                    signal_type=SignalType.BUY,
-                    entry_price=entry_price,
-                    exit_price=target_price,
-                    timestamp=current['timestamp'],
-                    confidence=confidence / 90,
-                    reasons=reasons,
-                    risk_reward_ratio=(target_price - entry_price) / (entry_price * 0.02),
-                    stop_loss=entry_price * 0.98
-                ))
-        
-        return signals
-
-
-class MomentumSignals(SignalGenerator):
-    def generate(self, df: pd.DataFrame) -> List[Signal]:
-        signals = []
-        
-        for i in range(max(50, len(df) - 10), len(df)):
-            if i < 1:
-                continue
-                
-            current = df.iloc[i]
-            previous = df.iloc[i-1]
-            
-            confidence = 0
-            reasons = []
-            
-            if (current['macd'] > current['macd_signal'] and 
-                previous['macd'] <= previous['macd_signal']):
-                confidence += 30
-                reasons.append("MACD تقاطع صعودی")
-            
-            if current['macd_histogram'] > previous['macd_histogram']:
-                confidence += 15
-                reasons.append("MACD momentum افزایشی")
-            
-            if current['mfi'] > 20 and current['mfi'] < 80:
-                confidence += 20
-                reasons.append("Money Flow متعادل")
-            
-            if current['cci'] > -100 and previous['cci'] <= -100:
-                confidence += 25
-                reasons.append("CCI بازگشت از oversold")
-            
-            if confidence >= 45:
-                entry_price = current['close']
-                atr_value = current.get('atr', entry_price * 0.02)
-                
-                signals.append(Signal(
-                    signal_type=SignalType.BUY,
-                    entry_price=entry_price,
-                    exit_price=entry_price + (1.5 * atr_value),
-                    timestamp=current['timestamp'],
-                    confidence=confidence / 90,
-                    reasons=reasons,
-                    risk_reward_ratio=1.5,
-                    stop_loss=entry_price - atr_value
-                ))
-        
-        return signals
-
-
-class AdvancedSignalAnalyzer:
-    def __init__(self):
-        self.indicators = TechnicalIndicators()
-        self.pattern_detector = PatternDetector()
-        self.volume_analyzer = VolumeAnalyzer()
-        self.sr_finder = SupportResistanceFinder()
-        self.regime_detector = MarketRegimeDetector()
-        
-        self.signal_generators = [
-            TrendFollowingSignals(),
-            MeanReversionSignals(),
-            MomentumSignals()
-        ]
+class MovingAverageIndicator(TechnicalIndicator):
+    def __init__(self, period: int, ma_type: str = "sma"):
+        self.period = period
+        self.ma_type = ma_type
     
-    def analyze_dataframe(self, df: pd.DataFrame) -> Dict:
-        if df.empty or len(df) < 100:
-            return {'signals': [], 'analysis': {}, 'dataframe': df}
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        if self.ma_type == "sma":
+            ma_values = data['close'].rolling(window=self.period).mean()
+        else:
+            ma_values = data['close'].ewm(span=self.period).mean()
         
-        enriched_df = self._enrich_dataframe(df)
-        signals = self._generate_comprehensive_signals(enriched_df)
-        market_analysis = self._comprehensive_market_analysis(enriched_df)
+        current_price = data['close'].iloc[-1]
+        current_ma = ma_values.iloc[-1]
+        
+        signal_strength = abs((current_price - current_ma) / current_ma) * 100
+        
+        if current_price > current_ma:
+            interpretation = "bullish_above_ma"
+        else:
+            interpretation = "bearish_below_ma"
+        
+        return IndicatorResult(
+            name=f"{self.ma_type.upper()}_{self.period}",
+            value=current_ma,
+            signal_strength=signal_strength,
+            interpretation=interpretation
+        )
+
+class RSIIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 14):
+        self.period = period
+    
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        delta = data['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=self.period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=self.period).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        
+        current_rsi = rsi.iloc[-1]
+        
+        if current_rsi > 70:
+            interpretation = "overbought"
+            signal_strength = (current_rsi - 70) / 30 * 100
+        elif current_rsi < 30:
+            interpretation = "oversold"
+            signal_strength = (30 - current_rsi) / 30 * 100
+        else:
+            interpretation = "neutral"
+            signal_strength = 50 - abs(current_rsi - 50)
+        
+        return IndicatorResult(
+            name="RSI",
+            value=current_rsi,
+            signal_strength=signal_strength,
+            interpretation=interpretation
+        )
+
+class MACDIndicator(TechnicalIndicator):
+    def __init__(self, fast: int = 12, slow: int = 26, signal: int = 9):
+        self.fast = fast
+        self.slow = slow
+        self.signal = signal
+    
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        ema_fast = data['close'].ewm(span=self.fast).mean()
+        ema_slow = data['close'].ewm(span=self.slow).mean()
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=self.signal).mean()
+        histogram = macd_line - signal_line
+        
+        current_macd = macd_line.iloc[-1]
+        current_signal = signal_line.iloc[-1]
+        current_histogram = histogram.iloc[-1]
+        
+        if current_macd > current_signal and current_histogram > 0:
+            interpretation = "bullish_crossover"
+            signal_strength = abs(current_histogram) * 100
+        elif current_macd < current_signal and current_histogram < 0:
+            interpretation = "bearish_crossover"
+            signal_strength = abs(current_histogram) * 100
+        else:
+            interpretation = "neutral"
+            signal_strength = 50
+        
+        return IndicatorResult(
+            name="MACD",
+            value=current_macd,
+            signal_strength=signal_strength,
+            interpretation=interpretation
+        )
+
+class BollingerBandsIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 20, std_dev: float = 2):
+        self.period = period
+        self.std_dev = std_dev
+    
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        sma = data['close'].rolling(window=self.period).mean()
+        std = data['close'].rolling(window=self.period).std()
+        upper_band = sma + (std * self.std_dev)
+        lower_band = sma - (std * self.std_dev)
+        
+        current_price = data['close'].iloc[-1]
+        current_upper = upper_band.iloc[-1]
+        current_lower = lower_band.iloc[-1]
+        current_middle = sma.iloc[-1]
+        
+        bb_position = (current_price - current_lower) / (current_upper - current_lower)
+        
+        if bb_position > 0.8:
+            interpretation = "near_upper_band"
+            signal_strength = (bb_position - 0.8) / 0.2 * 100
+        elif bb_position < 0.2:
+            interpretation = "near_lower_band"
+            signal_strength = (0.2 - bb_position) / 0.2 * 100
+        else:
+            interpretation = "middle_range"
+            signal_strength = 50
+        
+        return IndicatorResult(
+            name="BB",
+            value=bb_position,
+            signal_strength=signal_strength,
+            interpretation=interpretation
+        )
+
+class StochasticIndicator(TechnicalIndicator):
+    def __init__(self, k_period: int = 14, d_period: int = 3):
+        self.k_period = k_period
+        self.d_period = d_period
+    
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        lowest_low = data['low'].rolling(window=self.k_period).min()
+        highest_high = data['high'].rolling(window=self.k_period).max()
+        k_percent = 100 * ((data['close'] - lowest_low) / (highest_high - lowest_low))
+        d_percent = k_percent.rolling(window=self.d_period).mean()
+        
+        current_k = k_percent.iloc[-1]
+        current_d = d_percent.iloc[-1]
+        
+        if current_k > 80 and current_d > 80:
+            interpretation = "overbought"
+            signal_strength = ((current_k + current_d) / 2 - 80) / 20 * 100
+        elif current_k < 20 and current_d < 20:
+            interpretation = "oversold"
+            signal_strength = (20 - (current_k + current_d) / 2) / 20 * 100
+        else:
+            interpretation = "neutral"
+            signal_strength = 50
+        
+        return IndicatorResult(
+            name="STOCH",
+            value=(current_k + current_d) / 2,
+            signal_strength=signal_strength,
+            interpretation=interpretation
+        )
+
+class VolumeIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 20):
+        self.period = period
+    
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        volume_ma = data['volume'].rolling(window=self.period).mean()
+        current_volume = data['volume'].iloc[-1]
+        average_volume = volume_ma.iloc[-1]
+        
+        volume_ratio = current_volume / average_volume
+        
+        if volume_ratio > 1.5:
+            interpretation = "high_volume"
+            signal_strength = min((volume_ratio - 1) * 50, 100)
+        elif volume_ratio < 0.5:
+            interpretation = "low_volume"
+            signal_strength = (1 - volume_ratio) * 100
+        else:
+            interpretation = "normal_volume"
+            signal_strength = 50
+        
+        return IndicatorResult(
+            name="VOLUME",
+            value=volume_ratio,
+            signal_strength=signal_strength,
+            interpretation=interpretation
+        )
+
+class ATRIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 14):
+        self.period = period
+    
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        high_low = data['high'] - data['low']
+        high_close = np.abs(data['high'] - data['close'].shift())
+        low_close = np.abs(data['low'] - data['close'].shift())
+        
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = ranges.max(axis=1)
+        atr = true_range.rolling(window=self.period).mean()
+        
+        current_atr = atr.iloc[-1]
+        current_price = data['close'].iloc[-1]
+        atr_percentage = (current_atr / current_price) * 100
+        
+        if atr_percentage > 3:
+            interpretation = "high_volatility"
+            signal_strength = min(atr_percentage * 20, 100)
+        elif atr_percentage < 1:
+            interpretation = "low_volatility"
+            signal_strength = (1 - atr_percentage) * 100
+        else:
+            interpretation = "normal_volatility"
+            signal_strength = 50
+        
+        return IndicatorResult(
+            name="ATR",
+            value=current_atr,
+            signal_strength=signal_strength,
+            interpretation=interpretation
+        )
+
+class SupportResistanceAnalyzer:
+    def __init__(self, lookback_period: int = 50):
+        self.lookback_period = lookback_period
+    
+    def find_support_resistance(self, data: pd.DataFrame) -> Tuple[List[float], List[float]]:
+        if len(data) < self.lookback_period:
+            return [], []
+        
+        recent_data = data.tail(self.lookback_period)
+        
+        highs = recent_data['high'].values
+        lows = recent_data['low'].values
+        
+        resistance_levels = []
+        support_levels = []
+        
+        for i in range(2, len(highs) - 2):
+            if (highs[i] > highs[i-1] and highs[i] > highs[i-2] and 
+                highs[i] > highs[i+1] and highs[i] > highs[i+2]):
+                resistance_levels.append(highs[i])
+        
+        for i in range(2, len(lows) - 2):
+            if (lows[i] < lows[i-1] and lows[i] < lows[i-2] and 
+                lows[i] < lows[i+1] and lows[i] < lows[i+2]):
+                support_levels.append(lows[i])
+        
+        resistance_levels = sorted(set(resistance_levels), reverse=True)[:5]
+        support_levels = sorted(set(support_levels), reverse=True)[:5]
+        
+        return support_levels, resistance_levels
+
+class VolumeAnalyzer:
+    def analyze_volume_pattern(self, data: pd.DataFrame) -> Dict[str, float]:
+        volume_ma_20 = data['volume'].rolling(window=20).mean()
+        current_volume = data['volume'].iloc[-1]
+        avg_volume = volume_ma_20.iloc[-1]
+        
+        volume_trend = self._calculate_volume_trend(data)
+        volume_breakout = current_volume / avg_volume
         
         return {
-            'signals': signals,
-            'analysis': market_analysis,
-            'dataframe': enriched_df
+            'volume_ratio': volume_breakout,
+            'volume_trend': volume_trend,
+            'volume_strength': min(volume_breakout * 50, 100)
         }
     
-    def _enrich_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
+    def _calculate_volume_trend(self, data: pd.DataFrame) -> float:
+        recent_volumes = data['volume'].tail(10)
+        if len(recent_volumes) < 2:
+            return 0
         
-        df['returns'] = df['close'].pct_change()
-        
-        df['sma_20'] = self.indicators.sma(df['close'], 20)
-        df['sma_50'] = self.indicators.sma(df['close'], 50)
-        df['sma_200'] = self.indicators.sma(df['close'], 200)
-        df['ema_12'] = self.indicators.ema(df['close'], 12)
-        df['ema_26'] = self.indicators.ema(df['close'], 26)
-        df['wma_20'] = self.indicators.wma(df['close'], 20)
-        
-        df['rsi'] = self.indicators.rsi(df['close'])
-        df['rsi_14'] = self.indicators.rsi(df['close'], 14)
-        df['rsi_21'] = self.indicators.rsi(df['close'], 21)
-        
-        macd_line, signal_line, histogram = self.indicators.macd(df['close'])
-        df['macd'] = macd_line
-        df['macd_signal'] = signal_line
-        df['macd_histogram'] = histogram
-        
-        upper_bb, middle_bb, lower_bb = self.indicators.bollinger_bands(df['close'])
-        df['bb_upper'] = upper_bb
-        df['bb_middle'] = middle_bb
-        df['bb_lower'] = lower_bb
-        df['bb_width'] = (upper_bb - lower_bb) / middle_bb
-        df['bb_position'] = (df['close'] - lower_bb) / (upper_bb - lower_bb)
-        
-        k_percent, d_percent = self.indicators.stochastic(df['high'], df['low'], df['close'])
-        df['stoch_k'] = k_percent
-        df['stoch_d'] = d_percent
-        
-        df['williams_r'] = self.indicators.williams_r(df['high'], df['low'], df['close'])
-        df['cci'] = self.indicators.cci(df['high'], df['low'], df['close'])
-        df['atr'] = self.indicators.atr(df['high'], df['low'], df['close'])
-        df['adx'] = self.indicators.adx(df['high'], df['low'], df['close'])
-        
-        if 'volume' in df.columns:
-            df['mfi'] = self.indicators.mfi(df['high'], df['low'], df['close'], df['volume'])
-            df['obv'] = self.volume_analyzer.on_balance_volume(df['close'], df['volume'])
-            df['vwap'] = self.volume_analyzer.volume_weighted_average_price(
-                df['high'], df['low'], df['close'], df['volume']
-            )
-            df['ad_line'] = self.volume_analyzer.accumulation_distribution(
-                df['high'], df['low'], df['close'], df['volume']
-            )
-            df['volume_sma'] = self.indicators.sma(df['volume'], 20)
-            df['volume_ratio'] = df['volume'] / df['volume_sma']
-        
-        if 'open' in df.columns:
-            df['hammer'] = self.pattern_detector.detect_hammer(df['open'], df['high'], df['low'], df['close'])
-            df['doji'] = self.pattern_detector.detect_doji(df['open'], df['high'], df['low'], df['close'])
-            df['engulfing'] = self.pattern_detector.detect_engulfing(df['open'], df['high'], df['low'], df['close'])
-        
-        df['volatility_regime'] = self.regime_detector.detect_volatility_regime(df['returns'])
-        df['trend_strength'] = self.regime_detector.detect_trend_strength(df['close'])
-        
-        return df.fillna(method='ffill').fillna(method='bfill')
+        volume_changes = recent_volumes.pct_change().dropna()
+        return volume_changes.mean()
+
+class MarketConditionAnalyzer:
+    def __init__(self):
+        self.support_resistance = SupportResistanceAnalyzer()
+        self.volume_analyzer = VolumeAnalyzer()
     
-    def _generate_comprehensive_signals(self, df: pd.DataFrame) -> List[Signal]:
-        all_signals = []
+    def analyze_market_condition(self, data: pd.DataFrame) -> MarketAnalysis:
+        support_levels, resistance_levels = self.support_resistance.find_support_resistance(data)
+        volume_analysis = self.volume_analyzer.analyze_volume_pattern(data)
         
-        for generator in self.signal_generators:
-            signals = generator.generate(df)
-            all_signals.extend(signals)
-        
-        all_signals.sort(key=lambda x: x.confidence, reverse=True)
-        
-        filtered_signals = self._filter_conflicting_signals(all_signals)
-        enhanced_signals = self._enhance_signals_with_confluence(filtered_signals, df)
-        
-        return enhanced_signals[:10]
-    
-    def _filter_conflicting_signals(self, signals: List[Signal]) -> List[Signal]:
-        filtered = []
-        used_timestamps = set()
-        
-        for signal in signals:
-            timestamp_key = signal.timestamp.floor('H')
-            
-            if timestamp_key not in used_timestamps:
-                filtered.append(signal)
-                used_timestamps.add(timestamp_key)
-        
-        return filtered
-    
-    def _enhance_signals_with_confluence(self, signals: List[Signal], df: pd.DataFrame) -> List[Signal]:
-        enhanced_signals = []
-        
-        for signal in signals:
-            timestamp_idx = df[df['timestamp'] == signal.timestamp].index
-            if len(timestamp_idx) == 0:
-                continue
-                
-            idx = timestamp_idx[0]
-            current = df.iloc[idx]
-            
-            confluence_score = 0
-            additional_reasons = []
-            
-            if 'volume_ratio' in current and current['volume_ratio'] > 1.5:
-                confluence_score += 10
-                additional_reasons.append("حجم بالا")
-            
-            if current.get('bb_width', 0) < 0.1:
-                confluence_score += 5
-                additional_reasons.append("کاهش نوسان")
-            
-            if current.get('adx', 0) > 25:
-                confluence_score += 15
-                additional_reasons.append("ترند قوی")
-                
-            if current.get('trend_strength') == 'strong':
-                confluence_score += 10
-                additional_reasons.append("قدرت ترند بالا")
-            
-            enhanced_confidence = min(1.0, signal.confidence + (confluence_score / 100))
-            enhanced_reasons = signal.reasons + additional_reasons
-            
-            enhanced_signal = Signal(
-                signal_type=signal.signal_type,
-                entry_price=signal.entry_price,
-                exit_price=signal.exit_price,
-                timestamp=signal.timestamp,
-                confidence=enhanced_confidence,
-                reasons=enhanced_reasons,
-                risk_reward_ratio=signal.risk_reward_ratio,
-                stop_loss=signal.stop_loss
-            )
-            
-            enhanced_signals.append(enhanced_signal)
-        
-        return enhanced_signals
-    
-    def _comprehensive_market_analysis(self, df: pd.DataFrame) -> MarketAnalysis:
-        if df.empty:
-            return MarketAnalysis(
-                trend=MarketTrend.SIDEWAYS,
-                volatility=0,
-                momentum=0,
-                strength=0,
-                support_levels=[],
-                resistance_levels=[],
-                risk_level="نامعلوم"
-            )
-        
-        current = df.iloc[-1]
-        
-        trend = self._determine_market_trend(df)
-        volatility = self._calculate_market_volatility(df)
-        momentum = self._calculate_momentum_score(df)
-        strength = self._calculate_market_strength(df)
-        
-        pivot_points = self.sr_finder.find_pivot_points(df['high'], df['low'], df['close'])
-        fib_levels = self.sr_finder.find_fibonacci_levels(df['high'], df['low'])
-        
-        support_levels = pivot_points['support'] + [fib_levels['level_382'], fib_levels['level_618']]
-        resistance_levels = pivot_points['resistance'] + [fib_levels['level_618'], fib_levels['level_786']]
-        
-        risk_level = self._assess_risk_level(volatility, strength, current)
+        trend = self._determine_trend(data)
+        volatility = self._calculate_volatility(data)
+        momentum_score = self._calculate_momentum(data)
+        market_condition = self._determine_market_condition(data)
         
         return MarketAnalysis(
             trend=trend,
             volatility=volatility,
-            momentum=momentum,
-            strength=strength,
-            support_levels=sorted(set(support_levels))[:5],
-            resistance_levels=sorted(set(resistance_levels), reverse=True)[:5],
-            risk_level=risk_level
+            volume_trend="increasing" if volume_analysis['volume_trend'] > 0 else "decreasing",
+            support_levels=support_levels,
+            resistance_levels=resistance_levels,
+            momentum_score=momentum_score,
+            market_condition=market_condition
         )
     
-    def _determine_market_trend(self, df: pd.DataFrame) -> MarketTrend:
-        current = df.iloc[-1]
+    def _determine_trend(self, data: pd.DataFrame) -> TrendDirection:
+        sma_20 = data['close'].rolling(window=20).mean()
+        sma_50 = data['close'].rolling(window=50).mean()
         
-        sma_score = 0
-        if current['sma_20'] > current['sma_50']:
-            sma_score += 1
-        if current['sma_50'] > current['sma_200']:
-            sma_score += 1
-        if current['close'] > current['sma_20']:
-            sma_score += 1
+        if len(sma_20) < 50 or len(sma_50) < 50:
+            return TrendDirection.SIDEWAYS
         
-        if sma_score >= 2:
-            return MarketTrend.BULLISH
-        elif sma_score <= 1:
-            return MarketTrend.BEARISH
+        current_sma_20 = sma_20.iloc[-1]
+        current_sma_50 = sma_50.iloc[-1]
+        
+        if current_sma_20 > current_sma_50 * 1.01:
+            return TrendDirection.BULLISH
+        elif current_sma_20 < current_sma_50 * 0.99:
+            return TrendDirection.BEARISH
         else:
-            return MarketTrend.SIDEWAYS
+            return TrendDirection.SIDEWAYS
     
-    def _calculate_market_volatility(self, df: pd.DataFrame) -> float:
-        returns = df['returns'].dropna()
-        if len(returns) < 20:
+    def _calculate_volatility(self, data: pd.DataFrame) -> float:
+        returns = data['close'].pct_change().dropna()
+        return returns.std() * np.sqrt(len(returns))
+    
+    def _calculate_momentum(self, data: pd.DataFrame) -> float:
+        if len(data) < 20:
             return 0.0
         
-        volatility = returns.rolling(window=20).std().iloc[-1] * np.sqrt(252)
-        return float(volatility) if not pd.isna(volatility) else 0.0
+        price_change = (data['close'].iloc[-1] - data['close'].iloc[-20]) / data['close'].iloc[-20]
+        return price_change * 100
     
-    def _calculate_momentum_score(self, df: pd.DataFrame) -> float:
-        current = df.iloc[-1]
+    def _determine_market_condition(self, data: pd.DataFrame) -> MarketCondition:
+        rsi_indicator = RSIIndicator()
+        rsi_result = rsi_indicator.calculate(data)
         
-        momentum_indicators = [
-            (current.get('rsi', 50) - 50) / 50,
-            current.get('macd_histogram', 0) / abs(current.get('macd_histogram', 1)),
-            (current.get('stoch_k', 50) - 50) / 50,
-            (current.get('cci', 0)) / 100
-        ]
-        
-        valid_indicators = [x for x in momentum_indicators if not pd.isna(x) and abs(x) < 10]
-        
-        if not valid_indicators:
-            return 0.0
-        
-        return float(np.mean(valid_indicators))
-    
-    def _calculate_market_strength(self, df: pd.DataFrame) -> float:
-        current = df.iloc[-1]
-        
-        adx_strength = min(current.get('adx', 0) / 50, 1.0)
-        volume_strength = min(current.get('volume_ratio', 1) / 2, 1.0) if 'volume_ratio' in current else 0.5
-        
-        return float((adx_strength + volume_strength) / 2)
-    
-    def _assess_risk_level(self, volatility: float, strength: float, current: pd.Series) -> str:
-        risk_score = 0
-        
-        if volatility > 0.3:
-            risk_score += 2
-        elif volatility > 0.2:
-            risk_score += 1
-        
-        if strength < 0.3:
-            risk_score += 1
-        
-        rsi_val = current.get('rsi', 50)
-        if rsi_val > 80 or rsi_val < 20:
-            risk_score += 2
-        elif rsi_val > 70 or rsi_val < 30:
-            risk_score += 1
-        
-        bb_position = current.get('bb_position', 0.5)
-        if bb_position > 0.9 or bb_position < 0.1:
-            risk_score += 1
-        
-        if current.get('volatility_regime') == 'high_vol':
-            risk_score += 1
-        
-        if risk_score >= 4:
-            return "بالا"
-        elif risk_score >= 2:
-            return "متوسط"
+        if rsi_result.value > 70:
+            return MarketCondition.OVERBOUGHT
+        elif rsi_result.value < 30:
+            return MarketCondition.OVERSOLD
         else:
-            return "پایین"
+            return MarketCondition.NEUTRAL
 
-
-class RiskManager:
-    @staticmethod
-    def calculate_position_size(account_balance: float, risk_per_trade: float, 
-                              entry_price: float, stop_loss: float) -> float:
-        if stop_loss is None or stop_loss == entry_price:
-            return account_balance * 0.01
-        
-        risk_amount = account_balance * risk_per_trade
-        price_risk = abs(entry_price - stop_loss)
-        position_size = risk_amount / price_risk
-        
-        max_position = account_balance * 0.1
-        return min(position_size, max_position)
-    
-    @staticmethod
-    def adjust_for_volatility(base_size: float, volatility: float) -> float:
-        if volatility > 0.3:
-            return base_size * 0.5
-        elif volatility > 0.2:
-            return base_size * 0.7
-        else:
-            return base_size
-    
-    @staticmethod
-    def calculate_kelly_criterion(win_rate: float, avg_win: float, avg_loss: float) -> float:
-        if avg_loss == 0:
-            return 0.0
-        
-        win_loss_ratio = avg_win / avg_loss
-        kelly_percentage = (win_rate * win_loss_ratio - (1 - win_rate)) / win_loss_ratio
-        
-        return max(0.0, min(0.25, kelly_percentage))
-
-
-class PortfolioOptimizer:
+class SignalGenerator:
     def __init__(self):
-        self.risk_manager = RiskManager()
+        self.indicators = {
+            'sma_20': MovingAverageIndicator(20, "sma"),
+            'sma_50': MovingAverageIndicator(50, "sma"),
+            'ema_12': MovingAverageIndicator(12, "ema"),
+            'ema_26': MovingAverageIndicator(26, "ema"),
+            'rsi': RSIIndicator(),
+            'macd': MACDIndicator(),
+            'bb': BollingerBandsIndicator(),
+            'stoch': StochasticIndicator(),
+            'volume': VolumeIndicator(),
+            'atr': ATRIndicator()
+        }
+        self.market_analyzer = MarketConditionAnalyzer()
     
-    def optimize_signals(self, signals: List[Signal], account_balance: float = 100000, 
-                        max_concurrent_trades: int = 5) -> List[Dict]:
-        if not signals:
+    def generate_signals(self, data: pd.DataFrame, symbol: str, timeframe: str) -> List[TradingSignal]:
+        if len(data) < 50:
             return []
         
-        optimized_trades = []
-        correlation_matrix = self._calculate_signal_correlation(signals)
-        
-        selected_signals = self._select_uncorrelated_signals(
-            signals, correlation_matrix, max_concurrent_trades
-        )
-        
-        for signal in selected_signals:
-            position_size = self.risk_manager.calculate_position_size(
-                account_balance, 0.02, signal.entry_price, signal.stop_loss
-            )
-            
-            trade_info = {
-                'signal': signal,
-                'position_size': position_size,
-                'risk_amount': account_balance * 0.02,
-                'potential_profit': (signal.exit_price - signal.entry_price) * position_size,
-                'potential_loss': (signal.entry_price - (signal.stop_loss or signal.entry_price * 0.98)) * position_size,
-                'expected_value': self._calculate_expected_value(signal, position_size)
-            }
-            
-            optimized_trades.append(trade_info)
-        
-        return sorted(optimized_trades, key=lambda x: x['expected_value'], reverse=True)
-    
-    def _calculate_signal_correlation(self, signals: List[Signal]) -> np.ndarray:
-        n_signals = len(signals)
-        correlation_matrix = np.eye(n_signals)
-        
-        for i in range(n_signals):
-            for j in range(i + 1, n_signals):
-                correlation = self._calculate_pairwise_correlation(signals[i], signals[j])
-                correlation_matrix[i, j] = correlation
-                correlation_matrix[j, i] = correlation
-        
-        return correlation_matrix
-    
-    def _calculate_pairwise_correlation(self, signal1: Signal, signal2: Signal) -> float:
-        time_diff = abs((signal1.timestamp - signal2.timestamp).total_seconds())
-        time_correlation = max(0, 1 - time_diff / 86400)
-        
-        price_diff = abs(signal1.entry_price - signal2.entry_price) / max(signal1.entry_price, signal2.entry_price)
-        price_correlation = max(0, 1 - price_diff * 10)
-        
-        same_type = 1.0 if signal1.signal_type == signal2.signal_type else 0.5
-        
-        return (time_correlation + price_correlation + same_type) / 3
-    
-    def _select_uncorrelated_signals(self, signals: List[Signal], 
-                                   correlation_matrix: np.ndarray, 
-                                   max_signals: int) -> List[Signal]:
-        selected_indices = []
-        remaining_indices = list(range(len(signals)))
-        
-        remaining_indices.sort(key=lambda i: signals[i].confidence, reverse=True)
-        
-        while len(selected_indices) < max_signals and remaining_indices:
-            best_idx = remaining_indices[0]
-            selected_indices.append(best_idx)
-            remaining_indices.remove(best_idx)
-            
-            remaining_indices = [
-                idx for idx in remaining_indices
-                if correlation_matrix[best_idx, idx] < 0.7
-            ]
-        
-        return [signals[i] for i in selected_indices]
-    
-    def _calculate_expected_value(self, signal: Signal, position_size: float) -> float:
-        estimated_win_rate = min(0.8, signal.confidence)
-        
-        potential_profit = (signal.exit_price - signal.entry_price) * position_size
-        potential_loss = (signal.entry_price - (signal.stop_loss or signal.entry_price * 0.98)) * position_size
-        
-        expected_value = (estimated_win_rate * potential_profit) - ((1 - estimated_win_rate) * potential_loss)
-        
-        return expected_value
-
-
-class PerformanceTracker:
-    def __init__(self):
-        self.trades = []
-        self.equity_curve = []
-    
-    def add_trade(self, entry_price: float, exit_price: float, position_size: float, 
-                 signal_type: SignalType, timestamp: pd.Timestamp):
-        if signal_type == SignalType.BUY:
-            pnl = (exit_price - entry_price) * position_size
-        else:
-            pnl = (entry_price - exit_price) * position_size
-        
-        trade = {
-            'entry_price': entry_price,
-            'exit_price': exit_price,
-            'position_size': position_size,
-            'pnl': pnl,
-            'timestamp': timestamp,
-            'signal_type': signal_type
-        }
-        
-        self.trades.append(trade)
-        
-        current_equity = self.equity_curve[-1] if self.equity_curve else 100000
-        new_equity = current_equity + pnl
-        self.equity_curve.append(new_equity)
-    
-    def calculate_metrics(self) -> Dict:
-        if not self.trades:
-            return {}
-        
-        total_trades = len(self.trades)
-        winning_trades = len([t for t in self.trades if t['pnl'] > 0])
-        losing_trades = total_trades - winning_trades
-        
-        win_rate = winning_trades / total_trades if total_trades > 0 else 0
-        
-        total_pnl = sum(t['pnl'] for t in self.trades)
-        avg_win = np.mean([t['pnl'] for t in self.trades if t['pnl'] > 0]) if winning_trades > 0 else 0
-        avg_loss = np.mean([abs(t['pnl']) for t in self.trades if t['pnl'] < 0]) if losing_trades > 0 else 0
-        
-        profit_factor = (avg_win * winning_trades) / (avg_loss * losing_trades) if losing_trades > 0 else float('inf')
-        
-        equity_series = pd.Series(self.equity_curve)
-        max_drawdown = self._calculate_max_drawdown(equity_series)
-        sharpe_ratio = self._calculate_sharpe_ratio(equity_series)
-        
-        return {
-            'total_trades': total_trades,
-            'win_rate': win_rate,
-            'total_pnl': total_pnl,
-            'avg_win': avg_win,
-            'avg_loss': avg_loss,
-            'profit_factor': profit_factor,
-            'max_drawdown': max_drawdown,
-            'sharpe_ratio': sharpe_ratio,
-            'final_equity': self.equity_curve[-1] if self.equity_curve else 100000
-        }
-    
-    def _calculate_max_drawdown(self, equity_series: pd.Series) -> float:
-        if len(equity_series) < 2:
-            return 0.0
-        
-        peak = equity_series.expanding().max()
-        drawdown = (equity_series - peak) / peak
-        max_drawdown = drawdown.min()
-        
-        return abs(max_drawdown)
-    
-    def _calculate_sharpe_ratio(self, equity_series: pd.Series) -> float:
-        if len(equity_series) < 2:
-            return 0.0
-        
-        returns = equity_series.pct_change().dropna()
-        if len(returns) == 0 or returns.std() == 0:
-            return 0.0
-        
-        sharpe = (returns.mean() / returns.std()) * np.sqrt(252)
-        return sharpe
-
-
-class TradingSystem:
-    def __init__(self):
-        self.analyzer = AdvancedSignalAnalyzer()
-        self.optimizer = PortfolioOptimizer()
-        self.performance_tracker = PerformanceTracker()
-    
-    def run_analysis(self, df: pd.DataFrame, account_balance: float = 100000) -> Dict:
-        analysis_result = self.analyzer.analyze_dataframe(df)
-        
-        if not analysis_result['signals']:
-            return {
-                'signals': [],
-                'optimized_trades': [],
-                'market_analysis': analysis_result['analysis'],
-                'performance_metrics': {},
-                'dataframe': analysis_result['dataframe']
-            }
-        
-        optimized_trades = self.optimizer.optimize_signals(
-            analysis_result['signals'], account_balance
-        )
-        
-        performance_metrics = self.performance_tracker.calculate_metrics()
-        
-        return {
-            'signals': [self._signal_to_dict(s) for s in analysis_result['signals']],
-            'optimized_trades': optimized_trades,
-            'market_analysis': self._analysis_to_dict(analysis_result['analysis']),
-            'performance_metrics': performance_metrics,
-            'dataframe': analysis_result['dataframe']
-        }
-    
-    def _signal_to_dict(self, signal: Signal) -> Dict:
-        return {
-            'signal_type': signal.signal_type.value,
-            'entry_price': signal.entry_price,
-            'exit_price': signal.exit_price,
-            'timestamp': signal.timestamp.isoformat() if hasattr(signal.timestamp, 'isoformat') else str(signal.timestamp),
-            'confidence': signal.confidence,
-            'reasons': signal.reasons,
-            'risk_reward_ratio': signal.risk_reward_ratio,
-            'stop_loss': signal.stop_loss
-        }
-    
-    def _analysis_to_dict(self, analysis: MarketAnalysis) -> Dict:
-        return {
-            'trend': analysis.trend.value,
-            'volatility': analysis.volatility,
-            'momentum': analysis.momentum,
-            'strength': analysis.strength,
-            'support_levels': analysis.support_levels,
-            'resistance_levels': analysis.resistance_levels,
-            'risk_level': analysis.risk_level
-        }
-        
-class SignalAnalyzer:
-    """کلاس تحلیل سیگنال‌های معاملاتی"""
-    
-    def __init__(self):
-        self.indicators = TechnicalIndicators()
-    
-    def analyze_dataframe(self, df: pd.DataFrame) -> Dict:
-        """تحلیل کامل داده‌ها و تولید سیگنال‌ها"""
-        if df.empty or len(df) < 50:
-            return {'signals': {'buy': [], 'sell': []}, 'analysis': {}}
-        
-        # محاسبه اندیکاتورها
-        df['sma_20'] = self.indicators.sma(df['close'], 20)
-        df['sma_50'] = self.indicators.sma(df['close'], 50)
-        df['ema_12'] = self.indicators.ema(df['close'], 12)
-        df['ema_26'] = self.indicators.ema(df['close'], 26)
-        df['rsi'] = self.indicators.rsi(df['close'])
-        
-        macd_line, signal_line, histogram = self.indicators.macd(df['close'])
-        df['macd'] = macd_line
-        df['macd_signal'] = signal_line
-        df['macd_histogram'] = histogram
-        
-        upper_bb, middle_bb, lower_bb = self.indicators.bollinger_bands(df['close'])
-        df['bb_upper'] = upper_bb
-        df['bb_middle'] = middle_bb
-        df['bb_lower'] = lower_bb
-        
-        k_percent, d_percent = self.indicators.stochastic(df['high'], df['low'], df['close'])
-        df['stoch_k'] = k_percent
-        df['stoch_d'] = d_percent
-        
-        # تولید سیگنال‌ها
-        signals = self._generate_signals(df)
-        
-        # تحلیل وضعیت فعلی
-        current_analysis = self._current_market_analysis(df)
-        
-        return {
-            'signals': signals,
-            'analysis': current_analysis,
-            'dataframe': df
-        }
-    
-    def _generate_signals(self, df: pd.DataFrame) -> Dict:
-        """تولید سیگنال‌های خرید و فروش"""
-        buy_signals = []
-        sell_signals = []
-        
-        # بررسی آخرین 10 کندل برای سیگنال‌ها
-        for i in range(len(df) - 10, len(df)):
-            if i < 1:
+        indicator_results = {}
+        for name, indicator in self.indicators.items():
+            try:
+                indicator_results[name] = indicator.calculate(data)
+            except Exception as e:
+                logger.warning(f"Error calculating {name} for {symbol}: {e}")
                 continue
-                
-            current = df.iloc[i]
-            previous = df.iloc[i-1]
-            
-            # سیگنال‌های خرید
-            buy_score = 0
-            buy_reasons = []
-            
-            # 1. تقاطع SMA صعودی
-            if (current['sma_20'] > current['sma_50'] and 
-                previous['sma_20'] <= previous['sma_50']):
-                buy_score += 2
-                buy_reasons.append("تقاطع طلایی SMA")
-            
-            # 2. RSI در ناحیه oversold
-            if current['rsi'] < 30 and previous['rsi'] >= 30:
-                buy_score += 2
-                buy_reasons.append("RSI oversold")
-            
-            # 3. MACD تقاطع صعودی
-            if (current['macd'] > current['macd_signal'] and 
-                previous['macd'] <= previous['macd_signal']):
-                buy_score += 2
-                buy_reasons.append("MACD تقاطع صعودی")
-            
-            # 4. قیمت در نزدیکی باند پایین بولینگر
-            if current['close'] <= current['bb_lower'] * 1.02:
-                buy_score += 1
-                buy_reasons.append("نزدیک باند پایین بولینگر")
-            
-            # 5. استوکاستیک در ناحیه oversold
-            if current['stoch_k'] < 20 and current['stoch_d'] < 20:
-                buy_score += 1
-                buy_reasons.append("استوکاستیک oversold")
-            
-            # سیگنال‌های فروش
-            sell_score = 0
-            sell_reasons = []
-            
-            # 1. تقاطع SMA نزولی
-            if (current['sma_20'] < current['sma_50'] and 
-                previous['sma_20'] >= previous['sma_50']):
-                sell_score += 2
-                sell_reasons.append("تقاطع مرگ SMA")
-            
-            # 2. RSI در ناحیه overbought
-            if current['rsi'] > 70 and previous['rsi'] <= 70:
-                sell_score += 2
-                sell_reasons.append("RSI overbought")
-            
-            # 3. MACD تقاطع نزولی
-            if (current['macd'] < current['macd_signal'] and 
-                previous['macd'] >= previous['macd_signal']):
-                sell_score += 2
-                sell_reasons.append("MACD تقاطع نزولی")
-            
-            # 4. قیمت در نزدیکی باند بالای بولینگر
-            if current['close'] >= current['bb_upper'] * 0.98:
-                sell_score += 1
-                sell_reasons.append("نزدیک باند بالای بولینگر")
-            
-            # 5. استوکاستیک در ناحیه overbought
-            if current['stoch_k'] > 80 and current['stoch_d'] > 80:
-                sell_score += 1
-                sell_reasons.append("استوکاستیک overbought")
-            
-            # اگر امتیاز سیگنال بالای 3 باشد، سیگنال را ثبت کن
-            if buy_score >= 3:
-                entry_price = current['close']
-                # محاسبه نقطه خروج بر اساس مقاومت یا 2% سود
-                resistance = self._find_resistance(df, i)
-                exit_price = max(entry_price * 1.02, resistance) if resistance else entry_price * 1.025
-                
-                buy_signals.append({
-                    'entry': float(entry_price),
-                    'exit': float(exit_price),
-                    'timestamp': current['timestamp'],
-                    'score': buy_score,
-                    'reasons': buy_reasons,
-                    'indicator': 'ترکیبی'
-                })
-            
-            if sell_score >= 3:
-                entry_price = current['close']
-                # محاسبه نقطه خروج بر اساس حمایت یا 2% سود
-                support = self._find_support(df, i)
-                exit_price = min(entry_price * 0.98, support) if support else entry_price * 0.975
-                
-                sell_signals.append({
-                    'entry': float(entry_price),
-                    'exit': float(exit_price),
-                    'timestamp': current['timestamp'],
-                    'score': sell_score,
-                    'reasons': sell_reasons,
-                    'indicator': 'ترکیبی'
-                })
         
-        return {'buy': buy_signals, 'sell': sell_signals}
+        market_analysis = self.market_analyzer.analyze_market_condition(data)
+        signals = []
+        
+        buy_signal = self._evaluate_buy_signal(indicator_results, data, symbol, timeframe, market_analysis)
+        if buy_signal:
+            signals.append(buy_signal)
+        
+        sell_signal = self._evaluate_sell_signal(indicator_results, data, symbol, timeframe, market_analysis)
+        if sell_signal:
+            signals.append(sell_signal)
+        
+        return signals
     
-    def _find_resistance(self, df: pd.DataFrame, current_index: int) -> Optional[float]:
-        """پیدا کردن نزدیکترین سطح مقاومت"""
-        current_price = df.iloc[current_index]['close']
-        lookback = min(50, current_index)
+    def _evaluate_buy_signal(self, indicators: Dict[str, IndicatorResult], data: pd.DataFrame, 
+                            symbol: str, timeframe: str, market_analysis: MarketAnalysis) -> Optional[TradingSignal]:
+        score = 0
+        reasons = []
         
-        highs = df.iloc[current_index-lookback:current_index]['high']
-        resistance_levels = highs[highs > current_price * 1.01]
+        current_price = data['close'].iloc[-1]
         
-        return float(resistance_levels.min()) if not resistance_levels.empty else None
+        if 'rsi' in indicators and indicators['rsi'].interpretation == "oversold":
+            score += 25
+            reasons.append("RSI oversold condition")
+        
+        if 'macd' in indicators and indicators['macd'].interpretation == "bullish_crossover":
+            score += 20
+            reasons.append("MACD bullish crossover")
+        
+        if ('sma_20' in indicators and 'sma_50' in indicators and 
+            indicators['sma_20'].value > indicators['sma_50'].value):
+            score += 15
+            reasons.append("Price above SMA trend")
+        
+        if 'bb' in indicators and indicators['bb'].interpretation == "near_lower_band":
+            score += 15
+            reasons.append("Price near Bollinger lower band")
+        
+        if 'stoch' in indicators and indicators['stoch'].interpretation == "oversold":
+            score += 10
+            reasons.append("Stochastic oversold")
+        
+        if 'volume' in indicators and indicators['volume'].interpretation == "high_volume":
+            score += 10
+            reasons.append("High volume confirmation")
+        
+        if market_analysis.trend == TrendDirection.BULLISH:
+            score += 5
+            reasons.append("Overall bullish trend")
+        
+        if score >= 60:
+            stop_loss = self._calculate_stop_loss(current_price, market_analysis, "buy")
+            exit_price = self._calculate_exit_price(current_price, market_analysis, "buy")
+            
+            return TradingSignal(
+                symbol=symbol,
+                signal_type=SignalType.BUY,
+                entry_price=current_price,
+                exit_price=exit_price,
+                stop_loss=stop_loss,
+                timestamp=datetime.now(),
+                timeframe=timeframe,
+                confidence_score=score,
+                reasons=reasons,
+                risk_reward_ratio=self._calculate_risk_reward(current_price, exit_price, stop_loss),
+                predicted_profit=((exit_price - current_price) / current_price) * 100,
+                volume_analysis=self.market_analyzer.volume_analyzer.analyze_volume_pattern(data),
+                market_context=self._create_market_context(market_analysis)
+            )
+        
+        return None
     
-    def _find_support(self, df: pd.DataFrame, current_index: int) -> Optional[float]:
-        """پیدا کردن نزدیکترین سطح حمایت"""
-        current_price = df.iloc[current_index]['close']
-        lookback = min(50, current_index)
+    def _evaluate_sell_signal(self, indicators: Dict[str, IndicatorResult], data: pd.DataFrame,
+                            symbol: str, timeframe: str, market_analysis: MarketAnalysis) -> Optional[TradingSignal]:
+        score = 0
+        reasons = []
         
-        lows = df.iloc[current_index-lookback:current_index]['low']
-        support_levels = lows[lows < current_price * 0.99]
+        current_price = data['close'].iloc[-1]
         
-        return float(support_levels.max()) if not support_levels.empty else None
+        if 'rsi' in indicators and indicators['rsi'].interpretation == "overbought":
+            score += 25
+            reasons.append("RSI overbought condition")
+        
+        if 'macd' in indicators and indicators['macd'].interpretation == "bearish_crossover":
+            score += 20
+            reasons.append("MACD bearish crossover")
+        
+        if ('sma_20' in indicators and 'sma_50' in indicators and 
+            indicators['sma_20'].value < indicators['sma_50'].value):
+            score += 15
+            reasons.append("Price below SMA trend")
+        
+        if 'bb' in indicators and indicators['bb'].interpretation == "near_upper_band":
+            score += 15
+            reasons.append("Price near Bollinger upper band")
+        
+        if 'stoch' in indicators and indicators['stoch'].interpretation == "overbought":
+            score += 10
+            reasons.append("Stochastic overbought")
+        
+        if 'volume' in indicators and indicators['volume'].interpretation == "high_volume":
+            score += 10
+            reasons.append("High volume confirmation")
+        
+        if market_analysis.trend == TrendDirection.BEARISH:
+            score += 5
+            reasons.append("Overall bearish trend")
+        
+        if score >= 60:
+            stop_loss = self._calculate_stop_loss(current_price, market_analysis, "sell")
+            exit_price = self._calculate_exit_price(current_price, market_analysis, "sell")
+            
+            return TradingSignal(
+                symbol=symbol,
+                signal_type=SignalType.SELL,
+                entry_price=current_price,
+                exit_price=exit_price,
+                stop_loss=stop_loss,
+                timestamp=datetime.now(),
+                timeframe=timeframe,
+                confidence_score=score,
+                reasons=reasons,
+                risk_reward_ratio=self._calculate_risk_reward(current_price, exit_price, stop_loss),
+                predicted_profit=((current_price - exit_price) / current_price) * 100,
+                volume_analysis=self.market_analyzer.volume_analyzer.analyze_volume_pattern(data),
+                market_context=self._create_market_context(market_analysis)
+            )
+        
+        return None
     
-    def _current_market_analysis(self, df: pd.DataFrame) -> Dict:
-        """تحلیل وضعیت فعلی بازار"""
-        if df.empty:
-            return {}
+    def _calculate_stop_loss(self, entry_price: float, market_analysis: MarketAnalysis, signal_type: str) -> float:
+        atr_based_stop = entry_price * 0.02
         
-        current = df.iloc[-1]
-        
-        # تعیین ترند
-        if current['sma_20'] > current['sma_50']:
-            trend = "صعودی"
-        elif current['sma_20'] < current['sma_50']:
-            trend = "نزولی"
+        if signal_type == "buy":
+            if market_analysis.support_levels:
+                nearest_support = max([s for s in market_analysis.support_levels if s < entry_price], default=entry_price * 0.95)
+                return max(nearest_support, entry_price - atr_based_stop)
+            return entry_price - atr_based_stop
         else:
-            trend = "خنثی"
+            if market_analysis.resistance_levels:
+                nearest_resistance = min([r for r in market_analysis.resistance_levels if r > entry_price], default=entry_price * 1.05)
+                return min(nearest_resistance, entry_price + atr_based_stop)
+            return entry_price + atr_based_stop
+    
+    def _calculate_exit_price(self, entry_price: float, market_analysis: MarketAnalysis, signal_type: str) -> float:
+        base_target = 0.025
         
-        # وضعیت RSI
-        if current['rsi'] > 70:
-            rsi_status = "خریداری بیش از حد"
-        elif current['rsi'] < 30:
-            rsi_status = "فروخته بیش از حد"
+        if market_analysis.volatility > 0.03:
+            base_target *= 1.5
+        
+        if signal_type == "buy":
+            if market_analysis.resistance_levels:
+                nearest_resistance = min([r for r in market_analysis.resistance_levels if r > entry_price], default=entry_price * (1 + base_target))
+                return min(nearest_resistance, entry_price * (1 + base_target))
+            return entry_price * (1 + base_target)
         else:
-            rsi_status = "طبیعی"
+            if market_analysis.support_levels:
+                nearest_support = max([s for s in market_analysis.support_levels if s < entry_price], default=entry_price * (1 - base_target))
+                return max(nearest_support, entry_price * (1 - base_target))
+            return entry_price * (1 - base_target)
+    
+    def _calculate_risk_reward(self, entry: float, exit: float, stop_loss: float) -> float:
+        if entry == stop_loss:
+            return 0
         
+        potential_profit = abs(exit - entry)
+        potential_loss = abs(entry - stop_loss)
+        
+        return potential_profit / potential_loss if potential_loss > 0 else 0
+    
+    def _create_market_context(self, market_analysis: MarketAnalysis) -> Dict[str, Any]:
         return {
-            'trend': trend,
-            'rsi_status': rsi_status,
-            'rsi_value': float(current['rsi']) if not pd.isna(current['rsi']) else 0,
-            'current_price': float(current['close']),
-            'volume': float(current['volume'])
+            'trend': market_analysis.trend.value,
+            'volatility': market_analysis.volatility,
+            'momentum_score': market_analysis.momentum_score,
+            'market_condition': market_analysis.market_condition.value,
+            'volume_trend': market_analysis.volume_trend
         }
 
-class TradingBot:
-    """کلاس اصلی ربات معاملاتی"""
-    
+class ExchangeManager:
     def __init__(self):
-        self.analyzer = SignalAnalyzer()
         self.exchange = None
+        self._lock = asyncio.Lock()
     
+    @asynccontextmanager
     async def get_exchange(self):
-        """ایجاد اتصال به صرافی"""
-        if self.exchange is None:
-            self.exchange = ccxt.coinex({
-                'apiKey': os.getenv('COINEX_API_KEY', ''),
-                'secret': os.getenv('COINEX_SECRET', ''),
-                'sandbox': False,
-                'enableRateLimit': True,
-                'timeout': 30000,
-                'options': {'defaultType': 'spot'}
-            })
-        return self.exchange
+        async with self._lock:
+            if self.exchange is None:
+                self.exchange = ccxt.binance({
+                    'sandbox': False,
+                    'enableRateLimit': True,
+                    'timeout': 30000,
+                })
+            
+            try:
+                yield self.exchange
+            except Exception as e:
+                logger.error(f"Error accessing exchange: {e}")
+                await self.close_exchange()
+                raise e
     
     async def close_exchange(self):
-        """بستن اتصال صرافی"""
-        if self.exchange:
-            await self.exchange.close()
-            self.exchange = None
+        async with self._lock:
+            if self.exchange:
+                await self.exchange.close()
+                self.exchange = None
     
-    async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 1000) -> pd.DataFrame:
-        """دریافت داده‌های OHLCV"""
+    async def fetch_ohlcv_data(self, symbol: str, timeframe: str, limit: int = 1000) -> pd.DataFrame:
         try:
-            exchange = await self.get_exchange()
-            ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            async with self.get_exchange() as exchange:
+                ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+                
+                if not ohlcv:
+                    return pd.DataFrame()
+                
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df = df.sort_values('timestamp').reset_index(drop=True)
+                
+                return df
+                
+        except Exception as e:
+            logger.error(f"Error fetching data for {symbol} on {timeframe}: {e}")
+            return pd.DataFrame()
+
+class SignalRanking:
+    @staticmethod
+    def rank_signals(signals: List[TradingSignal]) -> List[TradingSignal]:
+        def signal_score(signal: TradingSignal) -> float:
+            base_score = signal.confidence_score
             
-            if not ohlcv:
-                logger.warning(f"No data returned for {symbol} on {timeframe}")
-                return pd.DataFrame()
+            rr_bonus = min(signal.risk_reward_ratio * 10, 20)
             
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            return df
+            profit_bonus = min(abs(signal.predicted_profit) * 2, 15)
+            
+            volume_bonus = 0
+            if signal.volume_analysis.get('volume_ratio', 1) > 1.5:
+                volume_bonus = 10
+            
+            trend_bonus = 0
+            if signal.market_context.get('trend') in ['bullish', 'bearish']:
+                trend_bonus = 5
+            
+            return base_score + rr_bonus + profit_bonus + volume_bonus + trend_bonus
+        
+        return sorted(signals, key=signal_score, reverse=True)
+
+class ConfigManager:
+    DEFAULT_CONFIG = {
+        'symbols': SYMBOLS,
+        'timeframes': TIME_FRAMES,
+        'min_confidence_score': 50,
+        'max_signals_per_timeframe': 3,
+        'risk_reward_threshold': 1.5
+    }
+    
+    def __init__(self, config_path: str = "config.json"):
+        self.config_path = Path(config_path)
+        self.config = self._load_config()
+    
+    def _load_config(self) -> Dict[str, Any]:
+        if self.config_path.exists():
+            try:
+                with open(self.config_path, 'r') as f:
+                    return {**self.DEFAULT_CONFIG, **json.load(f)}
+            except Exception as e:
+                logger.warning(f"Error loading config: {e}. Using defaults.")
+        
+        return self.DEFAULT_CONFIG.copy()
+    
+    def save_config(self):
+        try:
+            with open(self.config_path, 'w') as f:
+                json.dump(self.config, f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving config: {e}")
+    
+    def get(self, key: str, default=None):
+        return self.config.get(key, default)
+    
+    def set(self, key: str, value):
+        self.config[key] = value
+        self.save_config()
+
+class TradingBotService:
+    def __init__(self, config_manager: ConfigManager):
+        self.config = config_manager
+        self.exchange_manager = ExchangeManager()
+        self.signal_generator = SignalGenerator()
+        self.signal_ranking = SignalRanking()
+    
+    async def analyze_symbol(self, symbol: str, timeframe: str) -> List[TradingSignal]:
+        try:
+            data = await self.exchange_manager.fetch_ohlcv_data(symbol, timeframe)
+            if data.empty or len(data) < 50:
+                return []
+            
+            signals = self.signal_generator.generate_signals(data, symbol, timeframe)
+            return [s for s in signals if s.confidence_score >= self.config.get('min_confidence_score', 60)]
             
         except Exception as e:
-            logger.error(f"Error fetching ohlcv for {symbol} on {timeframe}: {e}")
-            return pd.DataFrame()
+            logger.error(f"Error analyzing {symbol} on {timeframe}: {e}")
+            return []
     
-    async def find_best_signal_for_timeframe(self, timeframe: str) -> Optional[Dict]:
-        """پیدا کردن بهترین سیگنال برای تایم فریم مشخص"""
-        best_signal = None
-        max_profit = 0.0
+    async def find_best_signals_for_timeframe(self, timeframe: str) -> List[TradingSignal]:
+        symbols = self.config.get('symbols', [])
+        all_signals = []
         
-        for symbol in SYMBOLS:
-            try:
-                logger.info(f"Processing {symbol} for timeframe {timeframe}...")
-                df = await self.fetch_ohlcv(symbol, timeframe)
-                
-                if df.empty or len(df) < 50:
-                    logger.warning(f"Not enough data for {symbol} on {timeframe}. Skipping.")
-                    continue
-                
-                analysis_result = self.analyzer.analyze_dataframe(df)
-                
-                if 'signals' in analysis_result and analysis_result['signals']:
-                    signals = analysis_result['signals']
-                    
-                    # بررسی سیگنال‌های خرید
-                    for signal in signals.get('buy', []):
-                        profit = (signal['exit'] / signal['entry']) - 1
-                        if profit > max_profit:
-                            max_profit = profit
-                            best_signal = {
-                                'symbol': symbol,
-                                'type': 'خرید (Buy)',
-                                'profit': profit * 100,
-                                'entry': signal['entry'],
-                                'exit': signal['exit'],
-                                'indicator': signal.get('indicator', 'N/A'),
-                                'score': signal.get('score', 0),
-                                'reasons': signal.get('reasons', []),
-                                'analysis': analysis_result.get('analysis', {})
-                            }
-                    
-                    # بررسی سیگنال‌های فروش
-                    for signal in signals.get('sell', []):
-                        profit = (signal['entry'] / signal['exit']) - 1
-                        if profit > max_profit:
-                            max_profit = profit
-                            best_signal = {
-                                'symbol': symbol,
-                                'type': 'فروش (Sell)',
-                                'profit': profit * 100,
-                                'entry': signal['entry'],
-                                'exit': signal['exit'],
-                                'indicator': signal.get('indicator', 'N/A'),
-                                'score': signal.get('score', 0),
-                                'reasons': signal.get('reasons', []),
-                                'analysis': analysis_result.get('analysis', {})
-                            }
-                            
-            except Exception as e:
-                logger.error(f"Error processing {symbol} for {timeframe}: {e}")
+        tasks = [self.analyze_symbol(symbol, timeframe) for symbol in symbols]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for symbol, result in zip(symbols, results):
+            if isinstance(result, Exception):
+                logger.error(f"Error processing {symbol}: {result}")
                 continue
+            
+            if isinstance(result, list):
+                all_signals.extend(result)
         
-        return best_signal
-
-# ایجاد نمونه از ربات
-trading_bot = TradingBot()
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """دستور /start را مدیریت می‌کند"""
-    user_id = update.effective_user.id
-    logger.info(f"User {user_id} started the bot")
+        ranked_signals = self.signal_ranking.rank_signals(all_signals)
+        max_signals = self.config.get('max_signals_per_timeframe', 3)
+        
+        return ranked_signals[:max_signals]
     
-    await update.message.reply_text(
-        '🤖 **ربات سیگنال‌های معاملاتی**\n\n'
-        'در حال بررسی سیگنال‌ها در تمام تایم فریم‌ها... \n'
-        'لطفاً شکیبا باشید، این فرآیند ممکن است چند دقیقه طول بکشد. 🧐\n\n'
-        '📊 در حال تحلیل 10 نماد برتر...',
-        parse_mode='Markdown'
-    )
+    async def get_comprehensive_analysis(self) -> Dict[str, List[TradingSignal]]:
+        results = {}
+        
+        for timeframe in TIME_FRAMES:
+            logger.info(f"Analyzing timeframe: {timeframe}")
+            signals = await self.find_best_signals_for_timeframe(timeframe)
+            results[timeframe] = signals
+        
+        return results
     
-    try:
-        # حلقه برای بررسی هر تایم فریم
-        for i, timeframe in enumerate(TIME_FRAMES):
-            progress = f"🔍 ({i+1}/{len(TIME_FRAMES)}) در حال جستجوی بهترین سیگنال برای تایم فریم **{timeframe}**..."
-            await update.message.reply_text(progress, parse_mode='Markdown')
+    async def cleanup(self):
+        await self.exchange_manager.close_exchange()
+
+class MessageFormatter:
+    @staticmethod
+    def format_signal_message(signal: TradingSignal) -> str:
+        emoji_map = {
+            SignalType.BUY: "🟢",
+            SignalType.SELL: "🔴",
+            SignalType.HOLD: "🟡"
+        }
+        
+        trend_emoji_map = {
+            "bullish": "📈",
+            "bearish": "📉",
+            "sideways": "➡️"
+        }
+        
+        signal_emoji = emoji_map.get(signal.signal_type, "⚪")
+        trend_emoji = trend_emoji_map.get(signal.market_context.get('trend', 'sideways'), "➡️")
+        
+        reasons_text = "\n• ".join(signal.reasons)
+        
+        message = (
+            f"{signal_emoji} **{signal.signal_type.value.upper()} SIGNAL**\n\n"
+            f"📊 **Symbol:** `{signal.symbol}`\n"
+            f"⏰ **Timeframe:** `{signal.timeframe}`\n"
+            f"💰 **Entry Price:** `${signal.entry_price:.4f}`\n"
+            f"🎯 **Target Price:** `${signal.exit_price:.4f}`\n"
+            f"🛑 **Stop Loss:** `${signal.stop_loss:.4f}`\n"
+            f"📈 **Predicted Profit:** `{signal.predicted_profit:.2f}%`\n"
+            f"⚖️ **Risk/Reward:** `{signal.risk_reward_ratio:.2f}`\n"
+            f"⭐ **Confidence:** `{signal.confidence_score:.0f}/100`\n\n"
+            f"{trend_emoji} **Market Context:**\n"
+            f"• Trend: {signal.market_context.get('trend', 'Unknown').title()}\n"
+            f"• Volatility: {signal.market_context.get('volatility', 0):.1%}\n"
+            f"• Volume Trend: {signal.market_context.get('volume_trend', 'Unknown').title()}\n\n"
+            f"📋 **Analysis Reasons:**\n• {reasons_text}\n\n"
+            f"🕐 **Generated:** {signal.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        
+        return message
+    
+    @staticmethod
+    def format_summary_message(timeframe_results: Dict[str, List[TradingSignal]]) -> str:
+        total_signals = sum(len(signals) for signals in timeframe_results.values())
+        
+        if total_signals == 0:
+            return (
+                "📊 **Trading Analysis Complete**\n\n"
+                "⚠️ No strong signals found in any timeframe.\n"
+                "Market conditions may not be favorable for trading at this time.\n\n"
+                "🔄 Try again later or adjust your analysis parameters."
+            )
+        
+        summary = (
+            f"📊 **Trading Analysis Summary**\n\n"
+            f"🎯 **Total Signals Found:** {total_signals}\n\n"
+        )
+        
+        for timeframe, signals in timeframe_results.items():
+            if signals:
+                best_signal = signals[0]
+                summary += (
+                    f"⏰ **{timeframe.upper()}:** {len(signals)} signal(s)\n"
+                    f"└ Best: {best_signal.symbol} {best_signal.signal_type.value.upper()} "
+                    f"({best_signal.predicted_profit:.1f}% profit potential)\n\n"
+                )
+        
+        summary += (
+            "💡 **Next Steps:**\n"
+            "• Review each signal carefully\n"
+            "• Consider your risk tolerance\n"
+            "• Use proper position sizing\n"
+            "• Set stop losses as recommended\n\n"
+            "⚠️ **Disclaimer:** These are automated signals for educational purposes only."
+        )
+        
+        return summary
+
+class TelegramBotHandler:
+    def __init__(self, bot_token: str, config_manager: ConfigManager):
+        self.bot_token = bot_token
+        self.config = config_manager
+        self.trading_service = TradingBotService(config_manager)
+        self.formatter = MessageFormatter()
+        self.user_sessions = {}
+    
+    def create_application(self) -> Application:
+        application = Application.builder().token(self.bot_token).build()
+        
+        application.add_handler(CommandHandler("start", self.start_command))
+        application.add_handler(CommandHandler("help", self.help_command))
+        application.add_handler(CommandHandler("config", self.config_command))
+        application.add_handler(CommandHandler("quick", self.quick_analysis))
+        application.add_handler(CallbackQueryHandler(self.button_callback))
+        
+        return application
+    
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = update.effective_user.id
+        logger.info(f"User {user_id} started the bot")
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("🚀 Full Analysis", callback_data="full_analysis"),
+                InlineKeyboardButton("⚡ Quick Scan", callback_data="quick_scan")
+            ],
+            [
+                InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
+                InlineKeyboardButton("ℹ️ Help", callback_data="help")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        welcome_message = (
+            "🤖 **Advanced Trading Signal Bot**\n\n"
+            "Welcome to the most comprehensive trading analysis bot!\n\n"
+            "🎯 **Features:**\n"
+            "• Multi-timeframe analysis\n"
+            "• 10+ technical indicators\n"
+            "• Risk/reward calculations\n"
+            "• Volume & market context analysis\n"
+            "• Real-time signal ranking\n\n"
+            "Choose an option below to get started:"
+        )
+        
+        await update.message.reply_text(
+            welcome_message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == "full_analysis":
+            await self.run_full_analysis(query)
+        elif query.data == "quick_scan":
+            await self.run_quick_scan(query)
+        elif query.data == "settings":
+            await self.show_settings(query)
+        elif query.data == "help":
+            await self.show_help(query)
+    
+    async def run_full_analysis(self, query) -> None:
+        await query.edit_message_text(
+            "🔄 **Starting Comprehensive Analysis...**\n\n"
+            "📊 Analyzing multiple timeframes\n"
+            "🔍 Processing technical indicators\n"
+            "📈 Evaluating market conditions\n\n"
+            "⏳ This may take 2-3 minutes...",
+            parse_mode='Markdown'
+        )
+        
+        try:
+            results = await self.trading_service.get_comprehensive_analysis()
             
-            best_signal = await trading_bot.find_best_signal_for_timeframe(timeframe)
+            summary = self.formatter.format_summary_message(results)
+            await query.edit_message_text(summary, parse_mode='Markdown')
             
-            if best_signal:
-                # ساخت پیام دقیق‌تر
-                reasons_text = "، ".join(best_signal.get('reasons', []))
-                analysis = best_signal.get('analysis', {})
+            for timeframe, signals in results.items():
+                if signals:
+                    timeframe_header = f"🕐 **{timeframe.upper()} TIMEFRAME SIGNALS**\n\n"
+                    await query.message.reply_text(timeframe_header, parse_mode='Markdown')
+                    
+                    for i, signal in enumerate(signals, 1):
+                        signal_message = self.formatter.format_signal_message(signal)
+                        signal_header = f"**Signal #{i}**\n\n"
+                        
+                        await query.message.reply_text(
+                            signal_header + signal_message,
+                            parse_mode='Markdown'
+                        )
+                        
+                        await asyncio.sleep(0.5)
+            
+            final_message = (
+                "✅ **Analysis Complete!**\n\n"
+                "🔄 For updated signals, use /start again\n"
+                "⚙️ To modify settings, use /config\n"
+                "❓ For help, use /help"
+            )
+            await query.message.reply_text(final_message, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Error in full analysis: {e}")
+            await query.edit_message_text(
+                f"❌ **Analysis Error**\n\n"
+                f"An error occurred during analysis:\n`{str(e)}`\n\n"
+                "Please try again later or contact support.",
+                parse_mode='Markdown'
+            )
+    
+    async def run_quick_scan(self, query) -> None:
+        await query.edit_message_text(
+            "⚡ **Quick Scan in Progress...**\n\n"
+            "🔍 Scanning 1H timeframe only\n"
+            "⏳ This will take about 30 seconds...",
+            parse_mode='Markdown'
+        )
+        
+        try:
+            signals = await self.trading_service.find_best_signals_for_timeframe('1h')
+            
+            if not signals:
+                await query.edit_message_text(
+                    "⚡ **Quick Scan Results**\n\n"
+                    "❌ No strong signals found in 1H timeframe\n\n"
+                    "💡 Try full analysis for other timeframes or wait for better market conditions.",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            await query.edit_message_text(
+                f"⚡ **Quick Scan Results**\n\n"
+                f"✅ Found {len(signals)} signal(s) in 1H timeframe",
+                parse_mode='Markdown'
+            )
+            
+            for i, signal in enumerate(signals, 1):
+                signal_message = self.formatter.format_signal_message(signal)
+                signal_header = f"**Quick Signal #{i}**\n\n"
                 
-                message = (
-                    f"🚀 **بهترین سیگنال برای تایم فریم {timeframe}**\n\n"
-                    f"📈 **نماد:** `{best_signal['symbol']}`\n"
-                    f"📊 **نوع سیگنال:** {best_signal['type']}\n"
-                    f"💰 **سود احتمالی:** `{best_signal['profit']:.2f}%`\n"
-                    f"🟢 **نقطه ورود:** `${best_signal['entry']:.4f}`\n"
-                    f"🔴 **نقطه خروج:** `${best_signal['exit']:.4f}`\n"
-                    f"⭐ **امتیاز سیگنال:** `{best_signal.get('score', 0)}/8`\n"
-                    f"📋 **دلایل:** {reasons_text}\n"
+                await query.message.reply_text(
+                    signal_header + signal_message,
+                    parse_mode='Markdown'
                 )
                 
-                if analysis:
-                    message += (
-                        f"\n📊 **تحلیل بازار:**\n"
-                        f"📈 **ترند:** {analysis.get('trend', 'نامشخص')}\n"
-                        f"📊 **RSI:** {analysis.get('rsi_value', 0):.1f} ({analysis.get('rsi_status', 'طبیعی')})\n"
-                        f"💵 **قیمت فعلی:** `${analysis.get('current_price', 0):.4f}` \n"
-                        f"📅 **تاریخ:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    )
-                
-                await update.message.reply_text(message, parse_mode='Markdown')
-            else:
-                message = f"⚠️ برای تایم فریم `{timeframe}` هیچ سیگنال قوی یافت نشد."
-                await update.message.reply_text(message, parse_mode='Markdown')
+                await asyncio.sleep(0.3)
         
-        # پیام پایانی
-        await update.message.reply_text(
-            "✅ **تحلیل کامل شد!**\n\n"
-            "⚠️ **هشدار:** این سیگنال‌ها صرفاً جهت اطلاع‌رسانی هستند و نباید به عنوان مشاوره مالی تلقی شوند.\n"
-            "همیشه تحقیقات خود را انجام دهید و مدیریت ریسک را رعایت کنید.\n\n"
-            "🔄 برای به‌روزرسانی سیگنال‌ها، دوباره /start را بزنید.",
+        except Exception as e:
+            logger.error(f"Error in quick scan: {e}")
+            await query.edit_message_text(
+                f"❌ **Quick Scan Error**\n\n"
+                f"Error: `{str(e)}`\n\n"
+                "Please try again.",
+                parse_mode='Markdown'
+            )
+    
+    async def show_settings(self, query) -> None:
+        config_info = (
+            "⚙️ **Current Settings**\n\n"
+            f"📊 **Symbols:** {len(self.config.get('symbols', []))}\n"
+            f"⏰ **Timeframes:** {', '.join(self.config.get('timeframes', []))}\n"
+            f"🎯 **Min Confidence:** {self.config.get('min_confidence_score', 60)}\n"
+            f"📈 **Max Signals/TF:** {self.config.get('max_signals_per_timeframe', 3)}\n"
+            f"⚖️ **Min Risk/Reward:** {self.config.get('risk_reward_threshold', 1.5)}\n\n"
+            "Use /config to modify settings"
+        )
+        
+        await query.edit_message_text(config_info, parse_mode='Markdown')
+    
+    async def show_help(self, query) -> None:
+        help_text = (
+            "ℹ️ **Help & Commands**\n\n"
+            "**Commands:**\n"
+            "• /start - Main menu\n"
+            "• /quick - Quick 1H analysis\n"
+            "• /config - Settings management\n"
+            "• /help - This help message\n\n"
+            "**Signal Interpretation:**\n"
+            "🟢 BUY - Long position recommended\n"
+            "🔴 SELL - Short position recommended\n"
+            "⭐ Confidence - Signal strength (0-100)\n"
+            "⚖️ Risk/Reward - Profit vs loss ratio\n\n"
+            "**Indicators Used:**\n"
+            "• Moving Averages (SMA/EMA)\n"
+            "• RSI (Relative Strength Index)\n"
+            "• MACD (Moving Average Convergence Divergence)\n"
+            "• Bollinger Bands\n"
+            "• Stochastic Oscillator\n"
+            "• Volume Analysis\n"
+            "• ATR (Average True Range)\n\n"
+            "⚠️ **Disclaimer:** This bot provides educational signals only. "
+            "Always do your own research and never risk more than you can afford to lose."
+        )
+        
+        await query.edit_message_text(help_text, parse_mode='Markdown')
+    
+    async def config_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        config_text = (
+            "⚙️ **Configuration Management**\n\n"
+            f"**Current Settings:**\n"
+            f"• Symbols: {len(self.config.get('symbols', []))}\n"
+            f"• Timeframes: {', '.join(self.config.get('timeframes', []))}\n"
+            f"• Min Confidence: {self.config.get('min_confidence_score', 60)}\n"
+            f"• Max Signals per TF: {self.config.get('max_signals_per_timeframe', 3)}\n"
+            f"• Risk/Reward Threshold: {self.config.get('risk_reward_threshold', 1.5)}\n\n"
+            "**Available Symbols:**\n"
+        )
+        
+        symbols = self.config.get('symbols', [])
+        config_text += f"```\n{', '.join(symbols)}\n```\n\n"
+        config_text += "Contact admin to modify configuration."
+        
+        await update.message.reply_text(config_text, parse_mode='Markdown')
+    
+    async def quick_analysis(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        progress_msg = await update.message.reply_text(
+            "⚡ **Quick Analysis Starting...**\n\n"
+            "🔍 Scanning 1H timeframe for immediate opportunities...",
             parse_mode='Markdown'
         )
         
-    except Exception as e:
-        logger.error(f"An error occurred during the start command: {e}")
-        await update.message.reply_text(
-            f"❌ **خطایی رخ داد:**\n`{str(e)}`\n\n"
-            "لطفاً دوباره تلاش کنید یا با توسعه‌دهنده تماس بگیرید.",
-            parse_mode='Markdown'
+        try:
+            signals = await self.trading_service.find_best_signals_for_timeframe('1h')
+            
+            if not signals:
+                await progress_msg.edit_text(
+                    "⚡ **Quick Analysis Complete**\n\n"
+                    "❌ No strong signals found in 1H timeframe\n\n"
+                    "💡 Use /start for comprehensive multi-timeframe analysis.",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            await progress_msg.edit_text(
+                f"⚡ **Quick Analysis Complete**\n\n"
+                f"✅ Found {len(signals)} high-confidence signal(s)",
+                parse_mode='Markdown'
+            )
+            
+            for signal in signals:
+                signal_message = self.formatter.format_signal_message(signal)
+                await update.message.reply_text(signal_message, parse_mode='Markdown')
+                await asyncio.sleep(0.3)
+        
+        except Exception as e:
+            logger.error(f"Error in quick analysis command: {e}")
+            await progress_msg.edit_text(
+                f"❌ **Quick Analysis Error**\n\n"
+                f"Error: `{str(e)}`",
+                parse_mode='Markdown'
+            )
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        help_text = (
+            "🤖 **Advanced Trading Signal Bot - Help**\n\n"
+            "**🚀 Commands:**\n"
+            "• `/start` - Main menu with analysis options\n"
+            "• `/quick` - Fast 1H timeframe scan\n"
+            "• `/config` - View current configuration\n"
+            "• `/help` - Display this help message\n\n"
+            "**📊 Analysis Types:**\n"
+            "• **Full Analysis** - Multi-timeframe comprehensive scan\n"
+            "• **Quick Scan** - Rapid 1H timeframe analysis\n\n"
+            "**🎯 Signal Quality:**\n"
+            "• Confidence Score: 60-100 (higher is better)\n"
+            "• Risk/Reward Ratio: >1.5 recommended\n"
+            "• Multiple indicator confirmation required\n\n"
+            "**⚠️ Risk Warning:**\n"
+            "Trading involves substantial risk. These signals are for "
+            "educational purposes only and should not be considered as "
+            "financial advice. Always conduct your own research and "
+            "never risk more than you can afford to lose.\n\n"
+            "**🔧 Technical Support:**\n"
+            "If you encounter any issues, please report them to the bot administrator."
         )
-    finally:
-        # بستن اتصال صرافی
-        await trading_bot.close_exchange()
+        
+        await update.message.reply_text(help_text, parse_mode='Markdown')
+    
+    async def cleanup(self):
+        await self.trading_service.cleanup()
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """دستور /help را مدیریت می‌کند"""
-    help_text = (
-        "🤖 **راهنمای ربات سیگنال‌های معاملاتی**\n\n"
-        "**دستورات موجود:**\n"
-        "• `/start` - شروع تحلیل و دریافت سیگنال‌ها\n"
-        "• `/help` - نمایش این راهنما\n\n"
-        "**ویژگی‌ها:**\n"
-        "• تحلیل تکنیکال پیشرفته\n"
-        "• پشتیبانی از 10 نماد برتر\n"
-        "• بررسی 8 تایم فریم مختلف\n"
-        "• محاسبه امتیاز سیگنال\n"
-        "• تحلیل وضعیت بازار\n\n"
-        "**اندیکاتورهای استفاده شده:**\n"
-        "• SMA (میانگین متحرک ساده)\n"
-        "• EMA (میانگین متحرک نمایی)\n"
-        "• RSI (شاخص قدرت نسبی)\n"
-        "• MACD\n"
-        "• Bollinger Bands\n"
-        "• Stochastic\n\n"
-        "⚠️ **هشدار:** این سیگنال‌ها جهت اطلاع‌رسانی هستند و مشاوره مالی نیستند."
-    )
-    await update.message.reply_text(help_text, parse_mode='Markdown')
-
-def main() -> None:
-    """اجرای ربات"""
+def main():    
     if not BOT_TOKEN:
-        logger.error("لطفاً توکن ربات تلگرام را در متغیر BOT_TOKEN وارد کنید")
+        logger.error("BOT_TOKEN environment variable is required")
         return
     
-    logger.info("Starting Trading Signal Bot...")
+    config_manager = ConfigManager()
+    bot_handler = TelegramBotHandler(BOT_TOKEN, config_manager)
     
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # اضافه کردن دستورات
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    
-    # اجرای ربات
-    logger.info("Bot is running. Press Ctrl+C to stop.")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        application = bot_handler.create_application()
+        
+        logger.info("🤖 Advanced Trading Signal Bot is starting...")
+        logger.info(f"📊 Monitoring {len(config_manager.get('symbols', []))} symbols")
+        logger.info(f"⏰ Analyzing {len(config_manager.get('timeframes', []))} timeframes")
+        
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
+        
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Bot crashed: {e}")
+    finally:
+        asyncio.run(bot_handler.cleanup())
+        logger.info("Bot cleanup completed")
 
 if __name__ == "__main__":
     main()
