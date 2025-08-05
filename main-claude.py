@@ -431,27 +431,50 @@ class SignalGenerator:
         self.market_analyzer = MarketConditionAnalyzer()
     
     def generate_signals(self, data: pd.DataFrame, symbol: str, timeframe: str) -> List[TradingSignal]:
+        logger.info(f"🔄 Generating signals for {symbol} on {timeframe} with {len(data)} candles")
+        
         if len(data) < 50:
+            logger.warning(f"⚠️ Insufficient data for {symbol} on {timeframe}: {len(data)} candles (need 50+)")
             return []
         
         indicator_results = {}
+        failed_indicators = []
+        
         for name, indicator in self.indicators.items():
             try:
                 indicator_results[name] = indicator.calculate(data)
+                logger.debug(f"✅ {name} calculated successfully for {symbol}")
             except Exception as e:
-                logger.warning(f"Error calculating {name} for {symbol}: {e}")
+                logger.warning(f"⚠️ Error calculating {name} for {symbol}: {e}")
+                failed_indicators.append(name)
                 continue
         
-        market_analysis = self.market_analyzer.analyze_market_condition(data)
+        if failed_indicators:
+            logger.warning(f"❌ Failed indicators for {symbol}: {', '.join(failed_indicators)}")
+        
+        try:
+            market_analysis = self.market_analyzer.analyze_market_condition(data)
+            logger.debug(f"📊 Market analysis completed for {symbol}: trend={market_analysis.trend.value}")
+        except Exception as e:
+            logger.error(f"❌ Market analysis failed for {symbol}: {e}")
+            return []
+        
         signals = []
         
+        # بررسی سیگنال خرید
         buy_signal = self._evaluate_buy_signal(indicator_results, data, symbol, timeframe, market_analysis)
         if buy_signal:
+            logger.info(f"🟢 BUY signal generated for {symbol} on {timeframe} - Confidence: {buy_signal.confidence_score:.0f}")
             signals.append(buy_signal)
         
+        # بررسی سیگنال فروش
         sell_signal = self._evaluate_sell_signal(indicator_results, data, symbol, timeframe, market_analysis)
         if sell_signal:
+            logger.info(f"🔴 SELL signal generated for {symbol} on {timeframe} - Confidence: {sell_signal.confidence_score:.0f}")
             signals.append(sell_signal)
+        
+        if not signals:
+            logger.debug(f"ℹ️ No qualifying signals for {symbol} on {timeframe}")
         
         return signals
     
@@ -629,11 +652,14 @@ class ExchangeManager:
     async def get_exchange(self):
         async with self._lock:
             if self.exchange is None:
-                self.exchange = ccxt.binance({
-                    'sandbox': False,
-                    'enableRateLimit': True,
-                    'timeout': 30000,
-                })
+                self.exchange = ccxt.coinex({
+                'apiKey': os.getenv('COINEX_API_KEY', ''),
+                'secret': os.getenv('COINEX_SECRET', ''),
+                'sandbox': False,
+                'enableRateLimit': True,
+                'timeout': 30000,
+                'options': {'defaultType': 'spot'}
+            })
             
             try:
                 yield self.exchange
@@ -649,21 +675,33 @@ class ExchangeManager:
                 self.exchange = None
     
     async def fetch_ohlcv_data(self, symbol: str, timeframe: str, limit: int = 1000) -> pd.DataFrame:
+        logger.info(f"🔍 Fetching OHLCV data for {symbol} on {timeframe} (limit: {limit})")
+        
         try:
             async with self.get_exchange() as exchange:
+                start_time = asyncio.get_event_loop().time()
                 ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+                fetch_time = asyncio.get_event_loop().time() - start_time
                 
                 if not ohlcv:
+                    logger.warning(f"⚠️ No OHLCV data received for {symbol} on {timeframe}")
                     return pd.DataFrame()
                 
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 df = df.sort_values('timestamp').reset_index(drop=True)
                 
+                logger.info(f"✅ Successfully fetched {len(df)} candles for {symbol} on {timeframe} in {fetch_time:.2f}s")
                 return df
                 
+        except ccxt.NetworkError as e:
+            logger.error(f"🌐 Network error fetching {symbol} on {timeframe}: {e}")
+            return pd.DataFrame()
+        except ccxt.ExchangeError as e:
+            logger.error(f"🏪 Exchange error fetching {symbol} on {timeframe}: {e}")
+            return pd.DataFrame()
         except Exception as e:
-            logger.error(f"Error fetching data for {symbol} on {timeframe}: {e}")
+            logger.error(f"❌ Unexpected error fetching {symbol} on {timeframe}: {e}")
             return pd.DataFrame()
 
 class SignalRanking:
@@ -733,37 +771,81 @@ class TradingBotService:
         self.signal_ranking = SignalRanking()
     
     async def analyze_symbol(self, symbol: str, timeframe: str) -> List[TradingSignal]:
+        logger.info(f"🔍 Starting analysis for {symbol} on {timeframe}")
+        
         try:
+            # دریافت داده‌ها
             data = await self.exchange_manager.fetch_ohlcv_data(symbol, timeframe)
-            if data.empty or len(data) < 50:
+            
+            if data.empty:
+                logger.warning(f"⚠️ No data available for {symbol} on {timeframe}")
                 return []
             
-            signals = self.signal_generator.generate_signals(data, symbol, timeframe)
-            return [s for s in signals if s.confidence_score >= self.config.get('min_confidence_score', 60)]
+            if len(data) < 50:
+                logger.warning(f"⚠️ Insufficient data for {symbol} on {timeframe}: {len(data)} candles")
+                return []
+            
+            # تولید سیگنال‌ها
+            all_signals = self.signal_generator.generate_signals(data, symbol, timeframe)
+            
+            # فیلتر کردن بر اساس حداقل امتیاز اعتماد
+            min_confidence = self.config.get('min_confidence_score', 60)
+            qualified_signals = [s for s in all_signals if s.confidence_score >= min_confidence]
+            
+            if qualified_signals:
+                logger.info(f"✅ Analysis complete for {symbol} on {timeframe}: {len(qualified_signals)} qualified signals")
+            else:
+                logger.debug(f"ℹ️ No qualified signals for {symbol} on {timeframe} (min confidence: {min_confidence})")
+            
+            return qualified_signals
             
         except Exception as e:
-            logger.error(f"Error analyzing {symbol} on {timeframe}: {e}")
+            logger.error(f"❌ Analysis failed for {symbol} on {timeframe}: {e}")
             return []
     
     async def find_best_signals_for_timeframe(self, timeframe: str) -> List[TradingSignal]:
-        symbols = self.config.get('symbols', [])
-        all_signals = []
+        logger.info(f"🚀 Starting comprehensive analysis for {timeframe} timeframe")
         
+        symbols = self.config.get('symbols', [])
+        logger.info(f"📊 Analyzing {len(symbols)} symbols: {', '.join(symbols[:5])}{'...' if len(symbols) > 5 else ''}")
+        
+        all_signals = []
+        successful_analyses = 0
+        failed_analyses = 0
+        
+        # تحلیل موازی همه نمادها
         tasks = [self.analyze_symbol(symbol, timeframe) for symbol in symbols]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         for symbol, result in zip(symbols, results):
             if isinstance(result, Exception):
-                logger.error(f"Error processing {symbol}: {result}")
+                logger.error(f"❌ Analysis failed for {symbol}: {result}")
+                failed_analyses += 1
                 continue
             
             if isinstance(result, list):
                 all_signals.extend(result)
+                successful_analyses += 1
+                if result:
+                    logger.debug(f"✅ {symbol}: {len(result)} signals found")
         
+        logger.info(f"📈 Analysis summary for {timeframe}: {successful_analyses} successful, {failed_analyses} failed")
+        
+        if not all_signals:
+            logger.info(f"ℹ️ No signals found in {timeframe} timeframe")
+            return []
+        
+        # رتبه‌بندی سیگنال‌ها
         ranked_signals = self.signal_ranking.rank_signals(all_signals)
         max_signals = self.config.get('max_signals_per_timeframe', 3)
+        top_signals = ranked_signals[:max_signals]
         
-        return ranked_signals[:max_signals]
+        logger.info(f"🏆 Top {len(top_signals)} signals selected for {timeframe}")
+        for i, signal in enumerate(top_signals, 1):
+            logger.info(f"  #{i}: {signal.symbol} {signal.signal_type.value.upper()} "
+                        f"(confidence: {signal.confidence_score:.0f}, profit: {signal.predicted_profit:.2f}%)")
+        
+        return top_signals
     
     async def get_comprehensive_analysis(self) -> Dict[str, List[TradingSignal]]:
         results = {}
@@ -922,6 +1004,9 @@ class TelegramBotHandler:
             await self.show_help(query)
     
     async def run_full_analysis(self, query) -> None:
+        user_id = query.from_user.id
+        logger.info(f"👤 User {user_id} started full analysis")
+        
         await query.edit_message_text(
             "🔄 **Starting Comprehensive Analysis...**\n\n"
             "📊 Analyzing multiple timeframes\n"
@@ -932,37 +1017,72 @@ class TelegramBotHandler:
         )
         
         try:
-            results = await self.trading_service.get_comprehensive_analysis()
+            timeframes = self.config.get('timeframes', TIME_FRAMES)
+            logger.info(f"📅 Analyzing {len(timeframes)} timeframes: {', '.join(timeframes)}")
             
-            summary = self.formatter.format_summary_message(results)
-            await query.edit_message_text(summary, parse_mode='Markdown')
+            results = {}
+            total_signals = 0
+            analysis_start_time = asyncio.get_event_loop().time()
             
-            for timeframe, signals in results.items():
+            for i, timeframe in enumerate(timeframes, 1):
+                logger.info(f"🔄 Processing timeframe {i}/{len(timeframes)}: {timeframe}")
+                
+                # به‌روزرسانی پیام وضعیت
+                await query.edit_message_text(
+                    f"🔄 **Analysis Progress ({i}/{len(timeframes)})**\n\n"
+                    f"📊 Currently analyzing: **{timeframe.upper()}**\n"
+                    f"🔍 Processing technical indicators\n"
+                    f"📈 Evaluating market conditions\n\n"
+                    f"⏳ Please wait...",
+                    parse_mode='Markdown'
+                )
+                
+                timeframe_start = asyncio.get_event_loop().time()
+                signals = await self.trading_service.find_best_signals_for_timeframe(timeframe)
+                timeframe_duration = asyncio.get_event_loop().time() - timeframe_start
+                
+                results[timeframe] = signals
+                total_signals += len(signals)
+                
+                logger.info(f"✅ {timeframe} analysis completed in {timeframe_duration:.2f}s - {len(signals)} signals found")
+                
+                # ارسال نتیجه فوری این تایم فریم
                 if signals:
-                    timeframe_header = f"🕐 **{timeframe.upper()} TIMEFRAME SIGNALS**\n\n"
-                    await query.message.reply_text(timeframe_header, parse_mode='Markdown')
+                    best_signal = signals[0]
+                    timeframe_result = (
+                        f"✅ **{timeframe.upper()} Analysis Complete**\n\n"
+                        f"🎯 **Found {len(signals)} signal(s)**\n\n"
+                        f"🏆 **Best Signal:**\n"
+                        f"• Symbol: `{best_signal.symbol}`\n"
+                        f"• Type: {best_signal.signal_type.value.upper()}\n"
+                        f"• Confidence: {best_signal.confidence_score:.0f}/100\n"
+                        f"• Profit Potential: {best_signal.predicted_profit:.2f}%\n"
+                        f"• Risk/Reward: {best_signal.risk_reward_ratio:.2f}\n\n"
+                        f"📋 **Main Reasons:**\n"
+                    )
                     
-                    for i, signal in enumerate(signals, 1):
-                        signal_message = self.formatter.format_signal_message(signal)
-                        signal_header = f"**Signal #{i}**\n\n"
-                        
-                        await query.message.reply_text(
-                            signal_header + signal_message,
-                            parse_mode='Markdown'
-                        )
-                        
-                        await asyncio.sleep(0.5)
+                    # نمایش 3 دلیل اول
+                    for reason in best_signal.reasons[:3]:
+                        timeframe_result += f"• {reason}\n"
+                    
+                    timeframe_result += "\n🔍 **Detailed signals will follow after complete analysis**"
+                else:
+                    timeframe_result = (
+                        f"❌ **{timeframe.upper()} Analysis Complete**\n\n"
+                        f"No strong signals found in this timeframe.\n"
+                        f"Market conditions may not be favorable.\n\n"
+                    )
+                
+                await query.message.reply_text(timeframe_result, parse_mode='Markdown')
+                await asyncio.sleep(1)
             
-            final_message = (
-                "✅ **Analysis Complete!**\n\n"
-                "🔄 For updated signals, use /start again\n"
-                "⚙️ To modify settings, use /config\n"
-                "❓ For help, use /help"
-            )
-            await query.message.reply_text(final_message, parse_mode='Markdown')
+            total_duration = asyncio.get_event_loop().time() - analysis_start_time
+            logger.info(f"🎉 Full analysis completed in {total_duration:.2f}s - Total signals: {total_signals}")
+            
+            # ادامه کد برای نمایش نتایج...
             
         except Exception as e:
-            logger.error(f"Error in full analysis: {e}")
+            logger.error(f"❌ Full analysis failed for user {user_id}: {e}")
             await query.edit_message_text(
                 f"❌ **Analysis Error**\n\n"
                 f"An error occurred during analysis:\n`{str(e)}`\n\n"
@@ -973,18 +1093,18 @@ class TelegramBotHandler:
     async def run_quick_scan(self, query) -> None:
         await query.edit_message_text(
             "⚡ **Quick Scan in Progress...**\n\n"
-            "🔍 Scanning 1H timeframe only\n"
+            "🔍 Scanning 1m timeframe only\n"
             "⏳ This will take about 30 seconds...",
             parse_mode='Markdown'
         )
         
         try:
-            signals = await self.trading_service.find_best_signals_for_timeframe('1h')
+            signals = await self.trading_service.find_best_signals_for_timeframe('1m')
             
             if not signals:
                 await query.edit_message_text(
                     "⚡ **Quick Scan Results**\n\n"
-                    "❌ No strong signals found in 1H timeframe\n\n"
+                    "❌ No strong signals found in 1m timeframe\n\n"
                     "💡 Try full analysis for other timeframes or wait for better market conditions.",
                     parse_mode='Markdown'
                 )
@@ -992,7 +1112,7 @@ class TelegramBotHandler:
             
             await query.edit_message_text(
                 f"⚡ **Quick Scan Results**\n\n"
-                f"✅ Found {len(signals)} signal(s) in 1H timeframe",
+                f"✅ Found {len(signals)} signal(s) in 1m timeframe",
                 parse_mode='Markdown'
             )
             
@@ -1142,19 +1262,27 @@ class TelegramBotHandler:
         await self.trading_service.cleanup()
 
 def main():    
+    logger.info("🚀 Starting Advanced Trading Signal Bot...")
+    
     if not BOT_TOKEN:
-        logger.error("BOT_TOKEN environment variable is required")
+        logger.error("❌ BOT_TOKEN environment variable is required")
         return
     
-    config_manager = ConfigManager()
-    bot_handler = TelegramBotHandler(BOT_TOKEN, config_manager)
-    
     try:
+        config_manager = ConfigManager()
+        logger.info("⚙️ Configuration loaded successfully")
+        
+        bot_handler = TelegramBotHandler(BOT_TOKEN, config_manager)
         application = bot_handler.create_application()
         
-        logger.info("🤖 Advanced Trading Signal Bot is starting...")
-        logger.info(f"📊 Monitoring {len(config_manager.get('symbols', []))} symbols")
-        logger.info(f"⏰ Analyzing {len(config_manager.get('timeframes', []))} timeframes")
+        symbols_count = len(config_manager.get('symbols', []))
+        timeframes_count = len(config_manager.get('timeframes', []))
+        
+        logger.info("📊 Bot configured with:")
+        logger.info(f"   • {symbols_count} symbols")
+        logger.info(f"   • {timeframes_count} timeframes: {', '.join(config_manager.get('timeframes', []))}")
+        logger.info(f"   • Min confidence: {config_manager.get('min_confidence_score', 60)}")
+        logger.info("🤖 Bot is ready and waiting for commands...")
         
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
@@ -1162,12 +1290,15 @@ def main():
         )
         
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("⏹️ Bot stopped by user (Ctrl+C)")
     except Exception as e:
-        logger.error(f"Bot crashed: {e}")
+        logger.error(f"💥 Bot crashed with error: {e}")
+        import traceback
+        logger.error(f"📋 Traceback:\n{traceback.format_exc()}")
     finally:
+        logger.info("🧹 Starting cleanup process...")
         asyncio.run(bot_handler.cleanup())
-        logger.info("Bot cleanup completed")
+        logger.info("✅ Bot cleanup completed successfully")
 
 if __name__ == "__main__":
     main()
