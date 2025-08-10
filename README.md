@@ -1,90 +1,154 @@
-Trading Signal Bot
-This project is a trading bot that utilizes technical analysis to generate buy and sell signals for cryptocurrencies and sends them to users via Telegram. It leverages various technical indicators such as Moving Averages, RSI, MACD, and more to analyze market conditions and trends.
-Features
+# 📊 Advanced Crypto Analyzing Trading Bot  
+ربات تحلیلگر پیشرفته بازار کریپتو 🚀
 
-Generates buy and sell signals based on technical analysis
-Supports multiple technical indicators (e.g., SMA, EMA, RSI, MACD, Bollinger Bands, Stochastic, etc.)
-Analyzes market conditions and trends
-Dynamically calculates entry, exit, and stop-loss levels
-Ranks signals based on various criteria
-Integrates with the CoinEx exchange for market data
-Delivers signals and analysis to users through Telegram
-Includes backtesting and paper trading simulation capabilities
+---
 
-Installation and Setup
+## 🇮🇷 فارسی
 
-Install Dependencies:
+### 📝 معرفی
+این پروژه یک **ربات تحلیلگر پیشرفته بازار ارز دیجیتال** است که قابلیت‌های گسترده‌ای دارد:  
+🔹 تحلیل تکنیکال چندبازه‌ای  
+🔹 پیش‌بینی قیمت با **مدل LSTM**  
+🔹 استفاده از داده‌های **آن‌چین**  
+🔹 تحلیل احساسات بازار بر اساس اخبار و شاخص ترس و طمع  
+
+خروجی ربات شامل:
+- 📈 سیگنال‌های خرید/فروش/نگه‌داری
+- 🏷 امتیاز اطمینان سیگنال
+- 🎯 سطوح ورود و خروج داینامیک
+- 📋 دلایل دقیق تحلیلی
+
+---
+
+### ⚙️ قابلیت‌ها
+- 📊 **اندیکاتورهای تکنیکال**: SMA، EMA، RSI، MACD، باند بولینگر، استوکاستیک، ATR، ایچیموکو، Williams %R، CCI، تحلیل حجم.  
+- 🔍 **شناسایی الگوها**: پوشای صعودی/نزولی، سقف و کف دوقلو، سر و شانه، پرچم، مثلث، کنج.  
+- 🤖 **پیش‌بینی قیمت با LSTM**: پیش‌بینی مبتنی بر یادگیری ماشین با TensorFlow/Keras.  
+- ⏳ **تأیید چندبازه‌ای**: هم‌ترازی سیگنال‌ها در تایم‌فریم‌های مختلف.  
+- 📉 **تحلیل بازار**: تشخیص روند، نوسان‌پذیری، سطوح حمایت/مقاومت.  
+- 🔗 **داده‌های آن‌چین**: آدرس‌های فعال، حجم تراکنش‌ها، جریان صرافی‌ها.  
+- 📰 **تحلیل احساسات**: شاخص ترس و طمع، امتیازدهی اخبار با CryptoPanic API.  
+- 🛡 **محاسبه سطوح داینامیک**: استاپ‌لاس، تارگت، نقطه سر به سر، و تریلینگ‌استاپ.
+
+---
+
+### 📦 پیش‌نیازها
+- Python 3.9 یا بالاتر  
+- نصب کتابخانه‌های زیر:  
+pandas, numpy, ccxt, tensorflow, scikit-learn, python-telegram-bot, web3, requests, aiosqlite
+
+---
+
+### 🔑 متغیرهای محیطی
+برای اجرا باید مقادیر زیر را در `.env` یا محیط سیستم ست کنید:  
+COINEX_API_KEY=کلید API کوینکس
+COINEX_SECRET=کلید مخفی کوینکس
+BOT_TOKEN=توکن ربات تلگرام
+CRYPTOPANIC_KEY=کلید API سایت CryptoPanic
+ALCHEMY_URL=آدرس HTTP سرویس Alchemy
+
+---
+
+### ▶️ اجرا
+```bash
 pip install -r requirements.txt
+python main.py
+🧪 بک‌تست و Paper Trading
+📜 بک‌تست: با استفاده از داده‌های تاریخی و ماژول داخلی WalkForwardOptimizer می‌توانید عملکرد استراتژی‌ها را در بازه‌های زمانی گذشته بررسی کنید.
 
+🧩 Paper Trading: امکان اجرای معاملات مجازی (بدون ریسک مالی) برای تست عملی استراتژی قبل از ورود به بازار واقعی.
 
-Set Environment Variables:
+نمونه اجرای بک‌تست:
+from main import WalkForwardOptimizer, TradingService
 
-COINEX_API_KEY: Your CoinEx API key
-COINEX_SECRET: Your CoinEx API secret
-BOT_TOKEN: Your Telegram bot token
+optimizer = WalkForwardOptimizer(trading_service=TradingService())
+results = optimizer.run(symbol="BTC/USDT", timeframe="1h", lookback_days=30, test_days=7)
+print(results)
 
-You can set these in your environment or in a .env file:
-export COINEX_API_KEY='your_api_key'
-export COINEX_SECRET='your_api_secret'
-export BOT_TOKEN='your_bot_token'
+---
 
+🇺🇸 English
 
-Run the Bot:
-python main-gpt.py
+---
 
+📝 Overview
+This is an Advanced Cryptocurrency Trading Bot designed to perform:
 
+📊 Multi-timeframe technical analysis
 
-Usage
-Once the bot is running, interact with it via Telegram using these commands:
+🤖 Price prediction using LSTM
 
-/start: Initiates the bot and displays the main menu
-/config: Shows the current bot configuration
-/quick: Performs a quick analysis on the 1-minute timeframe
+🔗 On-chain data integration
 
-You can also use the inline buttons in the main menu to request a full analysis or quick scan.
-Configuration
-The bot’s settings are stored in config.json. Edit this file to customize the bot’s behavior. Default settings include:
+📰 Market sentiment analysis based on news & Fear & Greed Index
 
-symbols: List of trading symbols (e.g., BTC/USDT)
-timeframes: List of timeframes to analyze (e.g., 1m, 5m, 1h)
-min_confidence_score: Minimum confidence score for signals (default: 50)
-max_signals_per_timeframe: Maximum signals per timeframe (default: 3)
-risk_reward_threshold: Minimum risk/reward ratio (default: 1.5)
+The bot outputs:
 
-Example config.json:
-{
-  "symbols": ["BTC/USDT", "ETH/USDT"],
-  "timeframes": ["1m", "5m", "15m"],
-  "min_confidence_score": 60,
-  "max_signals_per_timeframe": 3,
-  "risk_reward_threshold": 2.0
-}
+📈 Buy/Sell/Hold signals
 
-Code Structure
-The code is modular and consists of the following key components:
+🏷 Confidence scores
 
-Technical Indicators: Classes like MovingAverageIndicator, RSIIndicator, MACDIndicator, etc., for calculating various indicators
-Market Analysis: Classes such as MarketConditionAnalyzer, TrendAnalyzer, and SupportResistanceAnalyzer for market evaluation
-Dynamic Levels: DynamicLevelCalculator for computing entry, exit, and stop-loss levels
-Signal Generation: SignalGenerator for producing trading signals
-Exchange Management: ExchangeManager for interacting with CoinEx and fetching OHLCV data
-Signal Ranking: SignalRanking for prioritizing signals
-Configuration: ConfigManager for handling bot settings
-Bot Service: TradingBotService for managing analysis and signals
-Backtesting & Simulation: BacktestingEngine and PaperTradingSimulator for testing strategies
-Message Formatting: MessageFormatter for crafting Telegram messages
-Telegram Handler: TelegramBotHandler for user interaction via Telegram
+🎯 Dynamic entry/exit levels
 
-Dependencies
+📋 Detailed analytical reasons
 
-pandas: Data manipulation and analysis
-ccxt: Cryptocurrency exchange trading library
-numpy: Numerical computations
-python-telegram-bot: Telegram bot API integration
-sqlite3: Local database for caching OHLCV data
+---
 
-Install them using:
-pip install pandas ccxt numpy python-telegram-bot sqlite3
+⚙️ Features
+Technical Indicators: SMA, EMA, RSI, MACD, Bollinger Bands, Stochastic, ATR, Ichimoku, Williams %R, CCI, Volume Analysis.
 
-License
-This project is licensed under the GPL V3 License.
+Pattern Recognition: Bullish/Bearish Engulfing, Double Top/Bottom, Head & Shoulders, Flags, Triangles, Wedges.
+
+LSTM Price Prediction with TensorFlow/Keras.
+
+Multi-Timeframe Confirmation for consistent signals.
+
+Market Analysis: Trend detection, volatility, support/resistance.
+
+On-Chain Data: Active addresses, transaction volumes, exchange flows.
+
+Sentiment Analysis via Fear & Greed Index + CryptoPanic API news scoring.
+
+Dynamic Level Calculation: Stop-loss, take-profit, breakeven, trailing stop.
+
+---
+
+📦 Requirements
+Python 3.9+
+
+Install the following libraries:
+pandas, numpy, ccxt, tensorflow, scikit-learn, python-telegram-bot, web3, requests, aiosqlite
+
+---
+
+🔑 Environment Variables
+Set the following in .env or your system environment:
+COINEX_API_KEY=your_coinex_key
+COINEX_SECRET=your_coinex_secret
+BOT_TOKEN=your_telegram_bot_token
+CRYPTOPANIC_KEY=your_cryptopanic_api_key
+ALCHEMY_URL=your_alchemy_http_url
+
+▶️ Run
+pip install -r requirements.txt
+python main.py
+
+---
+
+🧪 Backtesting & Paper Trading
+📜 Backtesting: Use historical data and the built-in WalkForwardOptimizer to test strategies over past market conditions.
+
+🧩 Paper Trading: Execute simulated trades (no real money) to validate your strategy before going live.
+
+Example backtest:
+from main import WalkForwardOptimizer, TradingService
+
+optimizer = WalkForwardOptimizer(trading_service=TradingService())
+results = optimizer.run(symbol="BTC/USDT", timeframe="1h", lookback_days=30, test_days=7)
+print(results)
+
+---
+
+📜 License
+Licensed under GPL v3.
+You are free to use, modify, and distribute with proper credit.
