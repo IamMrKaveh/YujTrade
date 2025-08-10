@@ -1,7 +1,28 @@
 {
     "cSpell.words": [
         "Aroon",
+        "backtest",
+        "Backtesting",
+        "Bollinger",
+        "ccxt",
+        "COINEX",
+        "cryptopanic",
         "Donchian",
-        "Supertrend"
-    ]
+        "ichimoku",
+        "kijun",
+        "lookback",
+        "macd",
+        "nanmean",
+        "nanstd",
+        "ohlcv",
+        "polyfit",
+        "retracement",
+        "senkou",
+        "sortino",
+        "stoch",
+        "Supertrend",
+        "tenkan",
+        "vwap"
+    ],
+    "python.analysis.extraPaths": ["./venv/Lib/site-packages"]
 }

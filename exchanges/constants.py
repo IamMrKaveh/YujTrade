@@ -1,3 +1,4 @@
+import os
 from logger_config import logger
 
 
@@ -11,22 +12,31 @@ TIME_FRAMES = [
     "6h",
     "12h",
     "1d",
-    "3d",
     "1w",
-    "2w",
     "1M",
-    "3M",
 ]
 
 
 def load_symbols():
     try:
+        if not os.path.exists('symbols.txt'):
+            logger.error("symbols.txt file not found")
+            return []
+            
         with open('symbols.txt', 'r', encoding='utf-8') as f:
             symbols = [line.strip().upper() for line in f.readlines() if line.strip()]
+        
+        symbols = list(set(symbols))
+        
+        if not symbols:
+            logger.warning("No symbols found in symbols.txt")
+            return []
+            
         logger.info(f"Loaded {len(symbols)} symbols from symbols.txt")
         return symbols
     except Exception as e:
         logger.error(f"Error loading symbols: {e}")
+        return []
 
 SYMBOLS = load_symbols()
 
