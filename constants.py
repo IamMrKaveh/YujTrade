@@ -3,13 +3,13 @@ from logger_config import logger
 
 # =====================================================================
 
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8373302523:AAEDN-6lhfpYEuPjx6fU5c0yp0NKLeguxzQ')
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'token')
 
-COINEX_API_KEY = 'B443BA2F2AD8473C92118E71A2A20486'
+COINEX_API_KEY = 'token'
 
-COINEX_SECRET = '538792AAF1AD5F5329106EF4EC469AA7A1BF387E10A6116C'
+COINEX_SECRET = 'token'
 
-CRYPTOPANIC_KEY = "35632a30548c0f3076801a2168e39c887dd52567"
+CRYPTOPANIC_KEY = "token"
 
 # =====================================================================
 
