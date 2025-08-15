@@ -1,0 +1,12 @@
+[build]
+# دستور نصب پکیج‌ها
+builder = "heroku/buildpacks:20"
+buildCommand = "pip install --no-cache-dir -r requirements.txt"
+
+[deploy]
+# دستور اجرا
+startCommand = "python main.py"
+
+[env]
+PYTHONUNBUFFERED = "1"
+PIP_DISABLE_PIP_VERSION_CHECK = "1"
