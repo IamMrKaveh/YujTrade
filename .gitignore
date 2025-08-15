@@ -1,5 +1,23 @@
 logs/
 
+lstm-model/
+
+# TensorFlow model files
+*.h5
+*.pb
+*.ckpt
+
+# Keras model files
+*.h5
+*.keras
+
+# SQLite database files
+*.sqlite3
+*.sqlite3-journal
+
+# Database files
+*.db
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -1,16 +1,16 @@
-
 import os
 import warnings
 import sys
 import asyncio
 import json
-import sqlite3
 import aiosqlite
 import requests
 import time
 import warnings
+import pickle
+import signal
+import platform
 
-from pathlib import Path
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -23,19 +23,22 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from sklearn.preprocessing import MinMaxScaler
 from web3 import Web3
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 import pandas as pd
 import ccxt.async_support as ccxt
 import numpy as np
 import tensorflow as tf
 
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 from logger_config import logger
-from exchanges.constants import COINEX_API_KEY, COINEX_SECRET, TIME_FRAMES, SYMBOLS
+from exchanges.constants import (COINEX_API_KEY, COINEX_SECRET, TIME_FRAMES, SYMBOLS,
+                                MULTI_TF_CONFIRMATION_MAP, MULTI_TF_CONFIRMATION_WEIGHTS,
+                                CRYPTOPANIC_KEY)
 from telegrams.constants import BOT_TOKEN
 
 tf.get_logger().setLevel('ERROR')
@@ -47,25 +50,22 @@ warnings.filterwarnings('ignore', message='.*Protobuf gencode version.*')
 class RateLimiter:
     def __init__(self, max_requests: int, time_window: int):
         self.max_requests = max_requests
-        self.time_window = time_window  #in seconds
+        self.time_window = time_window
         self.requests: Dict[str, list] = {}
+        self._lock = asyncio.Lock()
     
-    def wait_if_needed(self, endpoint: str):
-        now = time.time()
-        if endpoint not in self.requests:
-            self.requests[endpoint] = []
-        
-        self.requests[endpoint] = [req_time for req_time in self.requests[endpoint] 
-                                    if now - req_time < self.time_window]
-        
-        if len(self.requests[endpoint]) >= self.max_requests:
-            sleep_time = self.time_window - (now - self.requests[endpoint][0])
-            if sleep_time > 0:
-                logger.warning(f"Rate limit reached for {endpoint}. Sleeping for {sleep_time:.2f} seconds")
-                time.sleep(sleep_time)
-                self.requests[endpoint] = []
-        
-        self.requests[endpoint].append(now)
+    async def wait_if_needed(self, endpoint: str):
+        async with self._lock:
+            now = time.time()
+            reqs = self.requests.setdefault(endpoint, [])
+            reqs = [t for t in reqs if now - t < self.time_window]
+            if len(reqs) >= self.max_requests:
+                sleep_time = self.time_window - (now - reqs[0])
+                if sleep_time > 0:
+                    await asyncio.sleep(sleep_time)
+                    reqs.clear()
+            reqs.append(now)
+            self.requests[endpoint] = reqs
         
 rate_limiter = RateLimiter(max_requests=10, time_window=60)
 
@@ -366,19 +366,20 @@ class ATRIndicator(TechnicalIndicator):
 
 class IchimokuIndicator(TechnicalIndicator):
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        if len(data) < 52:
+        if len(data) < 24:
             return IndicatorResult(name="Ichimoku", value=0, signal_strength=0, interpretation="neutral")
-        high_9 = data['high'].rolling(window=9).max().iloc[-1]
-        low_9 = data['low'].rolling(window=9).min().iloc[-1]
+        high_9 = data['high'].rolling(window=6).max().iloc[-1]
+        low_9 = data['low'].rolling(window=6).min().iloc[-1]
         tenkan = (high_9 + low_9) / 2
-        high_26 = data['high'].rolling(window=26).max().iloc[-1]
-        low_26 = data['low'].rolling(window=26).min().iloc[-1]
+        high_26 = data['high'].rolling(window=12).max().iloc[-1]
+        low_26 = data['low'].rolling(window=12).min().iloc[-1]
         kijun = (high_26 + low_26) / 2
         senkou_a = (tenkan + kijun) / 2
-        high_52 = data['high'].rolling(window=52).max().iloc[-1]
-        low_52 = data['low'].rolling(window=52).min().iloc[-1]
+        high_52 = data['high'].rolling(window=24).max().iloc[-1]
+        low_52 = data['low'].rolling(window=24).min().iloc[-1]
         senkou_b = (high_52 + low_52) / 2
         current_price = data['close'].iloc[-1]
+        
         if current_price > senkou_a and current_price > senkou_b:
             interpretation = "price_above_cloud"
             signal_strength = 100
@@ -451,11 +452,123 @@ class CCIIndicator(TechnicalIndicator):
             
         return IndicatorResult(name="CCI", value=cci, signal_strength=signal_strength, interpretation=interpretation)
 
+class SuperTrendIndicator(TechnicalIndicator):
+    def __init__(self, period=7, multiplier=3):
+        self.period = period
+        self.multiplier = multiplier
+    
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        tr1 = data['high'] - data['low']
+        tr2 = abs(data['high'] - data['close'].shift())
+        tr3 = abs(data['low'] - data['close'].shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(self.period).mean()
+        hl2 = (data['high'] + data['low']) / 2
+        upperband = hl2 + (self.multiplier * atr)
+        lowerband = hl2 - (self.multiplier * atr)
+        supertrend = pd.Series(index=data.index)
+        direction = True
+        for i in range(len(data)):
+            if i < self.period:
+                supertrend.iloc[i] = np.nan
+                continue
+            if data['close'].iloc[i] > upperband.iloc[i - 1]:
+                direction = True
+            elif data['close'].iloc[i] < lowerband.iloc[i - 1]:
+                direction = False
+            if direction:
+                lowerband.iloc[i] = max(lowerband.iloc[i], lowerband.iloc[i - 1])
+                supertrend.iloc[i] = lowerband.iloc[i]
+            else:
+                upperband.iloc[i] = min(upperband.iloc[i], upperband.iloc[i - 1])
+                supertrend.iloc[i] = upperband.iloc[i]
+        current_value = supertrend.iloc[-1]
+        if data['close'].iloc[-1] > current_value:
+            interpretation = "bullish"
+            strength = 100
+        elif data['close'].iloc[-1] < current_value:
+            interpretation = "bearish"
+            strength = 100
+        else:
+            interpretation = "neutral"
+            strength = 50
+        return IndicatorResult(name="SuperTrend", value=current_value, signal_strength=strength, interpretation=interpretation)
+
+class ADXIndicator(TechnicalIndicator):
+    def __init__(self, period=14):
+        self.period = period
+    
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        plus_dm = data['high'].diff()
+        minus_dm = data['low'].diff()
+        plus_dm[plus_dm < 0] = 0
+        minus_dm[minus_dm > 0] = 0
+        tr1 = data['high'] - data['low']
+        tr2 = abs(data['high'] - data['close'].shift())
+        tr3 = abs(data['low'] - data['close'].shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(self.period).mean()
+        plus_di = 100 * (plus_dm.rolling(self.period).mean() / atr)
+        minus_di = abs(100 * (minus_dm.rolling(self.period).mean() / atr))
+        dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+        adx = dx.rolling(self.period).mean().iloc[-1]
+        if adx > 25:
+            interpretation = "strong_trend"
+            strength = min(adx, 100)
+        else:
+            interpretation = "weak_trend"
+            strength = min(adx, 100)
+        return IndicatorResult(name="ADX", value=adx, signal_strength=strength, interpretation=interpretation)
+
+class ChaikinMoneyFlowIndicator(TechnicalIndicator):
+    def __init__(self, period=20):
+        self.period = period
+    
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        mfm = ((data['close'] - data['low']) - (data['high'] - data['close'])) / (data['high'] - data['low'])
+        mfm = mfm.replace([np.inf, -np.inf], 0).fillna(0)
+        mfv = mfm * data['volume']
+        cmf = mfv.rolling(self.period).sum() / data['volume'].rolling(self.period).sum()
+        current_value = cmf.iloc[-1]
+        if current_value > 0:
+            interpretation = "buy_pressure"
+            strength = min(abs(current_value) * 100, 100)
+        elif current_value < 0:
+            interpretation = "sell_pressure"
+            strength = min(abs(current_value) * 100, 100)
+        else:
+            interpretation = "neutral"
+            strength = 50
+        return IndicatorResult(name="CMF", value=current_value, signal_strength=strength, interpretation=interpretation)
+
+class OBVIndicator(TechnicalIndicator):
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        obv = [0]
+        for i in range(1, len(data)):
+            if data['close'].iloc[i] > data['close'].iloc[i - 1]:
+                obv.append(obv[-1] + data['volume'].iloc[i])
+            elif data['close'].iloc[i] < data['close'].iloc[i - 1]:
+                obv.append(obv[-1] - data['volume'].iloc[i])
+            else:
+                obv.append(obv[-1])
+        current_value = obv[-1]
+        if current_value > obv[-2]:
+            interpretation = "bullish"
+            strength = 100
+        elif current_value < obv[-2]:
+            interpretation = "bearish"
+            strength = 100
+        else:
+            interpretation = "neutral"
+            strength = 50
+        return IndicatorResult(name="OBV", value=current_value, signal_strength=strength, interpretation=interpretation)
+
 class FibonacciLevels:
     @staticmethod
     def calculate_retracement_levels(high: float, low: float) -> Dict[str, float]:
         diff = high - low
         return {'0.236': high - 0.236 * diff, '0.382': high - 0.382 * diff, '0.500': high - 0.500 * diff, '0.618': high - 0.618 * diff, '0.786': high - 0.786 * diff}
+    
     @staticmethod
     def calculate_extension_levels(high: float, low: float, entry: float) -> Dict[str, float]:
         range_size = high - low
@@ -521,6 +634,7 @@ class PatternAnalyzer:
                     patterns.append("inverse_head_and_shoulders")
                     break
         return patterns
+    
     @staticmethod
     def detect_flag(data: pd.DataFrame) -> bool:
         if len(data) < 20:
@@ -531,6 +645,7 @@ class PatternAnalyzer:
         if highs.max() - highs.min() < (data['close'].iloc[-20] * 0.02):
             return True
         return False
+    
     @staticmethod
     def detect_wedge(data: pd.DataFrame) -> bool:
         if len(data) < 30:
@@ -539,6 +654,7 @@ class PatternAnalyzer:
         slope_high = np.polyfit(range(len(recent)), recent['high'], 1)[0]
         slope_low = np.polyfit(range(len(recent)), recent['low'], 1)[0]
         return abs(slope_high) < 0.05 and abs(slope_low) < 0.05 and slope_high * slope_low < 0
+    
     @staticmethod
     def detect_triangle(data: pd.DataFrame) -> bool:
         if len(data) < 30:
@@ -626,6 +742,7 @@ class TrendAnalyzer:
 class SupportResistanceAnalyzer:
     def __init__(self, lookback_period: int = 50):
         self.lookback_period = lookback_period
+    
     def find_support_resistance(self, data: pd.DataFrame) -> Tuple[List[float], List[float]]:
         if len(data) < self.lookback_period:
             return [], []
@@ -652,12 +769,14 @@ class VolumeAnalyzer:
         volume_trend = self._calculate_volume_trend(data)
         volume_breakout = current_volume / avg_volume if avg_volume and not np.isnan(avg_volume) else 1
         return {'volume_ratio': volume_breakout, 'volume_trend': volume_trend, 'volume_strength': min(volume_breakout * 50, 100), 'volume_confirmation': volume_breakout > 1.2 and volume_trend > 0}
+    
     def _calculate_volume_trend(self, data: pd.DataFrame) -> float:
         recent_volumes = data['volume'].tail(10)
         if len(recent_volumes) < 2:
             return 0
         volume_changes = recent_volumes.pct_change().dropna()
         return volume_changes.mean()
+    
     def volume_profile(self, data: pd.DataFrame, bins: int = 30) -> List[Tuple[float, float]]:
         prices = data['close']
         volumes = data['volume']
@@ -672,6 +791,7 @@ class VolumeAnalyzer:
             buckets[key] = buckets.get(key, 0) + v
         items = sorted(buckets.items(), key=lambda x: x[0])
         return items
+    
     def vwap(self, data: pd.DataFrame) -> float:
         pv = (data['close'] * data['volume']).sum()
         v = data['volume'].sum()
@@ -805,6 +925,7 @@ class DynamicLevelCalculator:
     def __init__(self):
         self.fibonacci = FibonacciLevels()
         self.pivot_points = PivotPoints()
+    
     def calculate_dynamic_levels(self, data: pd.DataFrame, signal_type: SignalType, market_analysis: MarketAnalysis) -> DynamicLevels:
         current_price = data['close'].iloc[-1]
         high_20 = data['high'].tail(20).max()
@@ -816,6 +937,7 @@ class DynamicLevelCalculator:
             return self._calculate_buy_levels(data, current_price, high_20, low_20, atr_value, market_analysis)
         else:
             return self._calculate_sell_levels(data, current_price, high_20, low_20, atr_value, market_analysis)
+    
     def _calculate_buy_levels(self, data: pd.DataFrame, current_price: float, high_20: float, low_20: float, atr_value: float, market_analysis: MarketAnalysis) -> DynamicLevels:
         fib_levels = self.fibonacci.calculate_retracement_levels(high_20, low_20)
         pivot_levels = self.pivot_points.calculate_pivot_levels(data['high'].iloc[-1], data['low'].iloc[-1], data['close'].iloc[-1])
@@ -845,6 +967,7 @@ class DynamicLevelCalculator:
         breakeven_point = current_price + (atr_value * 0.5)
         trailing_stop = current_price - (atr_value * 1.5 * volatility_multiplier)
         return DynamicLevels(primary_entry=primary_entry, secondary_entry=secondary_entry, primary_exit=primary_exit, secondary_exit=secondary_exit, tight_stop=tight_stop, wide_stop=wide_stop, breakeven_point=breakeven_point, trailing_stop=trailing_stop)
+    
     def _calculate_sell_levels(self, data: pd.DataFrame, current_price: float, high_20: float, low_20: float, atr_value: float, market_analysis: MarketAnalysis) -> DynamicLevels:
         fib_levels = self.fibonacci.calculate_retracement_levels(high_20, low_20)
         pivot_levels = self.pivot_points.calculate_pivot_levels(data['high'].iloc[-1], data['low'].iloc[-1], data['close'].iloc[-1])
@@ -874,6 +997,7 @@ class DynamicLevelCalculator:
         breakeven_point = current_price - (atr_value * 0.5)
         trailing_stop = current_price + (atr_value * 1.5 * volatility_multiplier)
         return DynamicLevels(primary_entry=primary_entry, secondary_entry=secondary_entry, primary_exit=primary_exit, secondary_exit=secondary_exit, tight_stop=tight_stop, wide_stop=wide_stop, breakeven_point=breakeven_point, trailing_stop=trailing_stop)
+    
     def _get_trend_multiplier(self, market_analysis: MarketAnalysis) -> float:
         base_multiplier = 1.0
         if market_analysis.trend == TrendDirection.BULLISH:
@@ -889,6 +1013,7 @@ class DynamicLevelCalculator:
         if abs(market_analysis.trend_acceleration) > 1:
             base_multiplier *= 1.15
         return base_multiplier
+    
     def _get_volatility_multiplier(self, market_analysis: MarketAnalysis) -> float:
         if market_analysis.volatility > 0.04:
             return 1.5
@@ -901,150 +1026,242 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 class LSTMModel:
-    def __init__(self, input_shape=(60, 1), units=64, lr=0.001):
+    def __init__(self, input_shape=(60, 1), units=64, lr=0.001, model_path='lstm-model'):
         self.model = None
         self.input_shape = input_shape
         self.trained = False
         self.scaler = MinMaxScaler()
         self.is_fitted = False
+        self.model_path = Path(model_path)
+        self.model_path.mkdir(exist_ok=True)
+        self.executor = None
+        self._lock = threading.Lock()
         self._setup_gpu()
-        self._create_model(units, lr)
+        self._load_or_create_model(units, lr)
         
-    def _setup_gpu(self):
-        """تنظیم GPU با مدیریت خطا"""
+    def __del__(self):
+        self._cleanup_safely()
+
+    def _cleanup_safely(self):
         try:
-            import tensorflow as tf
+            with self._lock:
+                if hasattr(self, 'executor') and self.executor and not self.executor._shutdown:
+                    try:
+                        self.executor.shutdown(wait=False, cancel_futures=True)
+                    except:
+                        pass
+                    self.executor = None
+                
+                if hasattr(self, 'model') and self.model:
+                    try:
+                        tf.keras.backend.clear_session()
+                        del self.model
+                    except:
+                        pass
+                    self.model = None
+        except:
+            pass
+
+    def clear_cache(self):
+        self._cleanup_safely()
+
+    def _setup_gpu(self):
+        try:
             gpus = tf.config.experimental.list_physical_devices('GPU')
             if gpus:
                 try:
                     for gpu in gpus:
                         tf.config.experimental.set_memory_growth(gpu, True)
-                    logger.info(f"GPU setup successful: {len(gpus)} GPU(s) found")
-                except RuntimeError as e:
-                    logger.warning(f"GPU configuration error: {e}")
-        except Exception as e:
-            logger.warning(f"GPU setup error: {e}")
-    
+                except (RuntimeError, AttributeError):
+                    pass
+        except Exception:
+            pass
+
+    def _load_or_create_model(self, units, lr, symbol=None):
+        try:
+            symbol_suffix = f"_{symbol.lower()}" if symbol else ""
+            model_file = self.model_path / f"model{symbol_suffix}.keras"
+            scaler_file = self.model_path / f"scaler{symbol_suffix}.pkl"
+            
+            if model_file.exists() and scaler_file.exists():
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        self.model = tf.keras.models.load_model(str(model_file), compile=False)
+                        if self.model:
+                            self.model.compile(optimizer=Adam(learning_rate=lr, clipnorm=1.0), 
+                                            loss='huber', metrics=['mae'])
+                    
+                    with open(scaler_file, 'rb') as f:
+                        self.scaler = pickle.load(f)
+                    
+                    self.trained = True
+                    self.is_fitted = True
+                    return
+                except Exception:
+                    if self.model:
+                        try:
+                            del self.model
+                        except:
+                            pass
+                        self.model = None
+            
+            self._create_model(units, lr)
+        except Exception:
+            self.model = None
+
     def _create_model(self, units, lr):
-        """ایجاد مدل LSTM"""
-        try:            
+        try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                
                 self.model = Sequential([
-                    LSTM(units, 
-                        input_shape=self.input_shape, 
-                        return_sequences=True,
-                        dropout=0.1,
-                        recurrent_dropout=0.1),
-                    LSTM(units // 2, 
-                        return_sequences=False,
-                        dropout=0.1,
-                        recurrent_dropout=0.1),
+                    LSTM(units, input_shape=self.input_shape, return_sequences=True, 
+                            dropout=0.1, recurrent_dropout=0.1),
+                    LSTM(units // 2, return_sequences=False, 
+                            dropout=0.1, recurrent_dropout=0.1),
                     Dropout(0.2),
                     Dense(25, activation='relu'),
                     Dense(1, activation='linear')
                 ])
-                
                 optimizer = Adam(learning_rate=lr, clipnorm=1.0)
-                self.model.compile(
-                    optimizer=optimizer, 
-                    loss='huber',
-                    metrics=['mae']
-                )
-                
-            logger.info("LSTM model created successfully")
-            
-        except Exception as e:
-            logger.error(f"LSTM model creation failed: {e}")
+                self.model.compile(optimizer=optimizer, loss='huber', metrics=['mae'])
+        except Exception:
             self.model = None
-    
-    def prepare_sequences(self, series: pd.Series, window: int = None, for_training: bool = True):
-        """آماده‌سازی توالی‌ها با بهبود"""
+
+    def _get_executor(self):
+        with self._lock:
+            if self.executor is None or self.executor._shutdown:
+                self.executor = ThreadPoolExecutor(max_workers=1)
+            return self.executor
+
+    def _run_in_executor(self, func, *args, **kwargs):
+        try:
+            loop = asyncio.get_event_loop()
+            executor = self._get_executor()
+            return loop.run_in_executor(executor, lambda: func(*args, **kwargs))
+        except Exception:
+            return asyncio.create_task(asyncio.coroutine(lambda: None)())
+
+    def save_model(self, symbol=None):
+        try:
+            if not self.model or not hasattr(self, 'scaler'):
+                return False
+                
+            symbol_suffix = f"_{symbol.lower()}" if symbol else ""
+            model_file = self.model_path / f"model{symbol_suffix}.keras"
+            scaler_file = self.model_path / f"scaler{symbol_suffix}.pkl"
+            
+            if self.model and self.trained:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    self.model.save(str(model_file))
+            
+            if self.is_fitted and hasattr(self.scaler, 'scale_'):
+                with open(scaler_file, 'wb') as f:
+                    pickle.dump(self.scaler, f)
+            
+            return True
+        except Exception:
+            return False
+
+    def prepare_sequences(self, series, window=None, for_training=True):
         try:
             if window is None:
                 window = self.input_shape[0]
-                
-            values = pd.to_numeric(series.values, errors='coerce')
-            values = values[~np.isnan(values)]
             
-            if len(values) < window + 10:
-                logger.warning(f"Insufficient data: {len(values)} < {window + 10}")
+            if isinstance(series, pd.Series):
+                values = series.values
+            else:
+                values = np.array(series)
+            
+            if len(values) == 0:
                 return np.array([]), np.array([])
             
-            if for_training:
-                values_scaled = self.scaler.fit_transform(values.reshape(-1, 1)).flatten()
+            values = pd.to_numeric(values, errors='coerce')
+            valid_mask = ~(np.isnan(values) | np.isinf(values))
+            values = values[valid_mask]
+            
+            if len(values) < window + 10:
+                return np.array([]), np.array([])
+            
+            if np.all(values == values[0]) or np.std(values) == 0:
+                self.scaler.min_ = np.array([values[0]])
+                self.scaler.scale_ = np.array([1.0])
+                self.scaler.data_min_ = np.array([values[0]])
+                self.scaler.data_max_ = np.array([values[0]])
+                self.scaler.data_range_ = np.array([1.0])
+                values_scaled = np.full(len(values), 0.5)
                 self.is_fitted = True
-            else:
-                if not self.is_fitted:
-                    logger.error("Scaler not fitted yet")
+            elif for_training:
+                try:
+                    self.scaler.fit(values.reshape(-1, 1))
+                    self.is_fitted = True
+                    values_scaled = self.scaler.transform(values.reshape(-1, 1)).flatten()
+                except Exception:
                     return np.array([]), np.array([])
-                values_scaled = self.scaler.transform(values.reshape(-1, 1)).flatten()
+            else:
+                if not self.is_fitted or not hasattr(self.scaler, 'scale_'):
+                    return np.array([]), np.array([])
+                try:
+                    values_scaled = self.scaler.transform(values.reshape(-1, 1)).flatten()
+                except Exception:
+                    return np.array([]), np.array([])
             
             X, y = [], []
             for i in range(window, len(values_scaled)):
-                X.append(values_scaled[i-window:i])
-                y.append(values_scaled[i])
+                try:
+                    X.append(values_scaled[i-window:i])
+                    if i < len(values_scaled):
+                        y.append(values_scaled[i])
+                except IndexError:
+                    break
+            
+            if len(X) == 0 or len(y) == 0:
+                return np.array([]), np.array([])
             
             X = np.array(X)
             y = np.array(y)
             
+            if np.any(np.isnan(X)) or np.any(np.isinf(X)) or np.any(np.isnan(y)) or np.any(np.isinf(y)):
+                return np.array([]), np.array([])
+            
             if X.ndim == 2:
                 X = X.reshape((X.shape[0], X.shape[1], 1))
-                
-            logger.info(f"Sequences prepared: X.shape={X.shape}, y.shape={y.shape}")
+            
             return X, y
-            
-        except Exception as e:
-            logger.error(f"Error preparing sequences: {e}")
+        except Exception:
             return np.array([]), np.array([])
-    
+
     def fit(self, X, y, epochs=10, batch_size=32, verbose=0, validation_split=0.2):
-        """تمرین مدل با بهبود"""
-        if self.model is None:
-            logger.error("Model not initialized")
-            return False
-            
         try:
+            if self.trained or not self.model:
+                return self.trained
+            
             if X.size == 0 or y.size == 0:
-                logger.error("Empty training data")
-                return False
-                
-            if len(X.shape) != 3:
-                logger.error(f"Invalid X shape: {X.shape}. Expected 3D array")
-                return False
-                
-            if X.shape[1] != self.input_shape[0] or X.shape[2] != self.input_shape[1]:
-                logger.error(f"Input shape mismatch: {X.shape} vs expected {self.input_shape}")
                 return False
             
-            if np.isnan(X).any() or np.isnan(y).any() or np.isinf(X).any() or np.isinf(y).any():
-                logger.warning("Invalid values found, cleaning...")
+            if len(X.shape) != 3 or X.shape[1] != self.input_shape[0] or X.shape[2] != self.input_shape[1]:
+                return False
+            
+            if X.shape[0] != y.shape[0]:
+                min_len = min(X.shape[0], y.shape[0])
+                X = X[:min_len]
+                y = y[:min_len]
+            
+            if np.any(np.isnan(X)) or np.any(np.isnan(y)) or np.any(np.isinf(X)) or np.any(np.isinf(y)):
                 X = np.nan_to_num(X, nan=0.0, posinf=1.0, neginf=-1.0)
                 y = np.nan_to_num(y, nan=0.0, posinf=1.0, neginf=-1.0)
             
-            epochs = max(5, min(epochs, 100))
-            batch_size = max(8, min(batch_size, len(X) // 4))
+            epochs = max(5, min(epochs, 50))
+            batch_size = max(4, min(batch_size, len(X) // 2)) if len(X) >= 8 else max(1, len(X) // 2)
             
             callbacks = [
-                EarlyStopping(
-                    monitor='val_loss',
-                    patience=5,
-                    restore_best_weights=True,
-                    verbose=0
-                ),
-                ReduceLROnPlateau(
-                    monitor='val_loss',
-                    factor=0.5,
-                    patience=3,
-                    min_lr=1e-7,
-                    verbose=0
-                )
+                EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True, verbose=0),
+                ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2, min_lr=1e-7, verbose=0)
             ]
             
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                
                 history = self.model.fit(
                     X, y,
                     epochs=epochs,
@@ -1055,37 +1272,27 @@ class LSTMModel:
                     shuffle=True
                 )
             
-            final_loss = history.history['loss'][-1]
-            if final_loss < float('inf') and not np.isnan(final_loss):
-                self.trained = True
-                logger.info(f"Model trained successfully. Final loss: {final_loss:.6f}")
-                return True
-            else:
-                logger.error("Training failed - invalid final loss")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error training LSTM model: {e}")
+            if history and 'loss' in history.history and len(history.history['loss']) > 0:
+                final_loss = history.history['loss'][-1]
+                if final_loss < float('inf') and not np.isnan(final_loss) and final_loss < 1000:
+                    self.trained = True
+                    self.save_model()
+                    return True
+            
+            return False
+        except Exception:
             self.trained = False
             return False
-    
+
     def predict(self, X):
-        """پیش‌بینی با بهبود"""
-        if self.model is None:
-            logger.error("Model not initialized")
-            return None
-            
-        if not self.trained:
-            logger.error("Model not trained yet")
-            return None
-        
         try:
-            if X.size == 0:
-                logger.warning("Empty input data for prediction")
+            if not self.model or not self.trained:
                 return None
-                
-            if np.isnan(X).any() or np.isinf(X).any():
-                logger.warning("Invalid input data, cleaning...")
+            
+            if X.size == 0:
+                return None
+            
+            if np.any(np.isnan(X)) or np.any(np.isinf(X)):
                 X = np.nan_to_num(X, nan=0.0, posinf=1.0, neginf=-1.0)
             
             if len(X.shape) == 2:
@@ -1097,27 +1304,52 @@ class LSTMModel:
                 warnings.simplefilter("ignore")
                 prediction = self.model.predict(X, verbose=0)
             
-            if self.is_fitted:
-                prediction_scaled = self.scaler.inverse_transform(prediction.reshape(-1, 1))
-                return prediction_scaled.flatten()
+            if prediction is None or len(prediction) == 0:
+                return None
+            
+            if self.is_fitted and hasattr(self.scaler, 'scale_') and self.scaler.scale_ is not None:
+                if np.any(self.scaler.scale_ != 0):
+                    try:
+                        prediction_scaled = self.scaler.inverse_transform(prediction.reshape(-1, 1))
+                        return prediction_scaled.flatten()
+                    except Exception:
+                        return prediction.flatten()
+                else:
+                    return prediction.flatten()
             else:
                 return prediction.flatten()
-                
-        except Exception as e:
-            logger.error(f"Error predicting with LSTM model: {e}")
+        except Exception:
             return None
-    
+
+    async def fit_async(self, X, y, epochs=10, batch_size=32, verbose=0, validation_split=0.2):
+        try:
+            return await self._run_in_executor(self.fit, X, y, epochs, batch_size, verbose, validation_split)
+        except Exception:
+            return False
+
+    async def predict_async(self, X):
+        try:
+            return await self._run_in_executor(self.predict, X)
+        except Exception:
+            return None
+
     def is_ready(self):
-        """بررسی آمادگی مدل"""
-        return self.model is not None and self.trained and self.is_fitted
+        return (self.model is not None and 
+                self.trained and 
+                self.is_fitted and 
+                hasattr(self.scaler, 'scale_'))
 
 class SentimentFetcher:
     def __init__(self, cryptopanic_key: str):
         self.cryptopanic_key = cryptopanic_key
-        if not cryptopanic_key or not cryptopanic_key.strip():
-            logger.warning("CryptoPanic API key not provided")
+        self._fg_cache = None
+        self._fg_ts = 0
+        self._news_cache = {}
         
     def fetch_fear_greed(self, max_retries=3, retry_delay=5):
+        if time.time() - self._fg_ts < 3600 and self._fg_cache is not None:
+            return self._fg_cache
+        
         for attempt in range(max_retries):
             try:
                 r = requests.get("https://api.alternative.me/fng/", timeout=10)
@@ -1127,7 +1359,9 @@ class SentimentFetcher:
                     if data:
                         value = data[0].get("value")
                         if value is not None:
-                            return int(value)
+                            self._fg_cache = int(value)
+                            self._fg_ts = time.time()
+                            return self._fg_cache
                 
                 logger.warning(f"Attempt {attempt+1}: Invalid response from Fear & Greed API")
                 if attempt < max_retries - 1:
@@ -1136,27 +1370,32 @@ class SentimentFetcher:
                 logger.warning(f"Attempt {attempt+1}: Error connecting to Fear & Greed API: {e}")
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
+                continue
         
         logger.error("Failed to fetch Fear & Greed index after multiple attempts")
         return None
     
     def fetch_news(self, currencies: List[str] = ["BTC","ETH"]):
-        try:
-            if not self.cryptopanic_key or not self.cryptopanic_key.strip():
-                logger.warning("No CryptoPanic API key available")
-                return []
-                
-            url = "https://cryptopanic.com/api/v1/posts/"
+        key = tuple(currencies)
+        
+        if key in self._news_cache:
+            return self._news_cache[key]
+        
+        try:                
+            url = "https://cryptopanic.com/api/developer/v2/posts/"
             params = {"auth_token": self.cryptopanic_key, "currencies": ",".join(currencies)}
             r = requests.get(url, params=params, timeout=10)
             if r.ok:
-                return r.json().get("results", [])
+                results = r.json().get("results", [])
+                self._news_cache[key] = results
+                return results
             else:
                 logger.warning(f"CryptoPanic API returned status {r.status_code}")
                 return []
         except Exception as e:
             logger.error(f"Error fetching news: {e}")
             return []
+    
     def score_news(self, news_items: List[Dict[str,Any]]):
         score = 0
         for it in news_items:
@@ -1168,7 +1407,7 @@ class SentimentFetcher:
         return score
 
 class OnChainFetcher:
-    def __init__(self, alchemy_url: str):
+    def __init__(self, alchemy_url):
         self.alchemy_url = alchemy_url
         self.web3 = None
         if alchemy_url and alchemy_url.strip():
@@ -1194,7 +1433,7 @@ class OnChainFetcher:
         if not self.web3 or not self.web3.is_connected():
             raise ConnectionError("Web3 provider not available")
     
-    def active_addresses(self, lookback_blocks: int = 100):
+    def active_addresses(self, lookback_blocks=100):
         try:
             if not self.web3:
                 logger.warning("Web3 not initialized")
@@ -1209,9 +1448,9 @@ class OnChainFetcher:
                 try:
                     blk = self.web3.eth.get_block(i, full_transactions=True)
                     for tx in blk.transactions:
-                        if hasattr(tx, 'from') and tx['from']:
+                        if tx.get('from'):
                             addresses.add(tx['from'])
-                        if hasattr(tx, 'to') and tx['to']:
+                        if tx.get('to'):
                             addresses.add(tx['to'])
                 except Exception as e:
                     logger.warning(f"Error processing block {i}: {e}")
@@ -1221,65 +1460,152 @@ class OnChainFetcher:
         except Exception as e:
             logger.error(f"Error fetching active addresses: {e}")
             return None
-    def transaction_volume(self, lookback_blocks: int = 100):
+    
+    def transaction_volume(self, lookback_blocks=100):
         try:
-            block = self.web3.eth.blockNumber
+            if not self.web3:
+                return None
+            self._ensure_connected()
+            block = self.web3.eth.block_number
             start = max(0, block - lookback_blocks)
             total = 0
-            for i in range(start, block):
-                blk = self.web3.eth.getBlock(i, full_transactions=True)
-                for tx in blk.transactions:
-                    total += getattr(tx, 'value', 0) or tx.get('value', 0)
+            for i in range(start, min(block, start + 10)):
+                try:
+                    blk = self.web3.eth.get_block(i, full_transactions=True)
+                    for tx in blk.transactions:
+                        total += tx.get('value', 0)
+                except Exception:
+                    continue
             return total
         except Exception:
-            return 0
+            return None
+            
     def exchange_flow(self, exchange_addresses: List[str], lookback_blocks: int = 100):
         try:
-            block = self.web3.eth.blockNumber
+            if not self.web3:
+                return 0, 0
+            self._ensure_connected()
+            block = self.web3.eth.block_number
             start = max(0, block - lookback_blocks)
             inflow = 0
             outflow = 0
             for i in range(start, block):
-                blk = self.web3.eth.getBlock(i, full_transactions=True)
-                for tx in blk.transactions:
-                    if tx['to'] in exchange_addresses:
-                        outflow += getattr(tx, 'value', 0) or tx.get('value', 0)
-                    if tx['from'] in exchange_addresses:
-                        inflow += getattr(tx, 'value', 0) or tx.get('value', 0)
+                try:
+                    blk = self.web3.eth.get_block(i, full_transactions=True)
+                    for tx in blk.transactions:
+                        if tx['to'] in exchange_addresses:
+                            outflow += tx.get('value', 0)
+                        if tx['from'] in exchange_addresses:
+                            inflow += tx.get('value', 0)
+                except Exception:
+                    continue
             return inflow, outflow
         except Exception:
             return 0, 0
 
 class MultiTimeframeAnalyzer:
-    def __init__(self, exchange_manager):
+    def __init__(self, exchange_manager, indicators, cache_ttl=300):
         self.exchange_manager = exchange_manager
-    async def is_direction_aligned(self, symbol: str, exec_tf: str, confirm_tfs: List[str]) -> bool:
+        self.indicators = indicators
+        self._cache = {}
+        self._cache_expiry = {}
+        self.cache_ttl = cache_ttl
+        
+    def _get_cache(self, key):
+        if key in self._cache and time.time() < self._cache_expiry.get(key, 0):
+            return self._cache[key]
+        return None
+
+    def _set_cache(self, key, value):
+        self._cache[key] = value
+        self._cache_expiry[key] = time.time() + self.cache_ttl
+
+    async def is_direction_aligned(self, symbol: str, exec_tf: str, threshold: float = 0.6) -> bool:
         try:
-            base = await self.exchange_manager.fetch_ohlcv_data(symbol, exec_tf)
-            if base.empty:
+            confirm_tfs = MULTI_TF_CONFIRMATION_MAP.get(exec_tf, [])
+            if not confirm_tfs:
+                return True
+            base_df = await self.exchange_manager.fetch_ohlcv_data(symbol, exec_tf)
+            if base_df.empty or len(base_df) < 50:
                 return False
-            base_trend = self._simple_trend(base)
+
+            self._cache = getattr(self, '_cache', {})
+            base_key = (symbol, exec_tf)
+            if base_key in self._cache:
+                base_signals = self._cache[base_key]
+            else:
+                base_signals = self._analyze_indicators(base_df)
+                self._cache[base_key] = base_signals
+
+            if not base_signals:
+                return False
+
+            total_score = 0
+            total_weight = 0
             for tf in confirm_tfs:
-                confirm = await self.exchange_manager.fetch_ohlcv_data(symbol, tf)
-                if confirm.empty or self._simple_trend(confirm) != base_trend:
-                    return False
-            return True
-        except Exception:
+                try:
+                    confirm_df = await self.exchange_manager.fetch_ohlcv_data(symbol, tf)
+                    if confirm_df.empty or len(confirm_df) < 50:
+                        continue
+                    confirm_key = (symbol, tf)
+                    if confirm_key in self._cache:
+                        confirm_signals = self._cache[confirm_key]
+                    else:
+                        confirm_signals = self._analyze_indicators(confirm_df)
+                        self._cache[confirm_key] = confirm_signals
+                    if not confirm_signals:
+                        continue
+
+                    weight = MULTI_TF_CONFIRMATION_WEIGHTS.get(exec_tf, {}).get(tf, 1.0)
+                    matches = sum(1 for k in base_signals
+                                if k in confirm_signals and self._signals_match(base_signals[k], confirm_signals[k]))
+                    score = matches / len(base_signals) if base_signals else 0
+                    total_score += score * weight
+                    total_weight += weight
+                except Exception as e:
+                    logger.warning(f"Error analyzing timeframe {tf} for {symbol}: {e}")
+                    continue
+
+            if total_weight == 0:
+                return False
+            avg_score = total_score / total_weight
+            return avg_score >= threshold
+        except Exception as e:
+            logger.error(f"Error in multi-timeframe analysis for {symbol}: {e}")
             return False
-    def _simple_trend(self, df: pd.DataFrame) -> str:
-        sma_short = df['close'].rolling(window=5).mean().iloc[-1]
-        sma_long = df['close'].rolling(window=20).mean().iloc[-1]
-        if sma_short > sma_long:
-            return "up"
-        if sma_short < sma_long:
-            return "down"
-        return "side"
+
+    def _signals_match(self, signal1: str, signal2: str) -> bool:
+        bullish_signals = ['bullish', 'oversold', 'bullish_crossover', 'bullish_above_ma', 'buy_pressure', 'bullish_engulfing', 'price_above_cloud']
+        bearish_signals = ['bearish', 'overbought', 'bearish_crossover', 'bearish_below_ma', 'sell_pressure', 'bearish_engulfing', 'price_below_cloud']
+        
+        signal1_is_bullish = any(pattern in signal1.lower() for pattern in bullish_signals)
+        signal2_is_bullish = any(pattern in signal2.lower() for pattern in bullish_signals)
+        signal1_is_bearish = any(pattern in signal1.lower() for pattern in bearish_signals)
+        signal2_is_bearish = any(pattern in signal2.lower() for pattern in bearish_signals)
+        
+        return (signal1_is_bullish and signal2_is_bullish) or (signal1_is_bearish and signal2_is_bearish)
+
+    def _analyze_indicators(self, df: pd.DataFrame) -> Dict[str, str]:
+        signals = {}
+        
+        with ThreadPoolExecutor(max_workers=min(len(self.indicators), 4)) as executor:
+            futures = {executor.submit(ind.calculate, df): name for name, ind in self.indicators.items()}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    result = future.result()
+                    if hasattr(result, 'interpretation') and result.interpretation:
+                        signals[name] = result.interpretation
+                except Exception as e:
+                    logger.warning(f"Error calculating {name}: {e}")
+        return signals
 
 class WalkForwardOptimizer:
     def __init__(self, trading_service):
         self.trading_service = trading_service
+    
     async def run(self, symbol: str, timeframe: str, lookback_days: int, test_days: int):
-        end = datetime.utcnow()
+        end = datetime.now()
         start = end - timedelta(days=lookback_days + test_days)
         df = await self.trading_service.exchange_manager.fetch_ohlcv_data(symbol, timeframe, limit=2000)
         if df.empty:
@@ -1299,7 +1625,7 @@ class WalkForwardOptimizer:
         return results
 
 class SignalGenerator:
-    def __init__(self, sentiment_fetcher: Optional[SentimentFetcher] = None, onchain_fetcher: Optional[OnChainFetcher] = None, lstm_model: Optional[LSTMModel] = None):
+    def __init__(self, sentiment_fetcher=None, onchain_fetcher=None, lstm_model=None, multi_tf_analyzer=None, config=None):
         self.indicators = {
             'sma_20': MovingAverageIndicator(20, "sma"),
             'sma_50': MovingAverageIndicator(50, "sma"),
@@ -1313,17 +1639,22 @@ class SignalGenerator:
             'atr': ATRIndicator(),
             'ichimoku': IchimokuIndicator(),
             'williams_r': WilliamsRIndicator(),
-            'cci': CCIIndicator()
+            'cci': CCIIndicator(),
+            'supertrend': SuperTrendIndicator(),
+            'adx': ADXIndicator(),
+            'cmf': ChaikinMoneyFlowIndicator(),
+            'obv': OBVIndicator()
         }
         self.market_analyzer = MarketConditionAnalyzer()
         self.level_calculator = DynamicLevelCalculator()
         self.sentiment_fetcher = sentiment_fetcher
         self.onchain_fetcher = onchain_fetcher
         self.lstm_model = lstm_model
+        self.multi_tf_analyzer = multi_tf_analyzer
         self.lstm_training_attempted = False
-        
-    def _train_lstm_if_needed(self, data: pd.DataFrame) -> bool:
-        """تمرین LSTM در صورت نیاز"""
+        self.config = config or {'min_confidence_score': 60}
+
+    def _train_lstm_if_needed(self, data):
         if not self.lstm_model:
             return False
             
@@ -1337,6 +1668,10 @@ class SignalGenerator:
             logger.info("Training LSTM model...")
             self.lstm_training_attempted = True
             
+            if 'close' not in data.columns:
+                logger.error("No 'close' column in data")
+                return False
+                
             series = data['close'].astype(float)
             X, y = self.lstm_model.prepare_sequences(series, for_training=True)
             
@@ -1356,142 +1691,473 @@ class SignalGenerator:
         except Exception as e:
             logger.error(f"Error training LSTM: {e}")
             return False
+    
+    def _safe_dataframe(self, df):
+        if df is None or df.empty:
+            return pd.DataFrame()
         
-    def generate_signals(self, data: pd.DataFrame, symbol: str, timeframe: str) -> List[TradingSignal]:
-        """تولید سیگنال با LSTM بهبود یافته"""
-        logger.info(f"🔄 Generating signals for {symbol} on {timeframe} with {len(data)} candles")
-        
-        if len(data) < 60:
-            logger.warning(f"⚠️ Insufficient data for {symbol} on {timeframe}: {len(data)} candles (need 60+)")
+        try:
+            df_copy = df.copy()
+            
+            numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+            for col in numeric_cols:
+                if col in df_copy.columns:
+                    df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce')
+            
+            df_copy = df_copy.replace([np.inf, -np.inf], np.nan)
+            
+            initial_len = len(df_copy)
+            df_copy = df_copy.dropna(subset=numeric_cols, how='any')
+            
+            if len(df_copy) < initial_len * 0.8:
+                logger.warning(f"Lost {initial_len - len(df_copy)} rows due to invalid data")
+            
+            for col in ['open', 'high', 'low', 'close']:
+                if col in df_copy.columns:
+                    df_copy = df_copy[df_copy[col] > 0]
+            
+            if 'volume' in df_copy.columns:
+                df_copy = df_copy[df_copy['volume'] >= 0]
+            
+            invalid_ohlc = (
+                (df_copy['high'] < df_copy['low']) |
+                (df_copy['high'] < df_copy['open']) |
+                (df_copy['high'] < df_copy['close']) |
+                (df_copy['low'] > df_copy['open']) |
+                (df_copy['low'] > df_copy['close'])
+            )
+            
+            if invalid_ohlc.any():
+                df_copy = df_copy[~invalid_ohlc]
+                logger.warning(f"Removed {invalid_ohlc.sum()} invalid OHLC candles")
+            
+            return df_copy.reset_index(drop=True)
+            
+        except Exception as e:
+            logger.error(f"Error in _safe_dataframe: {e}")
+            return pd.DataFrame()
+    
+    async def generate_signals(self, data: pd.DataFrame, symbol: str, timeframe: str) -> List[TradingSignal]:
+        if not symbol or not isinstance(symbol, str) or not symbol.strip():
+            logger.error("Invalid symbol provided")
             return []
+            
+        if not timeframe or not isinstance(timeframe, str) or not timeframe.strip():
+            logger.error("Invalid timeframe provided")
+            return []
+            
+        logger.info(f"🔄 Generating signals for {symbol} on {timeframe}")
         
-        if data.isnull().any().any():
-            logger.warning(f"⚠️ Data contains null values for {symbol}")
-            data = data.dropna()
-            if len(data) < 60:
+        try:
+            if data is None:
+                logger.warning(f"⚠️ No data provided for {symbol} on {timeframe}")
                 return []
+                
+            if not isinstance(data, pd.DataFrame):
+                logger.error(f"⚠️ Invalid data type for {symbol}: {type(data)}")
+                return []
+            
+            if data.empty:
+                logger.warning(f"⚠️ Empty dataframe for {symbol} on {timeframe}")
+                return []
+            
+            data = self._safe_dataframe(data)
+            
+            if data.empty:
+                logger.warning(f"⚠️ No valid data after cleaning for {symbol} on {timeframe}")
+                return []
+            
+            if len(data) < 100:
+                logger.warning(f"⚠️ Insufficient data for {symbol} on {timeframe}: {len(data)} candles (need 100+)")
+                return []
+        
+            required_columns = ['open', 'high', 'low', 'close', 'volume']
+            missing_columns = [col for col in required_columns if col not in data.columns]
+            if missing_columns:
+                logger.error(f"❌ Missing required columns for {symbol}: {missing_columns}")
+                return []
+            
+            if 'timestamp' in data.columns:
+                try:
+                    data = data.sort_values('timestamp').reset_index(drop=True)
+                except Exception as e:
+                    logger.warning(f"Could not sort by timestamp for {symbol}: {e}")
+            
+        except Exception as e:
+            logger.error(f"❌ Data validation failed for {symbol}: {e}")
+            return []
         
         indicator_results = {}
         failed_indicators = []
+        critical_indicators = ['rsi', 'macd', 'volume', 'sma_20', 'bb']
         
         for name, indicator in self.indicators.items():
             try:
-                result = indicator.calculate(data)
+                if not hasattr(indicator, 'calculate') or not callable(indicator.calculate):
+                    logger.warning(f"Invalid indicator {name} - no calculate method")
+                    failed_indicators.append(name)
+                    continue
+                    
+                data_copy = data.copy()
+                result = indicator.calculate(data_copy)
                 
-                if (hasattr(result, 'value') and 
+                if result is None:
+                    logger.warning(f"Indicator {name} returned None for {symbol}")
+                    failed_indicators.append(name)
+                    continue
+                
+                if not hasattr(result, 'value'):
+                    logger.warning(f"Indicator {name} result missing 'value' attribute for {symbol}")
+                    failed_indicators.append(name)
+                    continue
+                    
+                if not hasattr(result, 'signal_strength'):
+                    logger.warning(f"Indicator {name} result missing 'signal_strength' attribute for {symbol}")
+                    failed_indicators.append(name)
+                    continue
+                    
+                if not hasattr(result, 'interpretation'):
+                    logger.warning(f"Indicator {name} result missing 'interpretation' attribute for {symbol}")
+                    failed_indicators.append(name)
+                    continue
+                
+                if (result.value is not None and
                     not pd.isna(result.value) and 
-                    not np.isinf(result.value)):
+                    not np.isinf(result.value) and
+                    isinstance(result.interpretation, str) and
+                    result.interpretation.strip()):
+                    
                     indicator_results[name] = result
-                    logger.debug(f"✅ {name} calculated successfully for {symbol}")
+                    logger.debug(f"✅ {name}: {result.value:.4f} ({result.interpretation})")
                 else:
-                    logger.warning(f"⚠️ Invalid result from {name} for {symbol}")
+                    logger.warning(f"⚠️ Invalid result from {name} for {symbol}: value={getattr(result, 'value', None)}")
                     failed_indicators.append(name)
                     
             except Exception as e:
-                logger.warning(f"⚠️ Error calculating {name} for {symbol}: {e}")
+                logger.warning(f"⚠️ Error calculating {name} for {symbol}: {str(e)[:100]}")
                 failed_indicators.append(name)
                 continue
         
-        critical_indicators = ['rsi', 'macd', 'volume']
         missing_critical = [ind for ind in critical_indicators if ind not in indicator_results]
-
         if missing_critical:
             logger.warning(f"⚠️ Critical indicators failed for {symbol}: {', '.join(missing_critical)}")
             return []
-
-        if len(indicator_results) < len(self.indicators) * 0.7:
-            logger.warning(f"⚠️ Too many indicators failed for {symbol}: {', '.join(failed_indicators)}")
+        
+        success_rate = len(indicator_results) / len(self.indicators)
+        if success_rate < 0.6:
+            logger.warning(f"⚠️ Too many indicators failed for {symbol}: {len(failed_indicators)}/{len(self.indicators)} failed")
             return []
 
         if failed_indicators:
-            logger.warning(f"❌ Failed indicators for {symbol}: {', '.join(failed_indicators)}")
+            logger.info(f"ℹ️ Some indicators failed for {symbol}: {', '.join(failed_indicators)}")
+        
         try:
+            if not hasattr(self, 'market_analyzer') or self.market_analyzer is None:
+                logger.error(f"Market analyzer not available for {symbol}")
+                return []
+                
             market_analysis = self.market_analyzer.analyze_market_condition(data)
-            logger.debug(f"📊 Market analysis completed for {symbol}: trend={market_analysis.trend.value}")
+            
+            if market_analysis is None:
+                logger.error(f"Market analysis returned None for {symbol}")
+                return []
+                
+            if not hasattr(market_analysis, 'trend') or not hasattr(market_analysis, 'trend_strength'):
+                logger.error(f"Invalid market analysis result for {symbol}")
+                return []
+                
+            logger.debug(f"📊 Market analysis for {symbol}: trend={market_analysis.trend.value}, strength={market_analysis.trend_strength.value}")
         except Exception as e:
             logger.error(f"❌ Market analysis failed for {symbol}: {e}")
             return []
-        patterns = PatternAnalyzer.detect_patterns(data)
+        
+        patterns = []
         advanced_patterns = []
-        if PatternAnalyzer.detect_flag(data):
-            advanced_patterns.append("flag")
-        if PatternAnalyzer.detect_wedge(data):
-            advanced_patterns.append("wedge")
-        if PatternAnalyzer.detect_triangle(data):
-            advanced_patterns.append("triangle")
-        vp = self.market_analyzer.volume_analyzer.volume_profile(data)
-        vwap = self.market_analyzer.volume_analyzer.vwap(data)
+        
+        try:
+            if hasattr(PatternAnalyzer, 'detect_patterns') and callable(PatternAnalyzer.detect_patterns):
+                patterns = PatternAnalyzer.detect_patterns(data)
+                if not isinstance(patterns, list):
+                    patterns = []
+            
+            if hasattr(PatternAnalyzer, 'detect_flag') and callable(PatternAnalyzer.detect_flag):
+                if PatternAnalyzer.detect_flag(data):
+                    advanced_patterns.append("flag")
+                    
+            if hasattr(PatternAnalyzer, 'detect_wedge') and callable(PatternAnalyzer.detect_wedge):
+                if PatternAnalyzer.detect_wedge(data):
+                    advanced_patterns.append("wedge")
+                    
+            if hasattr(PatternAnalyzer, 'detect_triangle') and callable(PatternAnalyzer.detect_triangle):
+                if PatternAnalyzer.detect_triangle(data):
+                    advanced_patterns.append("triangle")
+                
+            if patterns or advanced_patterns:
+                logger.debug(f"🔍 Patterns detected for {symbol}: {patterns + advanced_patterns}")
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Pattern detection error for {symbol}: {e}")
+            patterns = []
+            advanced_patterns = []
+        
+        try:
+            vp = []
+            vwap = None
+            
+            if (hasattr(self.market_analyzer, 'volume_analyzer') and 
+                self.market_analyzer.volume_analyzer is not None):
+                
+                if hasattr(self.market_analyzer.volume_analyzer, 'volume_profile'):
+                    vp = self.market_analyzer.volume_analyzer.volume_profile(data)
+                    if not isinstance(vp, list):
+                        vp = []
+                
+                if hasattr(self.market_analyzer.volume_analyzer, 'vwap'):
+                    vwap = self.market_analyzer.volume_analyzer.vwap(data)
+            
+            if vwap is None or pd.isna(vwap) or np.isinf(vwap) or vwap <= 0:
+                if 'close' in data.columns and not data.empty:
+                    vwap = data['close'].iloc[-1]
+                    logger.warning(f"⚠️ Invalid VWAP for {symbol}, using last close price")
+                else:
+                    vwap = 0
+                    logger.warning(f"⚠️ Could not calculate VWAP for {symbol}")
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Volume analysis error for {symbol}: {e}")
+            vp = []
+            vwap = data['close'].iloc[-1] if not data.empty and 'close' in data.columns else 0
+        
         sentiment_fg = None
         sentiment_news_score = 0
-        if self.sentiment_fetcher:
+        
+        if (self.sentiment_fetcher and 
+            hasattr(self.sentiment_fetcher, 'fetch_fear_greed') and
+            callable(self.sentiment_fetcher.fetch_fear_greed)):
             try:
                 sentiment_fg = self.sentiment_fetcher.fetch_fear_greed()
-                if self.sentiment_fetcher.cryptopanic_key:
-                    news = self.sentiment_fetcher.fetch_news()
-                    sentiment_news_score = self.sentiment_fetcher.score_news(news)
+                if sentiment_fg is not None and (not isinstance(sentiment_fg, (int, float)) or 
+                                                sentiment_fg < 0 or sentiment_fg > 100):
+                    sentiment_fg = None
+                    
+                if (hasattr(self.sentiment_fetcher, 'cryptopanic_key') and 
+                    self.sentiment_fetcher.cryptopanic_key and
+                    hasattr(self.sentiment_fetcher, 'fetch_news') and
+                    callable(self.sentiment_fetcher.fetch_news) and
+                    hasattr(self.sentiment_fetcher, 'score_news') and
+                    callable(self.sentiment_fetcher.score_news)):
+                    
+                    try:
+                        base_symbol = symbol.split('/')[0] if '/' in symbol else symbol
+                        news = self.sentiment_fetcher.fetch_news([base_symbol])
+                        if isinstance(news, list):
+                            sentiment_news_score = self.sentiment_fetcher.score_news(news)
+                            if not isinstance(sentiment_news_score, (int, float)):
+                                sentiment_news_score = 0
+                    except Exception as e:
+                        logger.warning(f"News sentiment error for {symbol}: {e}")
+                        sentiment_news_score = 0
+                        
             except Exception as e:
-                logger.warning(f"Error fetching sentiment data: {e}")
-                
+                logger.warning(f"⚠️ Sentiment analysis error for {symbol}: {e}")
+        
         onchain_active = None
         onchain_volume = None
-        if self.onchain_fetcher and self.onchain_fetcher.web3:
+        
+        if (self.onchain_fetcher and 
+            hasattr(self.onchain_fetcher, 'web3') and 
+            self.onchain_fetcher.web3):
             try:
-                onchain_active = self.onchain_fetcher.active_addresses()
-                onchain_volume = self.onchain_fetcher.transaction_volume()
+                if (hasattr(self.onchain_fetcher, 'active_addresses') and
+                    callable(self.onchain_fetcher.active_addresses)):
+                    onchain_active = self.onchain_fetcher.active_addresses()
+                    if onchain_active is not None and (not isinstance(onchain_active, (int, float)) or 
+                                                        onchain_active < 0):
+                        onchain_active = None
+                        
+                if (hasattr(self.onchain_fetcher, 'transaction_volume') and
+                    callable(self.onchain_fetcher.transaction_volume)):
+                    onchain_volume = self.onchain_fetcher.transaction_volume()
+                    if onchain_volume is not None and (not isinstance(onchain_volume, (int, float)) or 
+                                                        onchain_volume < 0):
+                        onchain_volume = None
+                        
             except Exception as e:
-                logger.warning(f"Error fetching on-chain data: {e}")
+                logger.warning(f"⚠️ On-chain analysis error: {e}")
+        
         signals = []
-        buy_signal = self._evaluate_buy_signal(indicator_results, data, symbol, timeframe, market_analysis, patterns, advanced_patterns, vp, vwap, sentiment_fg, sentiment_news_score, onchain_active, onchain_volume)
-        if buy_signal:
-            logger.info(f"🟢 BUY signal generated for {symbol} on {timeframe} - Confidence: {buy_signal.confidence_score:.0f}")
-            signals.append(buy_signal)
-        sell_signal = self._evaluate_sell_signal(indicator_results, data, symbol, timeframe, market_analysis, patterns, advanced_patterns, vp, vwap, sentiment_fg, sentiment_news_score, onchain_active, onchain_volume)
-        if sell_signal:
-            logger.info(f"🔴 SELL signal generated for {symbol} on {timeframe} - Confidence: {sell_signal.confidence_score:.0f}")
-            signals.append(sell_signal)
+        
+        try:
+            buy_signal = self._evaluate_buy_signal(
+                indicator_results, data, symbol, timeframe, market_analysis, 
+                patterns, advanced_patterns, vp, vwap, sentiment_fg, 
+                sentiment_news_score, onchain_active, onchain_volume
+            )
             
+            if (buy_signal and 
+                hasattr(buy_signal, 'confidence_score') and
+                isinstance(buy_signal.confidence_score, (int, float)) and
+                buy_signal.confidence_score >= self.config.get('min_confidence_score', 60)):
+                
+                if self.multi_tf_analyzer and hasattr(self.multi_tf_analyzer, 'is_direction_aligned'):
+                    try:
+                        is_aligned = await self.multi_tf_analyzer.is_direction_aligned(symbol, timeframe)
+                        if is_aligned:
+                            buy_signal.confidence_score += 5
+                            if hasattr(buy_signal, 'reasons') and isinstance(buy_signal.reasons, list):
+                                buy_signal.reasons.append("Multi-timeframe confirmation")
+                            logger.info(f"🟢 BUY signal for {symbol} on {timeframe} - Confidence: {buy_signal.confidence_score:.0f}")
+                            signals.append(buy_signal)
+                        else:
+                            logger.debug(f"❌ BUY signal rejected for {symbol} - No multi-timeframe alignment")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Multi-timeframe check failed for {symbol}: {e}")
+                        signals.append(buy_signal)
+                else:
+                    signals.append(buy_signal)
+                    
+        except Exception as e:
+            logger.error(f"❌ Buy signal evaluation failed for {symbol}: {e}")
+        
+        try:
+            sell_signal = self._evaluate_sell_signal(
+                indicator_results, data, symbol, timeframe, market_analysis, 
+                patterns, advanced_patterns, vp, vwap, sentiment_fg, 
+                sentiment_news_score, onchain_active, onchain_volume
+            )
+            
+            if (sell_signal and 
+                hasattr(sell_signal, 'confidence_score') and
+                isinstance(sell_signal.confidence_score, (int, float)) and
+                sell_signal.confidence_score >= self.config.get('min_confidence_score', 60)):
+                
+                if self.multi_tf_analyzer and hasattr(self.multi_tf_analyzer, 'is_direction_aligned'):
+                    try:
+                        is_aligned = await self.multi_tf_analyzer.is_direction_aligned(symbol, timeframe)
+                        if is_aligned:
+                            sell_signal.confidence_score += 5
+                            if hasattr(sell_signal, 'reasons') and isinstance(sell_signal.reasons, list):
+                                sell_signal.reasons.append("Multi-timeframe confirmation")
+                            logger.info(f"🔴 SELL signal for {symbol} on {timeframe} - Confidence: {sell_signal.confidence_score:.0f}")
+                            signals.append(sell_signal)
+                        else:
+                            logger.debug(f"❌ SELL signal rejected for {symbol} - No multi-timeframe alignment")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Multi-timeframe check failed for {symbol}: {e}")
+                        signals.append(sell_signal)
+                else:
+                    signals.append(sell_signal)
+                    
+        except Exception as e:
+            logger.error(f"❌ Sell signal evaluation failed for {symbol}: {e}")
+        
         lstm_prediction = None
-        if self.lstm_model:
+        if (self.lstm_model and 
+            hasattr(self.lstm_model, '_train_lstm_if_needed') and
+            hasattr(self.lstm_model, 'is_ready') and
+            hasattr(self.lstm_model, 'prepare_sequences') and
+            hasattr(self.lstm_model, 'predict')):
             try:
                 if self._train_lstm_if_needed(data):
-                    series = data['close'].astype(float)
-                    X, _ = self.lstm_model.prepare_sequences(series, for_training=False)
-                    
-                    if X.size > 0:
-                        last_sequence = X[-1].reshape(1, X.shape[1], X.shape[2])
-                        prediction = self.lstm_model.predict(last_sequence)
+                    if 'close' in data.columns and not data['close'].empty:
+                        series = data['close'].astype(float)
+                        X, _ = self.lstm_model.prepare_sequences(series, for_training=False)
                         
-                        if prediction is not None and len(prediction) > 0:
-                            lstm_prediction = prediction[0]
-                            logger.debug(f"LSTM prediction: {lstm_prediction}")
+                        if X.size > 0 and len(X.shape) >= 2:
+                            try:
+                                last_sequence = X[-1].reshape(1, X.shape[1], X.shape[2])
+                                prediction = self.lstm_model.predict(last_sequence)
+                                
+                                if (prediction is not None and 
+                                    len(prediction) > 0 and 
+                                    not np.isnan(prediction[0]) and
+                                    not np.isinf(prediction[0]) and
+                                    prediction[0] > 0):
+                                    lstm_prediction = prediction[0]
+                                    logger.debug(f"🧠 LSTM prediction for {symbol}: {lstm_prediction:.4f}")
+                                else:
+                                    logger.warning(f"⚠️ Invalid LSTM prediction for {symbol}")
+                            except Exception as e:
+                                logger.warning(f"LSTM prediction error for {symbol}: {e}")
                         else:
-                            logger.warning("LSTM prediction returned None")
-                    else:
-                        logger.warning("No data for LSTM prediction")
+                            logger.warning(f"⚠️ No sequence data for LSTM prediction for {symbol}")
                 else:
-                    logger.warning("LSTM model not ready for prediction")
+                    logger.debug(f"ℹ️ LSTM model not ready for {symbol}")
                     
             except Exception as e:
-                logger.error(f"LSTM prediction error: {e}")
+                logger.error(f"❌ LSTM prediction error for {symbol}: {e}")
         
-        if lstm_prediction is not None and signals:
+        if lstm_prediction is not None and signals and 'close' in data.columns and not data.empty:
             try:
                 current_price = data['close'].iloc[-1]
-                price_change_percent = ((lstm_prediction - current_price) / current_price) * 100
-                
-                for signal in signals:
-                    if signal.signal_type == SignalType.BUY and price_change_percent > 0:
-                        signal.confidence_score += min(abs(price_change_percent) * 2, 10)
-                        signal.reasons.append(f"LSTM predicts {price_change_percent:.2f}% price increase")
-                    elif signal.signal_type == SignalType.SELL and price_change_percent < 0:
-                        signal.confidence_score += min(abs(price_change_percent) * 2, 10)
-                        signal.reasons.append(f"LSTM predicts {price_change_percent:.2f}% price decrease")
+                if (isinstance(current_price, (int, float)) and 
+                    current_price > 0 and 
+                    not pd.isna(current_price) and
+                    not np.isinf(current_price)):
+                    
+                    price_change_percent = ((lstm_prediction - current_price) / current_price) * 100
+                    
+                    if abs(price_change_percent) > 0.5:
+                        for signal in signals:
+                            if (hasattr(signal, 'signal_type') and 
+                                hasattr(signal, 'confidence_score') and
+                                hasattr(signal, 'reasons') and
+                                isinstance(signal.reasons, list)):
+                                
+                                lstm_boost = min(abs(price_change_percent) * 2, 15)
+                                
+                                if (hasattr(signal.signal_type, 'value') or 
+                                    hasattr(signal.signal_type, 'name')):
+                                    
+                                    signal_type_str = (getattr(signal.signal_type, 'value', None) or 
+                                                    getattr(signal.signal_type, 'name', str(signal.signal_type)))
+                                    
+                                    if signal_type_str == 'BUY' and price_change_percent > 0:
+                                        signal.confidence_score += lstm_boost
+                                        signal.reasons.append(f"LSTM predicts {price_change_percent:.2f}% price increase")
+                                        
+                                    elif signal_type_str == 'SELL' and price_change_percent < 0:
+                                        signal.confidence_score += lstm_boost
+                                        signal.reasons.append(f"LSTM predicts {abs(price_change_percent):.2f}% price decrease")
+                                    
+                                    signal.confidence_score = min(signal.confidence_score, 100)
+                        
+            except Exception as e:
+                logger.error(f"❌ Error applying LSTM prediction to signals for {symbol}: {e}")
+        
+        final_signals = []
+        for signal in signals:
+            try:
+                if (signal and
+                    hasattr(signal, 'confidence_score') and
+                    hasattr(signal, 'risk_reward_ratio') and
+                    hasattr(signal, 'reasons') and
+                    isinstance(signal.confidence_score, (int, float)) and
+                    isinstance(signal.risk_reward_ratio, (int, float)) and
+                    isinstance(signal.reasons, list)):
+                    
+                    if (signal.confidence_score >= 50 and
+                        signal.risk_reward_ratio >= 1.0 and
+                        len(signal.reasons) >= 3):
+                        
+                        final_signals.append(signal)
+                        logger.debug(f"✅ Final signal approved for {symbol}: {signal.signal_type.value} (confidence: {signal.confidence_score:.0f})")
+                    else:
+                        logger.debug(f"❌ Signal rejected for {symbol}: confidence={signal.confidence_score:.0f}, rr={signal.risk_reward_ratio:.2f}, reasons={len(signal.reasons)}")
+                else:
+                    logger.warning(f"Invalid signal object for {symbol}")
                     
             except Exception as e:
-                logger.error(f"Error applying LSTM prediction to signals: {e}")
+                logger.error(f"❌ Error validating signal for {symbol}: {e}")
+                continue
         
-        return signals
-    
+        if final_signals:
+            logger.info(f"🎯 Generated {len(final_signals)} high-quality signal(s) for {symbol} on {timeframe}")
+        else:
+            logger.debug(f"ℹ️ No qualifying signals for {symbol} on {timeframe}")
+        
+        return final_signals
+
     def _evaluate_buy_signal(self,
                             indicators: Dict[str, IndicatorResult],
                             data: pd.DataFrame,
@@ -1515,54 +2181,73 @@ class SignalGenerator:
             score = 0
             reasons = []
             current_price = data['close'].iloc[-1]
+            
             if 'rsi' in indicators and indicators['rsi'].interpretation == "oversold":
                 score += 25
                 reasons.append("RSI oversold condition")
+                
             if 'macd' in indicators and indicators['macd'].interpretation == "bullish_crossover":
                 score += 20
                 reasons.append("MACD bullish crossover")
-            if ('sma_20' in indicators and 'sma_50' in indicators and indicators['sma_20'].value > indicators['sma_50'].value):
+                
+            if ('sma_20' in indicators and 'sma_50' in indicators and 
+                not pd.isna(indicators['sma_20'].value) and not pd.isna(indicators['sma_50'].value) and
+                indicators['sma_20'].value > indicators['sma_50'].value):
                 score += 15
                 reasons.append("Price above SMA trend")
+                
             if 'bb' in indicators and indicators['bb'].interpretation == "near_lower_band":
                 score += 15
                 reasons.append("Price near Bollinger lower band")
+                
             if 'stoch' in indicators and indicators['stoch'].interpretation == "oversold":
                 score += 10
                 reasons.append("Stochastic oversold")
+                
             if 'volume' in indicators and indicators['volume'].interpretation == "high_volume":
                 score += 10
                 reasons.append("High volume confirmation")
+                
             if market_analysis.trend == TrendDirection.BULLISH:
                 score += 15
                 reasons.append("Overall bullish trend")
+                
             if market_analysis.trend_strength == TrendStrength.STRONG:
                 score += 10
                 reasons.append("Strong trend momentum")
+                
             if market_analysis.volume_confirmation:
                 score += 8
                 reasons.append("Volume trend confirmation")
+                
             if market_analysis.trend_acceleration > 0.5:
                 score += 7
                 reasons.append("Positive trend acceleration")
+                
             if 'bullish_engulfing' in patterns:
                 score += 15
                 reasons.append("Bullish Engulfing pattern")
+                
             if 'double_bottom' in patterns:
                 score += 15
                 reasons.append("Double Bottom pattern")
+                
             if 'inverse_head_and_shoulders' in patterns:
                 score += 15
                 reasons.append("Inverse Head & Shoulders pattern")
+                
             if 'flag' in advanced_patterns:
                 score += 8
                 reasons.append("Flag pattern")
+                
             if 'triangle' in advanced_patterns or 'wedge' in advanced_patterns:
                 score += 7
                 reasons.append("Triangle/Wedge consolidation")
-            if vwap and current_price < vwap:
+                
+            if vwap and not pd.isna(vwap) and vwap > 0 and current_price < vwap:
                 score += 5
                 reasons.append("Price below VWAP - potential mean reversion")
+                
             if sentiment_fg is not None:
                 if sentiment_fg < 40:
                     score += 5
@@ -1570,15 +2255,19 @@ class SignalGenerator:
                 elif sentiment_fg > 70:
                     score -= 5
                     reasons.append("High greed - caution")
+                    
             if sentiment_news > 0:
                 score += 3
                 reasons.append("Positive news sentiment")
+                
             if onchain_active and onchain_active > 1000:
                 score += 2
                 reasons.append("Healthy on-chain activity")
-            if score >= 60:
+                
+            if score >= 80:
                 try:
                     dynamic_levels = self.level_calculator.calculate_dynamic_levels(data, SignalType.BUY, market_analysis)
+                    
                     return TradingSignal(
                         symbol=symbol,
                         signal_type=SignalType.BUY,
@@ -1589,7 +2278,11 @@ class SignalGenerator:
                         timeframe=timeframe,
                         confidence_score=score,
                         reasons=reasons,
-                        risk_reward_ratio=self._calculate_risk_reward(dynamic_levels.primary_entry, dynamic_levels.primary_exit, dynamic_levels.tight_stop),
+                        risk_reward_ratio=self._calculate_risk_reward(
+                            dynamic_levels.primary_entry, 
+                            dynamic_levels.primary_exit, 
+                            dynamic_levels.tight_stop
+                        ),
                         predicted_profit=((dynamic_levels.primary_exit - dynamic_levels.primary_entry) / dynamic_levels.primary_entry) * 100,
                         volume_analysis=self.market_analyzer.volume_analyzer.analyze_volume_pattern(data),
                         market_context=self._create_market_context(market_analysis),
@@ -1636,51 +2329,69 @@ class SignalGenerator:
             score = 0
             reasons = []
             current_price = data['close'].iloc[-1]
+            
             if 'rsi' in indicators and indicators['rsi'].interpretation == "overbought":
                 score += 25
                 reasons.append("RSI overbought condition")
+                
             if 'macd' in indicators and indicators['macd'].interpretation == "bearish_crossover":
                 score += 20
                 reasons.append("MACD bearish crossover")
-            if ('sma_20' in indicators and 'sma_50' in indicators and indicators['sma_20'].value < indicators['sma_50'].value):
+                
+            if ('sma_20' in indicators and 'sma_50' in indicators and 
+                not pd.isna(indicators['sma_20'].value) and not pd.isna(indicators['sma_50'].value) and
+                indicators['sma_20'].value < indicators['sma_50'].value):
                 score += 15
                 reasons.append("Price below SMA trend")
+                
             if 'bb' in indicators and indicators['bb'].interpretation == "near_upper_band":
                 score += 15
                 reasons.append("Price near Bollinger upper band")
+                
             if 'stoch' in indicators and indicators['stoch'].interpretation == "overbought":
                 score += 10
                 reasons.append("Stochastic overbought")
+                
             if 'volume' in indicators and indicators['volume'].interpretation == "high_volume":
                 score += 10
                 reasons.append("High volume confirmation")
+                
             if market_analysis.trend == TrendDirection.BEARISH:
                 score += 15
                 reasons.append("Overall bearish trend")
+                
             if market_analysis.trend_strength == TrendStrength.STRONG:
                 score += 10
                 reasons.append("Strong trend momentum")
+                
             if market_analysis.volume_confirmation:
                 score += 8
                 reasons.append("Volume trend confirmation")
+                
             if market_analysis.trend_acceleration < -0.5:
                 score += 7
                 reasons.append("Negative trend acceleration")
+                
             if 'bearish_engulfing' in patterns:
                 score += 15
                 reasons.append("Bearish Engulfing pattern")
+                
             if 'double_top' in patterns:
                 score += 15
                 reasons.append("Double Top pattern")
+                
             if 'head_and_shoulders' in patterns:
                 score += 15
                 reasons.append("Head & Shoulders pattern")
+                
             if 'flag' in advanced_patterns:
                 score += 6
                 reasons.append("Flag breakdown")
-            if vwap and current_price > vwap:
+                
+            if vwap and not pd.isna(vwap) and vwap > 0 and current_price > vwap:
                 score += 5
                 reasons.append("Price above VWAP - potential mean reversion")
+                
             if sentiment_fg is not None:
                 if sentiment_fg > 70:
                     score += 5
@@ -1688,15 +2399,19 @@ class SignalGenerator:
                 elif sentiment_fg < 30:
                     score -= 5
                     reasons.append("Extreme fear - caution on sells")
+                    
             if sentiment_news < 0:
                 score += 3
                 reasons.append("Negative news sentiment")
+                
             if onchain_active and onchain_active < 500:
                 score += 2
                 reasons.append("Low on-chain activity - weakness")
-            if score >= 60:
+                
+            if score >= 80:
                 try:
                     dynamic_levels = self.level_calculator.calculate_dynamic_levels(data, SignalType.SELL, market_analysis)
+                    
                     return TradingSignal(
                         symbol=symbol,
                         signal_type=SignalType.SELL,
@@ -1707,7 +2422,11 @@ class SignalGenerator:
                         timeframe=timeframe,
                         confidence_score=score,
                         reasons=reasons,
-                        risk_reward_ratio=self._calculate_risk_reward(dynamic_levels.primary_entry, dynamic_levels.primary_exit, dynamic_levels.tight_stop),
+                        risk_reward_ratio=self._calculate_risk_reward(
+                            dynamic_levels.primary_entry, 
+                            dynamic_levels.primary_exit, 
+                            dynamic_levels.tight_stop
+                        ),
                         predicted_profit=((dynamic_levels.primary_entry - dynamic_levels.primary_exit) / dynamic_levels.primary_entry) * 100,
                         volume_analysis=self.market_analyzer.volume_analyzer.analyze_volume_pattern(data),
                         market_context=self._create_market_context(market_analysis),
@@ -1725,20 +2444,35 @@ class SignalGenerator:
                 except Exception as e:
                     logger.error(f"Error calculating dynamic levels: {e}")
                     return None
+                    
             return None
         except Exception as e:
             logger.error(f"Error evaluating sell signal: {e}")
             return None
+            
     def _calculate_risk_reward(self, entry: float, exit: float, stop_loss: float) -> float:
-        if entry == stop_loss:
+        if pd.isna(entry) or pd.isna(exit) or pd.isna(stop_loss) or entry == stop_loss:
             return 0
+            
         potential_profit = abs(exit - entry)
         potential_loss = abs(entry - stop_loss)
         return potential_profit / potential_loss if potential_loss > 0 else 0
+        
     def _create_market_context(self, market_analysis: MarketAnalysis) -> Dict[str, Any]:
-        return {'trend': market_analysis.trend.value, 'trend_strength': market_analysis.trend_strength.value, 'volatility': market_analysis.volatility, 'momentum_score': market_analysis.momentum_score, 'market_condition': market_analysis.market_condition.value, 'volume_trend': market_analysis.volume_trend, 'trend_acceleration': market_analysis.trend_acceleration, 'volume_confirmation': market_analysis.volume_confirmation}
+        return {
+            'trend': market_analysis.trend.value,
+            'trend_strength': market_analysis.trend_strength.value,
+            'volatility': market_analysis.volatility,
+            'momentum_score': market_analysis.momentum_score,
+            'market_condition': market_analysis.market_condition.value,
+            'volume_trend': market_analysis.volume_trend,
+            'trend_acceleration': market_analysis.trend_acceleration,
+            'volume_confirmation': market_analysis.volume_confirmation
+        }
+        
     def optimize_params(self, train: pd.DataFrame) -> Dict[str, Any]:
         return {}
+        
     def test_params(self, test: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
         return {}
 
@@ -1746,46 +2480,122 @@ class ExchangeManager:
     def __init__(self):
         self.exchange = None
         self._lock = asyncio.Lock()
+        self._db_lock = asyncio.Lock()
+        self._conn = None
         self.db_path = 'trading_bot.db'
         self.ohlcv_cache = {}
+        self._db_initialized = False
+        self._closed = False
         
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+    
+    @asynccontextmanager
+    async def _get_db_connection(self):
+        async with self._db_lock:
+            try:
+                if not self._conn or self._closed:
+                    self._conn = await aiosqlite.connect(self.db_path)
+                yield self._conn
+                await self._conn.commit()
+            except Exception as e:
+                if self._conn:
+                    try:
+                        await self._conn.rollback()
+                    except:
+                        pass
+                raise
+                
+    async def close(self):
+        if self._closed:
+            return
+            
+        self._closed = True
+        
+        async with self._db_lock:
+            if self._conn:
+                try:
+                    await self._conn.close()
+                except Exception:
+                    pass
+                finally:
+                    self._conn = None
+        
+        await self.close_exchange()
+        
+        self.ohlcv_cache.clear()
+
     async def init_database(self):
+        if self._db_initialized or self._closed:
+            return
+            
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute("""
-                    CREATE TABLE IF NOT EXISTS ohlcv (
-                        symbol TEXT, 
-                        timeframe TEXT, 
-                        timestamp INTEGER, 
-                        open REAL, 
-                        high REAL, 
-                        low REAL, 
-                        close REAL, 
-                        volume REAL, 
-                        PRIMARY KEY(symbol, timeframe, timestamp)
-                    )
-                """)
-                await db.commit()
-                logger.info("Database initialized successfully")
+            async with self._db_lock:
+                if self._db_initialized:
+                    return
+                    
+                conn = None
+                try:
+                    conn = await aiosqlite.connect(self.db_path)
+                    await conn.execute("""
+                        CREATE TABLE IF NOT EXISTS ohlcv (
+                            symbol TEXT, 
+                            timeframe TEXT, 
+                            timestamp INTEGER, 
+                            open REAL, 
+                            high REAL, 
+                            low REAL, 
+                            close REAL, 
+                            volume REAL, 
+                            PRIMARY KEY(symbol, timeframe, timestamp)
+                        )
+                    """)
+                    await conn.execute("CREATE INDEX IF NOT EXISTS idx_symbol_tf_ts ON ohlcv(symbol, timeframe, timestamp)")
+                    await conn.commit()
+                    self._db_initialized = True
+                    logger.info("Database initialized successfully")
+                except Exception as e:
+                    logger.error(f"Database initialization error: {e}")
+                    raise
+                finally:
+                    if conn:
+                        try:
+                            await conn.close()
+                        except:
+                            pass
         except Exception as e:
-            logger.error(f"Database initialization error: {e}")
+            logger.error(f"Database initialization failed: {e}")
+            raise
 
     @asynccontextmanager
     async def get_exchange(self):
+        if self._closed:
+            raise RuntimeError("ExchangeManager is closed")
+            
         async with self._lock:
-            if self.exchange is None:
-                self.exchange = ccxt.coinex({
-                    'apiKey': os.getenv('COINEX_API_KEY', COINEX_API_KEY), 
-                    'secret': os.getenv('COINEX_SECRET', COINEX_SECRET), 
-                    'sandbox': False, 
-                    'enableRateLimit': True, 
-                    'timeout': 30000, 
-                    'options': {'defaultType': 'spot'}
-                })
             try:
+                if self.exchange is None:
+                    self.exchange = ccxt.coinex({
+                        'apiKey': os.getenv('COINEX_API_KEY', COINEX_API_KEY), 
+                        'secret': os.getenv('COINEX_SECRET', COINEX_SECRET), 
+                        'sandbox': False, 
+                        'enableRateLimit': True, 
+                        'timeout': 30000, 
+                        'options': {'defaultType': 'spot'}
+                    })
                 yield self.exchange
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Exchange error: {e}")
+                if self.exchange:
+                    try:
+                        await self.exchange.close()
+                    except:
+                        pass
+                    self.exchange = None
+                raise
 
     async def close_exchange(self):
         async with self._lock:
@@ -1798,38 +2608,69 @@ class ExchangeManager:
                 finally:
                     self.exchange = None
 
-    async def _save_ohlcv_to_db(self, df: pd.DataFrame, symbol: str, timeframe: str):
+    async def _save_ohlcv_to_db(self, df, symbol, timeframe):
+        if self._closed or df.empty:
+            return
+            
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with self._get_db_connection() as db:
+                rows = []
                 for idx, row in df.iterrows():
                     try:
                         if hasattr(row['timestamp'], 'timestamp'):
                             ts = int(row['timestamp'].timestamp() * 1000)
+                        elif pd.api.types.is_datetime64_any_dtype(row['timestamp']):
+                            ts = int(row['timestamp'].timestamp() * 1000)
                         else:
                             ts = int(row['timestamp'])
-                        await db.execute(
-                            "INSERT OR IGNORE INTO ohlcv VALUES (?,?,?,?,?,?,?,?)", 
-                            (symbol, timeframe, ts, float(row['open']), 
-                            float(row['high']), float(row['low']), 
-                            float(row['close']), float(row['volume']))
-                        )
-                    except (ValueError, TypeError):
+                        
+                        row_data = (symbol, timeframe, ts,
+                                   float(row['open']), float(row['high']),
+                                   float(row['low']), float(row['close']),
+                                   float(row['volume']))
+                        
+                        if all(not np.isnan(x) and not np.isinf(x) for x in row_data[3:]):
+                            rows.append(row_data)
+                    except (ValueError, TypeError, KeyError):
                         continue
-                await db.commit()
+                        
+                if rows:
+                    await db.executemany(
+                        "INSERT OR IGNORE INTO ohlcv VALUES (?,?,?,?,?,?,?,?)", rows
+                    )
         except Exception as e:
             logger.error(f"Database save error: {e}")
                 
     async def fetch_ohlcv_data(self, symbol: str, timeframe: str, limit: int = 1000) -> pd.DataFrame:
+        if self._closed:
+            return pd.DataFrame()
+            
+        if not symbol or not timeframe or limit <= 0:
+            return pd.DataFrame()
+            
+        cache_key = (symbol, timeframe)
+        now = datetime.now().timestamp()
+        expiry = 300
+        
+        if cache_key in self.ohlcv_cache:
+            cached_time, cached_df = self.ohlcv_cache[cache_key]
+            if now - cached_time < expiry and not cached_df.empty:
+                return cached_df.copy()
+
         logger.info(f"Fetching OHLCV data for {symbol} on {timeframe} (limit: {limit})")
-        rate_limiter.wait_if_needed(f"ohlcv_{symbol}")
         
         try:
+            await rate_limiter.wait_if_needed(f"ohlcv_{symbol}")
+            
             async with self.get_exchange() as exchange:
                 max_retries = 3
+                ohlcv = None
+                
                 for attempt in range(max_retries):
                     try:
                         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-                        break
+                        if ohlcv:
+                            break
                     except ccxt.NetworkError as ne:
                         logger.warning(f"Network error for {symbol} (attempt {attempt+1}): {ne}")
                         if attempt < max_retries - 1:
@@ -1839,42 +2680,65 @@ class ExchangeManager:
                     except ccxt.ExchangeError as ee:
                         logger.error(f"Exchange error for {symbol}: {ee}")
                         return pd.DataFrame()
-            
+
             if not ohlcv:
                 logger.warning(f"No OHLCV data received for {symbol} on {timeframe}")
                 return pd.DataFrame()
-            
+
             df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
             
             if df.empty:
-                logger.warning(f"Empty OHLCV data for {symbol}")
                 return pd.DataFrame()
-            
+                
             df = df.dropna()
             if df.empty:
                 logger.warning(f"All data invalid after cleaning for {symbol}")
                 return pd.DataFrame()
-                
+
             try:
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+                numeric_columns = ['open', 'high', 'low', 'close', 'volume']
+                
+                for col in numeric_columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                
+                df = df.dropna(subset=numeric_columns)
+                
+                if df.empty:
+                    logger.warning(f"No valid numeric data for {symbol}")
+                    return pd.DataFrame()
+
+                invalid_mask = (
+                    (df[numeric_columns] <= 0).any(axis=1) |
+                    np.isinf(df[numeric_columns]).any(axis=1) |
+                    (df['high'] < df['low']) |
+                    (df['high'] < df['open']) |
+                    (df['high'] < df['close']) |
+                    (df['low'] > df['open']) |
+                    (df['low'] > df['close'])
+                )
+                
+                df = df[~invalid_mask]
+                
+                if df.empty:
+                    logger.warning(f"No valid data after validation for {symbol}")
+                    return pd.DataFrame()
+
+                for col in numeric_columns:
+                    df[col] = df[col].astype('float32')
+
+                df_sorted = df.sort_values('timestamp').reset_index(drop=True)
+                
+                if not self._closed:
+                    await self._save_ohlcv_to_db(df_sorted, symbol, timeframe)
+                    self.ohlcv_cache[cache_key] = (now, df_sorted.copy())
+                
+                return df_sorted
+
             except Exception as e:
-                logger.error(f"Timestamp conversion error: {e}")
+                logger.error(f"Data processing error for {symbol}: {e}")
                 return pd.DataFrame()
-            
-            numeric_columns = ['open', 'high', 'low', 'close', 'volume']
-            for col in numeric_columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            df = df.dropna(subset=numeric_columns)
-            
-            if df.empty:
-                logger.warning(f"No valid numeric data for {symbol}")
-                return pd.DataFrame()
-            
-            await self._save_ohlcv_to_db(df, symbol, timeframe)
-            
-            return df.sort_values('timestamp').reset_index(drop=True)
-            
+
         except Exception as e:
             logger.error(f"Unexpected error fetching {symbol} on {timeframe}: {e}")
             return pd.DataFrame()
@@ -1906,10 +2770,12 @@ class SignalRanking:
         return sorted(signals, key=signal_score, reverse=True)
 
 class ConfigManager:
-    DEFAULT_CONFIG = {'symbols': SYMBOLS, 'timeframes': TIME_FRAMES, 'min_confidence_score': 50, 'max_signals_per_timeframe': 3, 'risk_reward_threshold': 1.5}
+    DEFAULT_CONFIG = {'symbols': SYMBOLS, 'timeframes': TIME_FRAMES, 'min_confidence_score': 80, 'max_signals_per_timeframe': 5, 'risk_reward_threshold': 1.5}
+    
     def __init__(self, config_path: str = "config.json"):
         self.config_path = Path(config_path)
         self.config = self._load_config()
+    
     def _load_config(self) -> Dict[str, Any]:
         if self.config_path.exists():
             try:
@@ -1918,14 +2784,17 @@ class ConfigManager:
             except Exception as e:
                 logger.warning(f"Error loading config: {e}. Using defaults.")
         return self.DEFAULT_CONFIG.copy()
+    
     def save_config(self):
         try:
             with open(self.config_path, 'w') as f:
                 json.dump(self.config, f, indent=2)
         except Exception as e:
             logger.error(f"Error saving config: {e}")
+    
     def get(self, key: str, default=None):
         return self.config.get(key, default)
+    
     def set(self, key: str, value):
         self.config[key] = value
         self.save_config()
@@ -1934,8 +2803,9 @@ class TradingBotService:
     def __init__(self, config_manager: ConfigManager):
         self.config = config_manager
         self.exchange_manager = ExchangeManager()
+        self._initialized = False
         
-        cryptopanic_key = self.config.get('cryptopanic_key', os.getenv('CRYPTOPANIC_KEY', ''))
+        cryptopanic_key = self.config.get('cryptopanic_key', os.getenv('CRYPTOPANIC_KEY', CRYPTOPANIC_KEY))
         alchemy_url = self.config.get('alchemy_url', os.getenv('ALCHEMY_URL', ''))
         
         self.sentiment_fetcher = None
@@ -1961,17 +2831,42 @@ class TradingBotService:
         except Exception as e:
             logger.error(f"LSTM initialization failed: {e}")
             self.lstm_model = None
+
+        self.multi_tf_analyzer = MultiTimeframeAnalyzer(self.exchange_manager, {
+            'sma_20': MovingAverageIndicator(20, "sma"),
+            'sma_50': MovingAverageIndicator(50, "sma"),
+            'ema_12': MovingAverageIndicator(12, "ema"),
+            'ema_26': MovingAverageIndicator(26, "ema"),
+            'rsi': RSIIndicator(),
+            'macd': MACDIndicator(),
+            'bb': BollingerBandsIndicator(),
+            'stoch': StochasticIndicator(),
+            'volume': VolumeIndicator(),
+            'atr': ATRIndicator(),
+            'ichimoku': IchimokuIndicator(),
+            'williams_r': WilliamsRIndicator(),
+            'cci': CCIIndicator(),
+            'supertrend': SuperTrendIndicator(),
+            'adx': ADXIndicator(),
+            'cmf': ChaikinMoneyFlowIndicator(),
+            'obv': OBVIndicator()
+        })
         
         self.signal_generator = SignalGenerator(
             sentiment_fetcher=self.sentiment_fetcher,
             onchain_fetcher=self.onchain_fetcher,
-            lstm_model=self.lstm_model
+            lstm_model=self.lstm_model,
+            multi_tf_analyzer=self.multi_tf_analyzer,
+            config=self.config
         )
-        
+
         self.signal_ranking = SignalRanking()
         
     async def initialize(self):
+        if self._initialized:
+            return
         await self.exchange_manager.init_database()
+        self._initialized = True
         
     async def analyze_symbol(self, symbol: str, timeframe: str) -> List[TradingSignal]:
         logger.info(f"🔍 Starting analysis for {symbol} on {timeframe}")
@@ -1984,7 +2879,7 @@ class TradingBotService:
                 logger.warning(f"⚠️ Insufficient data for {symbol} on {timeframe}: {len(data)} candles")
                 return []
             data = data.rename(columns={'timestamp':'timestamp','open':'open','high':'high','low':'low','close':'close','volume':'volume'})
-            all_signals = self.signal_generator.generate_signals(data, symbol, timeframe)
+            all_signals = await self.signal_generator.generate_signals(data, symbol, timeframe)
             min_confidence = self.config.get('min_confidence_score', 60)
             qualified_signals = [s for s in all_signals if s.confidence_score >= min_confidence]
             if qualified_signals:
@@ -2003,8 +2898,17 @@ class TradingBotService:
         all_signals = []
         successful_analyses = 0
         failed_analyses = 0
-        tasks = [self.analyze_symbol(symbol, timeframe) for symbol in symbols]
+        
+        max_tasks = self.config.get('max_concurrent_tasks', 5)
+        semaphore = asyncio.Semaphore(max_tasks)
+        
+        async def sem_analyze(symbol):
+            async with semaphore:
+                return await self.analyze_symbol(symbol, timeframe)
+        
+        tasks = [sem_analyze(symbol) for symbol in symbols]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        
         for symbol, result in zip(symbols, results):
             if isinstance(result, Exception):
                 logger.error(f"❌ Analysis failed for {symbol}: {result}")
@@ -2026,6 +2930,7 @@ class TradingBotService:
         for i, signal in enumerate(top_signals, 1):
             logger.info(f"  #{i}: {signal.symbol} {signal.signal_type.value.upper()} (confidence: {signal.confidence_score:.0f}, profit: {signal.predicted_profit:.2f}%)")
         return top_signals
+    
     async def get_comprehensive_analysis(self) -> Dict[str, List[TradingSignal]]:
         results = {}
         for timeframe in TIME_FRAMES:
@@ -2034,12 +2939,28 @@ class TradingBotService:
             results[timeframe] = signals
         return results
     
+    async def stop(self):
+        try:
+            if hasattr(self, 'exchange_manager'):
+                await self.exchange_manager.close()
+            if hasattr(self, 'lstm_model'):
+                self.lstm_model.clear_cache()
+            if hasattr(self, 'application'):
+                await self.application.shutdown()
+        except:
+            pass
+    
     async def cleanup(self):
+        if hasattr(self, 'lstm_model') and self.lstm_model:
+            if hasattr(self.lstm_model, 'executor') and self.lstm_model.executor:
+                self.lstm_model.executor.shutdown(wait=False)
         await self.exchange_manager.close_exchange()
+        self._initialized = False
 
 class BacktestingEngine:
     def __init__(self, trading_service: TradingBotService):
         self.trading_service = trading_service
+    
     async def run_backtest(self, symbol: str, timeframe: str, start: str, end: str, initial_capital: float) -> Dict[str, float]:
         data = await self.trading_service.exchange_manager.fetch_ohlcv_data(symbol, timeframe, limit=1000)
         if data.empty:
@@ -2065,6 +2986,7 @@ class PaperTradingSimulator:
         self.balance = initial_balance
         self.positions = {}
         self.trade_history = []
+    
     def simulate_trade(self, signal: TradingSignal):
         if signal.signal_type == SignalType.BUY:
             self.positions[signal.symbol] = self.balance / signal.entry_price if signal.entry_price else 0
@@ -2073,6 +2995,7 @@ class PaperTradingSimulator:
             self.balance = self.positions[signal.symbol] * signal.exit_price
             del self.positions[signal.symbol]
         self.trade_history.append(signal)
+    
     def get_performance(self) -> Dict[str, float]:
         total_trades = len(self.trade_history)
         profit_loss = self.balance - 0
@@ -2120,6 +3043,7 @@ class MessageFormatter:
             f"🕐 **Generated:** {signal.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
         )
         return message
+    
     @staticmethod
     def format_summary_message(timeframe_results: Dict[str, List[TradingSignal]]) -> str:
         total_signals = sum(len(signals) for signals in timeframe_results.values())
@@ -2132,23 +3056,32 @@ class MessageFormatter:
         return summary
 
 class TelegramBotHandler:
-    def __init__(self, bot_token: str, config_manager: ConfigManager):
+    def __init__(self, bot_token, config_manager):
         self.bot_token = bot_token
         self.config = config_manager
-        self.trading_service = TradingBotService(config_manager)
+        self.trading_service = None
         self.formatter = MessageFormatter()
         self.user_sessions = {}
+        self._initialized = False
 
     async def initialize(self):
+        if self._initialized:
+            return
+        if self.trading_service is None:
+            self.trading_service = TradingBotService(self.config)
         await self.trading_service.initialize()
+        self._initialized = True
         
-    def create_application(self) -> Application:
+    def create_application(self):
+        if not self.bot_token:
+            raise ValueError("Bot token is required")
         application = Application.builder().token(self.bot_token).build()
         application.add_handler(CommandHandler("start", self.start_command))
         application.add_handler(CommandHandler("config", self.config_command))
         application.add_handler(CommandHandler("quick", self.quick_analysis))
         application.add_handler(CallbackQueryHandler(self.button_callback))
         return application
+    
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
         logger.info(f"User {user_id} started the bot")
@@ -2156,6 +3089,7 @@ class TelegramBotHandler:
         reply_markup = InlineKeyboardMarkup(keyboard)
         welcome_message = ("🤖 **Trading Signal Bot**\n\n" "Choose an option to get trading signals:")
         await update.message.reply_text(welcome_message, reply_markup=reply_markup, parse_mode='Markdown')
+    
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         await query.answer()
@@ -2165,6 +3099,7 @@ class TelegramBotHandler:
             await self.run_quick_scan(query)
         elif query.data == "settings":
             await self.show_settings(query)
+    
     async def run_full_analysis(self, query) -> None:
         user_id = query.from_user.id
         logger.info(f"User {user_id} started full analysis")
@@ -2190,6 +3125,7 @@ class TelegramBotHandler:
         except Exception as e:
             logger.error(f"Full analysis failed for user {user_id}: {e}")
             await query.edit_message_text(f"❌ Analysis Error: {str(e)}", parse_mode='Markdown')
+    
     async def run_quick_scan(self, query) -> None:
         await query.edit_message_text("⚡ Quick scan in progress...", parse_mode='Markdown')
         try:
@@ -2205,12 +3141,15 @@ class TelegramBotHandler:
         except Exception as e:
             logger.error(f"Error in quick scan: {e}")
             await query.edit_message_text(f"❌ Quick Scan Error: {str(e)}", parse_mode='Markdown')
+    
     async def show_settings(self, query) -> None:
         config_info = (f"⚙️ **Settings**\n\n" f"📊 Symbols: {len(self.config.get('symbols', []))}\n" f"⏰ Timeframes: {', '.join(self.config.get('timeframes', []))}\n" f"🎯 Min Confidence: {self.config.get('min_confidence_score', 60)}\n")
         await query.edit_message_text(config_info, parse_mode='Markdown')
+    
     async def config_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         config_text = (f"⚙️ **Configuration**\n\n" f"• Symbols: {len(self.config.get('symbols', []))}\n" f"• Timeframes: {', '.join(self.config.get('timeframes', []))}\n" f"• Min Confidence: {self.config.get('min_confidence_score', 60)}\n")
         await update.message.reply_text(config_text, parse_mode='Markdown')
+    
     async def quick_analysis(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         progress_msg = await update.message.reply_text("⚡ Quick analysis starting...", parse_mode='Markdown')
         try:
@@ -2226,112 +3165,127 @@ class TelegramBotHandler:
         except Exception as e:
             logger.error(f"Error in quick analysis command: {e}")
             await progress_msg.edit_text(f"❌ Quick Analysis Error: {str(e)}", parse_mode='Markdown')
+    
     async def cleanup(self):
-        await self.trading_service.cleanup()
+        if self.trading_service and self._initialized:
+            await self.trading_service.cleanup()
+            self.trading_service = None
+        self._initialized = False
         
 
-@asynccontextmanager
-async def create_bot_application(bot_token: str, config_manager: ConfigManager):
-    bot_handler = None
-    application = None
-    
-    try:
-        bot_handler = TelegramBotHandler(bot_token, config_manager)
-        await bot_handler.initialize()
-        
-        application = bot_handler.create_application()
-        
-        logger.info("🤖 Bot application created successfully")
-        yield application, bot_handler
-        
-    except Exception as e:
-        logger.error(f"Error creating bot application: {e}")
-        raise
-    finally:
-        logger.info("🧹 Starting application cleanup...")
-        
-        if bot_handler:
-            try:
-                await bot_handler.cleanup()
-                logger.info("✅ Bot handler cleanup completed")
-            except Exception as e:
-                logger.error(f"Error cleaning up bot handler: {e}")
+_bot_instance = None
 
-async def main_telegram():
-    logger.info("🚀 Starting Trading Signal Bot...")
+async def create_bot_application():
+    global _bot_instance
     
-    bot_token = os.getenv('BOT_TOKEN') or BOT_TOKEN
-    if not bot_token or not bot_token.strip():
-        logger.error("❌ BOT_TOKEN environment variable is required")
-        return
+    if _bot_instance is not None:
+        logger.info("Bot instance already exists, cleaning up...")
+        await _bot_instance.cleanup()
+        _bot_instance = None
     
     config_manager = ConfigManager()
-    logger.info("⚙️ Configuration loaded successfully")
+    logger.info("Configuration loaded successfully")
     
     application = None
     
     try:
-        async with create_bot_application(bot_token, config_manager) as (app, bot_handler):
-            application = app
+        bot_token = os.getenv('BOT_TOKEN', BOT_TOKEN)
+        if not bot_token:
+            raise ValueError("Bot token is required")
             
-            logger.info("🤖 Bot is ready and waiting for commands...")
+        _bot_instance = TelegramBotHandler(bot_token, config_manager)
+        await _bot_instance.initialize()
+        
+        application = _bot_instance.create_application()
+        
+        logger.info("Bot application created successfully")
+        logger.info("Bot is ready and waiting for commands...")
+        
+        await application.initialize()
+        await application.start()
+        
+        try:
+            await application.updater.start_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True
+            )
             
-            await application.initialize()
-            await application.start()
+            stop_event = asyncio.Event()
             
+            def signal_handler():
+                logger.info("Received shutdown signal")
+                stop_event.set()
+            
+            signal.signal(signal.SIGINT, lambda s, f: signal_handler())
+            
+            if platform.system() != 'Windows':
+                signal.signal(signal.SIGTERM, lambda s, f: signal_handler())
+            
+            await stop_event.wait()
+                
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("Received shutdown signal")
+        finally:
             try:
-                await application.updater.start_polling(
-                    allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True
-                )
-                
-                stop_event = asyncio.Event()
-                await stop_event.wait()
-                
-            except (KeyboardInterrupt, SystemExit):
-                logger.info("⏹️ Received shutdown signal")
-            finally:
-                if application.updater.running:
+                if application and hasattr(application, 'updater') and application.updater.running:
                     await application.updater.stop()
                     
-                if application.running:
+                if application and application.running:
                     await application.stop()
                     
-                await application.shutdown()
-                    
-    except KeyboardInterrupt:
-        logger.info("⏹️ Bot stopped by user (Ctrl+C)")
-    except Exception as e:
-        logger.error(f"💥 Bot crashed with error: {e}")
-        import traceback
-        logger.error(f"📋 Traceback:\n{traceback.format_exc()}")
+                if application:
+                    await application.shutdown()
+            except Exception as e:
+                logger.error(f"Error during shutdown: {e}")
     
-    logger.info("✅ Bot shutdown completed successfully")
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user (Ctrl+C)")
+    except Exception as e:
+        logger.error(f"Bot crashed with error: {e}")
+        import traceback
+        logger.error(f"Traceback:\n{traceback.format_exc()}")
+    finally:
+        logger.info("Starting cleanup...")
+        
+        if _bot_instance:
+            try:
+                await _bot_instance.cleanup()
+                logger.info("Bot handler cleanup completed")
+            except Exception as e:
+                logger.error(f"Error cleaning up bot handler: {e}")
+            finally:
+                _bot_instance = None
+    
+    logger.info("Bot shutdown completed successfully")
 
 def main():
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     
     try:
-        asyncio.run(main_telegram())
+        asyncio.run(create_bot_application())
         
     except KeyboardInterrupt:
-        logger.info("⏹️ Bot stopped by user")
+        logger.info("Bot stopped by user")
     except Exception as e:
-        logger.error(f"💥 Main function error: {e}")
+        logger.error(f"Main function error: {e}")
     finally:
         try:
-            loop = asyncio.get_event_loop()
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+                
             if loop and not loop.is_closed():
                 pending_tasks = [task for task in asyncio.all_tasks(loop) if not task.done()]
                 if pending_tasks:
                     logger.info(f"Cancelling {len(pending_tasks)} pending tasks...")
                     for task in pending_tasks:
                         task.cancel()
-                    
-                loop.close()
-        except RuntimeError:
-            pass
-        
+                        
+        except Exception as e:
+            logger.warning(f"Error during cleanup: {e}")
+
 if __name__ == "__main__":
     main()
+    
