@@ -1,18 +1,6 @@
 import os
 from logger_config import logger
 
-# =====================================================================
-
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'token')
-
-COINEX_API_KEY = 'token'
-
-COINEX_SECRET = 'token'
-
-CRYPTOPANIC_KEY = "token"
-
-# =====================================================================
-
 TIME_FRAMES = [
     "1m",
     "5m",
