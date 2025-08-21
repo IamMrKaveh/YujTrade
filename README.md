@@ -52,22 +52,11 @@ cd your-repository-name
   ```
 
 #### ۴. نصب نیازمندی‌ها
-پیشنهاد می‌شود یک فایل `requirements.txt` ایجاد کرده و کتابخانه‌های زیر را در آن قرار دهید:
-```
-pandas
-numpy
-tensorflow
-scikit-learn
-ccxt
-python-telegram-bot[ext]
-aiosqlite
-requests
-web3
-```
-سپس با دستور زیر نصب کنید:
+فایل `requirements.txt` در این پروژه وجود دارد. برای نصب تمام نیازمندی‌ها، دستور زیر را اجرا کنید:
 ```bash
 pip install -r requirements.txt
 ```
+*توجه: ممکن است فایل `requirements.txt` با انکودینگ UTF-16 ذخیره شده باشد. در صورت بروز مشکل، آن را به UTF-8 تبدیل کنید.*
 
 #### ۵. پیکربندی
 مهم‌ترین بخش، تنظیم کلیدهای API و توکن‌ها است. یک فایل به نام `.env` در ریشه پروژه ایجاد کرده و مقادیر زیر را در آن قرار دهید:
@@ -78,7 +67,7 @@ COINEX_API_KEY="YOUR_COINEX_API_KEY"
 COINEX_SECRET="YOUR_COINEX_SECRET_KEY"
 
 # توکن ربات تلگرام از BotFather
-BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
+TELEGRAM_BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
 
 # (اختیاری) کلید API برای تحلیل اخبار
 CRYPTOPANIC_KEY="YOUR_CRYPTOPANIC_API_KEY"
@@ -158,22 +147,11 @@ cd your-repository-name
   ```
 
 #### 4. Install Dependencies
-It's recommended to create a `requirements.txt` file and add the following libraries:
-```
-pandas
-numpy
-tensorflow
-scikit-learn
-ccxt
-python-telegram-bot[ext]
-aiosqlite
-requests
-web3
-```
-Then, install them using:
+The `requirements.txt` file is included in this project. To install all dependencies, run the following command:
 ```bash
 pip install -r requirements.txt
 ```
+*Note: The `requirements.txt` file might be saved with UTF-16 encoding. If you encounter any issues, convert it to UTF-8.*
 
 #### 5. Configuration
 This is the most critical step. Create a file named `.env` in the project's root directory and add your credentials:
@@ -184,7 +162,7 @@ COINEX_API_KEY="YOUR_COINEX_API_KEY"
 COINEX_SECRET="YOUR_COINEX_SECRET_KEY"
 
 # Telegram Bot Token from @BotFather
-BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
+TELEGRAM_BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
 
 # (Optional) API Key for News Sentiment Analysis
 CRYPTOPANIC_KEY="YOUR_CRYPTOPANIC_API_KEY"
