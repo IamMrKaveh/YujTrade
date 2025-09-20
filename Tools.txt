@@ -1,0 +1,89 @@
+
+**API های کاملاً رایگان و در دسترس:**
+**داده‌های قیمتی و بازار:**
+1. **CoinGecko** - API جامع با 16M+ ارز
+2. **CoinMarketCap** - API رایگان با محدودیت
+3. **Alpha Vantage** - رایگان با فرمت JSON/CSV
+4. **Yahoo Finance** - داده‌های S&P 500، Gold، bond yields
+**تحلیل On-Chain (پلن رایگان):**
+1. **Glassnode** - پلن رایگان محدود
+2. **IntoTheBlock** - برخی داده‌های رایگان
+3. **Messari** - بخش‌هایی رایگان
+**تحلیل احساسات و اجتماعی:**
+1. **CryptoPanic** - اخبار و sentiment رایگان
+2. **Fear & Greed Index** (alternative.me) - شاخص ترس/طمع
+3. **LunarCrush** - پلن رایگان محدود
+**تحلیل فنی:**
+1. **TradingView** - چارت‌های رایگان (با محدودیت)
+2. **Investing.com** - داده‌های بازارهای سنتی
+**DeFi و Blockchain:**
+1. **DefiLlama** - TVL و yields کاملاً رایگان
+2. **DeFiPulse** - داده‌های پروتکل‌ها
+3. **Dune Analytics** - queries عمومی رایگان
+4. **Etherscan API** - API رایگان با rate limit
+**تخصصی:**
+1. **CoinGlass** - liquidations و open interest
+2. **Alternative.me** - Bitcoin rainbow chart
+3. **Coin360** - heatmaps بازار
+4. **CryptoMiso** - development activity
+5. **StakingRewards** - داده‌های staking
+**اقتصاد کلان:**
+1. **FRED (Federal Reserve)** - داده‌های اقتصادی آمریکا
+
+## **API های قیمتی و بازار:**
+- **CryptoCompare** - API رایگان با 100K requests ماهانه
+- **Binance API** - داده‌های spot و futures رایگان
+- **KuCoin API** - قیمت‌های real-time رایگان
+- **Coingecko Terminal** - نسخه وب با داده‌های بیشتر
+- **CoinRanking** - API ساده با 10K requests روزانه
+
+## **تحلیل On-Chain:**
+- **Blockchain.info API** - داده‌های Bitcoin blockchain
+- **Blockchair** - explorer چند ارزه با API رایگان
+- **TokenTerminal** - metrics پروتکل‌های DeFi
+- **CoinMetrics** - برخی داده‌های on-chain رایگان
+- **Santiment** - پلن Community رایگان
+
+## **اخبار و احساسات:**
+- **NewsAPI** - اخبار کریپتو از منابع مختلف
+- **Reddit API** - sentiment از سابردیت‌های کریپتو
+- **Twitter API v2** - توییت‌های مربوط به کریپتو (محدود)
+- **CryptoPotato** - اخبار و تحلیل
+- **Cointelegraph RSS** - خوراک اخبار
+
+## **DeFi و yield farming:**
+- **APY.vision** - tracking پرتفولیو DeFi
+- **Zapper.fi** - داده‌های DeFi portfolios
+- **1inch API** - قیمت‌های DEX aggregator
+- **Yearn Finance API** - yields و vaults
+- **Uniswap Subgraph** - داده‌های DEX
+
+## **NFT و gaming:**
+- **OpenSea API** - داده‌های NFT marketplace
+- **Nansen** - برخی داده‌های NFT رایگان
+- **DappRadar** - آمار dApps و games
+- **CoinGecko NFT** - قیمت collections
+
+## **تحلیل فنی و charting:**
+- **Lightweight Charts** (TradingView) - library رایگان
+- **Cryptowatch** - charts و API محدود
+- **Coinigy** - trial رایگان
+- **GoCharting** - charts رایگان
+
+## **ابزارهای تخصصی:**
+- **Token Terminal** - revenue metrics
+- **DeBank** - portfolio tracking
+- **Zerion** - DeFi portfolio
+- **Coinglass Liquidation Map** - نقشه liquidations
+- **Bitcoin Treasuries** - holdings شرکت‌ها
+
+## **منابع اقتصادی:**
+- **TradingEconomics** - داده‌های اقتصاد جهانی (محدود)
+- **World Bank Open Data** - آمار کشورها
+- **IMF Data** - داده‌های صندوق بین‌المللی پول
+
+## **نکات مهم:**
+- همه این سرویس‌ها rate limiting دارند
+- برخی نیاز به ثبت‌نام دارند اما رایگان هستند
+- از VPN استفاده کنید در صورت محدودیت جغرافیایی
+- داده‌ها را cache کنید تا از limits تجاوز نکنید

@@ -5,194 +5,175 @@ import sys
 import traceback
 import warnings
 
+import redis.asyncio as redis
+import sentry_sdk
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from prometheus_client import start_http_server
 from telegram import Update
 
 from module.config import Config, ConfigManager
-from module.indicators import (ADXIndicator, ATRIndicator,
-                               BollingerBandsIndicator, CCIIndicator,
-                               ChaikinMoneyFlowIndicator, IchimokuIndicator,
-                               MACDIndicator, MovingAverageIndicator,
-                               OBVIndicator, RSIIndicator, StochasticIndicator,
-                               SuperTrendIndicator, VolumeIndicator,
-                               WilliamsRIndicator)
+from module.indicators import (RSIIndicator, MACDIndicator, BollingerBandsIndicator, MovingAverageIndicator)
 from module.logger_config import logger
-from module.lstm import LSTMModelManager
-from module.sentiment import ExchangeManager, OnChainFetcher, SentimentFetcher
-from module.signals import (MultiTimeframeAnalyzer, SignalGenerator,
-                              SignalRanking)
+from module.monitoring import ERRORS_TOTAL, set_app_info
+from module.sentiment import (
+    CoinGeckoFetcher,
+    ExchangeManager,
+    MarketIndicesFetcher,
+    NewsFetcher,
+    OnChainFetcher,
+)
+from module.signals import MultiTimeframeAnalyzer, SignalGenerator, SignalRanking
 from module.telegram import TelegramBotHandler, TradingBotService
+from module.lstm import LSTMModelManager
 
-warnings.filterwarnings('ignore')
-warnings.filterwarnings('ignore', category=UserWarning, module='google.protobuf.runtime_version')
-warnings.filterwarnings('ignore', message='.*Protobuf gencode version.*')
+warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.runtime_version")
 
-_bot_instance = None
 
-async def create_bot_application():
-    global _bot_instance
-    
-    if _bot_instance is not None:
-        logger.info("Bot instance already exists, cleaning up...")
-        await _bot_instance.cleanup()
-        _bot_instance = None
-    
-    config_manager = ConfigManager()
-    logger.info("Configuration loaded successfully")
-    
-    application = None
-    
+def setup_sentry(dsn: str, app_version: str):
+    if dsn:
+        sentry_sdk.init(
+            dsn=dsn,
+            traces_sample_rate=1.0,
+            profiles_sample_rate=1.0,
+            release=f"trading-bot@{app_version}",
+            environment="production",
+        )
+        logger.info("Sentry initialized successfully.")
+    else:
+        logger.warning("Sentry DSN not found. Sentry is disabled.")
+
+
+def start_prometheus_server(port: int):
     try:
-        # 1. Centralized Service Initialization
+        start_http_server(port)
+        logger.info(f"Prometheus metrics server started on port {port}")
+    except Exception as e:
+        logger.error(f"Failed to start Prometheus server: {e}")
+        ERRORS_TOTAL.labels(module="main", function="start_prometheus_server").inc()
+
+
+async def main():
+    stop_event = asyncio.Event()
+    bot_instance = None
+    scheduler = None
+    redis_client = None
+    application = None
+    lstm_manager = None
+    exchange_manager = None
+
+    def signal_handler():
+        logger.info("Shutdown signal received")
+        stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    if platform.system() != "Windows":
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, signal_handler)
+
+    config_manager = ConfigManager()
+    setup_sentry(Config.SENTRY_DSN, config_manager.get("app_version"))
+    set_app_info("TradingBot", config_manager.get("app_version"))
+    start_prometheus_server(Config.PROMETHEUS_PORT)
+
+    try:
+        redis_client = redis.Redis(host=Config.REDIS_HOST, port=Config.REDIS_PORT, decode_responses=True)
+        await redis_client.ping()
+        logger.info("Redis connection successful.")
+    except Exception as e:
+        logger.error(f"Redis connection failed: {e}. Caching will be disabled.")
+        ERRORS_TOTAL.labels(module="main", function="redis_connection").inc()
+        redis_client = None
+
+    try:
         bot_token = Config.TELEGRAM_BOT_TOKEN
         if not bot_token:
             raise ValueError("Bot token is required")
 
-        exchange_manager = ExchangeManager()
+        exchange_manager = ExchangeManager(redis_client=redis_client)
+        await exchange_manager.init_database()
         
-        cryptopanic_key = config_manager.get('cryptopanic_key', Config.CRYPTOPANIC_KEY)
-        alchemy_url = config_manager.get('alchemy_url', Config.ALCHEMY_URL)
+        news_fetcher = NewsFetcher(Config.CRYPTOPANIC_KEY, redis_client=redis_client) if Config.CRYPTOPANIC_KEY else None
+        coingecko_fetcher = CoinGeckoFetcher(redis_client=redis_client)
+        market_indices_fetcher = MarketIndicesFetcher(Config.ALPHA_VANTAGE_KEY, redis_client=redis_client)
+        onchain_fetcher = OnChainFetcher(glassnode_api_key=Config.GLASSNODE_API_KEY) if Config.GLASSNODE_API_KEY else None
+        lstm_manager = LSTMModelManager(model_path='lstm-model')
 
-        sentiment_fetcher = SentimentFetcher(cryptopanic_key) if cryptopanic_key and cryptopanic_key.strip() else None
-        if not sentiment_fetcher:
-            logger.warning("Sentiment analysis disabled - no CryptoPanic API key")
-
-        onchain_fetcher = OnChainFetcher(alchemy_url) if alchemy_url and alchemy_url.strip() else None
-        if not onchain_fetcher:
-            logger.warning("On-chain analysis disabled - no Alchemy URL")
-
-        try:
-            lstm_model_manager = LSTMModelManager(input_shape=(60, 15), units=50, lr=0.001)
-            logger.info("LSTM Model Manager initialized")
-        except Exception as e:
-            logger.error(f"LSTM Model Manager initialization failed: {e}")
-            lstm_model_manager = None
-
-        indicators = {
-            'sma_20': MovingAverageIndicator(20, "sma"), 'sma_50': MovingAverageIndicator(50, "sma"),
-            'ema_12': MovingAverageIndicator(12, "ema"), 'ema_26': MovingAverageIndicator(26, "ema"),
-            'rsi': RSIIndicator(), 'macd': MACDIndicator(), 'bb': BollingerBandsIndicator(),
-            'stoch': StochasticIndicator(), 'volume': VolumeIndicator(), 'atr': ATRIndicator(),
-            'ichimoku': IchimokuIndicator(), 'williams_r': WilliamsRIndicator(), 'cci': CCIIndicator(),
-            'supertrend': SuperTrendIndicator(), 'adx': ADXIndicator(), 'cmf': ChaikinMoneyFlowIndicator(),
-            'obv': OBVIndicator()
+        mta_indicators = {
+            'rsi': RSIIndicator(),
+            'macd': MACDIndicator(),
+            'bb': BollingerBandsIndicator(),
+            'sma_50': MovingAverageIndicator(50, "sma"),
         }
-        
-        multi_tf_analyzer = MultiTimeframeAnalyzer(exchange_manager, indicators)
-        
-        signal_generator = SignalGenerator(
-            sentiment_fetcher=sentiment_fetcher,
-            onchain_fetcher=onchain_fetcher,
-            lstm_model_manager=lstm_model_manager,
-            multi_tf_analyzer=multi_tf_analyzer,
-            config=config_manager.config
-        )
+        multi_tf_analyzer = MultiTimeframeAnalyzer(exchange_manager, mta_indicators)
 
-        signal_ranking = SignalRanking()
+        signal_generator = SignalGenerator(
+            exchange_manager=exchange_manager,
+            news_fetcher=news_fetcher,
+            onchain_fetcher=onchain_fetcher,
+            coingecko_fetcher=coingecko_fetcher,
+            market_indices_fetcher=market_indices_fetcher,
+            lstm_model_manager=lstm_manager,
+            multi_tf_analyzer=multi_tf_analyzer,
+            config=config_manager.config,
+        )
 
         trading_service = TradingBotService(
             config=config_manager,
             exchange_manager=exchange_manager,
             signal_generator=signal_generator,
-            signal_ranking=signal_ranking
+            signal_ranking=SignalRanking(),
         )
 
-        # 2. Dependency Injection
-        _bot_instance = TelegramBotHandler(
+        bot_instance = TelegramBotHandler(
             bot_token=bot_token,
             config_manager=config_manager,
-            trading_service=trading_service
+            trading_service=trading_service,
         )
-        
-        await _bot_instance.initialize()
-        
-        application = _bot_instance.create_application()
-        
-        logger.info("Bot application created successfully")
+
+        await bot_instance.initialize()
+        application = bot_instance.create_application()
+
+        scheduler = AsyncIOScheduler()
+        if config_manager.get("enable_scheduled_analysis", True):
+            schedule_cron = config_manager.get("schedule_hour", "*/4")
+            scheduler.add_job(
+                bot_instance.run_scheduled_analysis, "cron", hour=schedule_cron
+            )
+            scheduler.start()
+            logger.info(f"APScheduler started for periodic analysis with schedule: 'hour={schedule_cron}'.")
+
         logger.info("Bot is ready and waiting for commands...")
-        
         await application.initialize()
         await application.start()
-        
-        try:
-            await application.updater.start_polling(
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True
-            )
-            
-            stop_event = asyncio.Event()
-            
-            def signal_handler():
-                logger.info("Received shutdown signal")
-                stop_event.set()
-            
-            signal.signal(signal.SIGINT, lambda s, f: signal_handler())
-            
-            if platform.system() != 'Windows':
-                signal.signal(signal.SIGTERM, lambda s, f: signal_handler())
-            
-            await stop_event.wait()
-                
-        except (KeyboardInterrupt, SystemExit):
-            logger.info("Received shutdown signal")
-        finally:
-            try:
-                if application and hasattr(application, 'updater') and application.updater.running:
-                    await application.updater.stop()
-                    
-                if application and application.running:
-                    await application.stop()
-                    
-                if application:
-                    await application.shutdown()
-            except Exception as e:
-                logger.error(f"Error during shutdown: {e}")
-    
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user (Ctrl+C)")
-    except Exception as e:
-        logger.error(f"Bot crashed with error: {e}")
-        logger.error(f"Traceback:\n{traceback.format_exc()}")
-    finally:
-        logger.info("Starting cleanup...")
-        
-        if _bot_instance:
-            try:
-                await _bot_instance.cleanup()
-                logger.info("Bot handler cleanup completed")
-            except Exception as e:
-                logger.error(f"Error cleaning up bot handler: {e}")
-            finally:
-                _bot_instance = None
-    
-    logger.info("Bot shutdown completed successfully")
+        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await stop_event.wait()
 
-def main():
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-    
-    try:
-        asyncio.run(create_bot_application())
-        
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         logger.info("Bot stopped by user")
     except Exception as e:
-        logger.error(f"Main function error: {e}")
+        logger.error(f"Bot crashed with error: {e}\n{traceback.format_exc()}")
+        sentry_sdk.capture_exception(e)
+        ERRORS_TOTAL.labels(module="main", function="main_loop").inc()
     finally:
-        try:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-                
-            if loop and not loop.is_closed():
-                pending_tasks = [task for task in asyncio.all_tasks(loop) if not task.done()]
-                if pending_tasks:
-                    logger.info(f"Cancelling {len(pending_tasks)} pending tasks...")
-                    for task in pending_tasks:
-                        task.cancel()
-                        
-        except Exception as e:
-            logger.warning(f"Error during cleanup: {e}")
+        logger.info("Starting cleanup...")
+        if scheduler and scheduler.running:
+            scheduler.shutdown(wait=False)
+        if application:
+            await application.updater.stop()
+            await application.stop()
+            await application.shutdown()
+        if bot_instance:
+            await bot_instance.cleanup()
+        if exchange_manager:
+            await exchange_manager.close()
+        if lstm_manager:
+            lstm_manager.cleanup()
+        if redis_client:
+            await redis_client.close()
+        logger.info("Bot shutdown completed successfully")
+
 
 if __name__ == "__main__":
-    main()
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    asyncio.run(main())

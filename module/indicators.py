@@ -3,6 +3,12 @@ from typing import Protocol
 
 import numpy as np
 import pandas as pd
+import talib
+from pandas_ta.momentum import stoch, roc, stochrsi, trix, ultimate_oscillator, mfi
+from pandas_ta.overlap import ichimoku, supertrend, vwap, vwma, kc, donchian
+from pandas_ta.volatility import bbands, atr
+from pandas_ta.volume import cmf, obv, ad, eom, force_index
+from pandas_ta.trend import adx as adx_ta, aroon
 
 from module.core import IndicatorResult
 from module.logger_config import logger
@@ -20,22 +26,25 @@ class TechnicalIndicator(ABC):
 class MovingAverageIndicator(TechnicalIndicator):
     def __init__(self, period: int, ma_type: str = "sma"):
         self.period = period
-        self.ma_type = ma_type
+        self.ma_type = ma_type.upper()
     
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        if self.ma_type == "sma":
-            ma_values = data['close'].rolling(window=self.period).mean()
-        else:
-            ma_values = data['close'].ewm(span=self.period).mean()
+        try:
+            ma_series = talib.MA(data['close'], timeperiod=self.period, matype=talib.MA_Type.T3 if self.ma_type == "EMA" else 0)
+        except Exception:
+            ma_series = pd.Series(np.nan, index=data.index)
+
+        if ma_series.empty or pd.isna(ma_series.iloc[-1]):
+            return IndicatorResult(name=f"{self.ma_type}_{self.period}", value=0, signal_strength=0, interpretation="neutral")
+            
         current_price = data['close'].iloc[-1]
-        current_ma = ma_values.iloc[-1]
-        signal_strength = abs((current_price - current_ma) / current_ma) * 100
-        if current_price > current_ma:
-            interpretation = "bullish_above_ma"
-        else:
-            interpretation = "bearish_below_ma"
+        current_ma = ma_series.iloc[-1]
+        
+        signal_strength = abs((current_price - current_ma) / current_ma) * 100 if current_ma != 0 else 0
+        interpretation = "bullish_above_ma" if current_price > current_ma else "bearish_below_ma"
+
         return IndicatorResult(
-            name=f"{self.ma_type.upper()}_{self.period}",
+            name=f"{self.ma_type}_{self.period}",
             value=current_ma,
             signal_strength=signal_strength,
             interpretation=interpretation
@@ -46,35 +55,12 @@ class RSIIndicator(TechnicalIndicator):
         self.period = period
     
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        if 'close' not in data.columns:
-            logger.error("Data does not contain 'close' column for RSI calculation")
-            raise ValueError("Data must contain 'close' column")
-        
-        if len(data) < self.period + 1:
-            logger.error(f"Insufficient data for RSI calculation. Need at least {self.period + 1} records")
-            return IndicatorResult(name="RSI", value=50, signal_strength=0, interpretation="neutral")
-        
-        delta = data['close'].diff()
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        
-        avg_gain = gain.rolling(window=self.period, min_periods=self.period).mean()
-        avg_loss = loss.rolling(window=self.period, min_periods=self.period).mean()
-        
-        current_gain = avg_gain.iloc[-1]
-        current_loss = avg_loss.iloc[-1]
-
-        if pd.isna(current_gain) or pd.isna(current_loss):
+        rsi_series = talib.RSI(data['close'], timeperiod=self.period)
+        if rsi_series.empty or pd.isna(rsi_series.iloc[-1]):
             return IndicatorResult(name="RSI", value=50, signal_strength=0, interpretation="neutral")
             
-        if current_loss == 0 or current_loss < 1e-10:
-            current_rsi = 100.0
-        else:
-            rs = current_gain / current_loss
-            current_rsi = 100 - (100 / (1 + rs))
+        current_rsi = rsi_series.iloc[-1]
         
-        current_rsi = max(0, min(100, current_rsi))
-            
         if current_rsi > 70:
             interpretation = "overbought"
             signal_strength = min((current_rsi - 70) / 30 * 100, 100)
@@ -85,39 +71,22 @@ class RSIIndicator(TechnicalIndicator):
             interpretation = "neutral"
             signal_strength = max(0, 50 - abs(current_rsi - 50))
             
-        return IndicatorResult(
-            name="RSI", 
-            value=current_rsi, 
-            signal_strength=signal_strength, 
-            interpretation=interpretation
-        )
+        return IndicatorResult(name="RSI", value=current_rsi, signal_strength=signal_strength, interpretation=interpretation)
 
 class MACDIndicator(TechnicalIndicator):
     def __init__(self, fast: int = 12, slow: int = 26, signal: int = 9):
         self.fast = fast
         self.slow = slow
-        self.signal = signal
+        self.signal_period = signal
     
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        if len(data) < max(self.slow, self.fast, self.signal) + 1:
+        macd, macdsignal, macdhist = talib.MACD(data['close'], fastperiod=self.fast, slowperiod=self.slow, signalperiod=self.signal_period)
+        if macd.empty or pd.isna(macd.iloc[-1]):
             return IndicatorResult(name="MACD", value=0, signal_strength=0, interpretation="neutral")
             
-        ema_fast = data['close'].ewm(span=self.fast, min_periods=self.fast).mean()
-        ema_slow = data['close'].ewm(span=self.slow, min_periods=self.slow).mean()
-        
-        if pd.isna(ema_fast.iloc[-1]) or pd.isna(ema_slow.iloc[-1]):
-            return IndicatorResult(name="MACD", value=0, signal_strength=0, interpretation="neutral")
-            
-        macd_line = ema_fast - ema_slow
-        signal_line = macd_line.ewm(span=self.signal, min_periods=self.signal).mean()
-        histogram = macd_line - signal_line
-        
-        current_macd = macd_line.iloc[-1]
-        current_signal = signal_line.iloc[-1]
-        current_histogram = histogram.iloc[-1]
-        
-        if pd.isna(current_macd) or pd.isna(current_signal) or pd.isna(current_histogram):
-            return IndicatorResult(name="MACD", value=0, signal_strength=0, interpretation="neutral")
+        current_macd = macd.iloc[-1]
+        current_signal = macdsignal.iloc[-1]
+        current_histogram = macdhist.iloc[-1]
         
         if current_macd > current_signal and current_histogram > 0:
             interpretation = "bullish_crossover"
@@ -129,12 +98,7 @@ class MACDIndicator(TechnicalIndicator):
             interpretation = "neutral"
             signal_strength = 50
             
-        return IndicatorResult(
-            name="MACD", 
-            value=current_macd,
-            signal_strength=signal_strength,
-            interpretation=interpretation
-        )
+        return IndicatorResult(name="MACD", value=current_macd, signal_strength=signal_strength, interpretation=interpretation)
 
 class BollingerBandsIndicator(TechnicalIndicator):
     def __init__(self, period: int = 20, std_dev: float = 2):
@@ -142,29 +106,19 @@ class BollingerBandsIndicator(TechnicalIndicator):
         self.std_dev = std_dev
     
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        if len(data) < self.period:
+        bb_df = bbands(data['close'], length=self.period, std=self.std_dev)
+        if bb_df is None or bb_df.empty or bb_df.iloc[-1].isna().any():
             return IndicatorResult(name="BB", value=0.5, signal_strength=0, interpretation="neutral")
             
-        sma = data['close'].rolling(window=self.period, min_periods=self.period).mean()
-        std = data['close'].rolling(window=self.period, min_periods=self.period).std()
-        
-        current_sma = sma.iloc[-1]
-        current_std = std.iloc[-1]
-        
-        if pd.isna(current_sma) or pd.isna(current_std):
-            return IndicatorResult(name="BB", value=0.5, signal_strength=0, interpretation="neutral")
-        
-        upper_band = current_sma + (current_std * self.std_dev)
-        lower_band = current_sma - (current_std * self.std_dev)
-        
+        upper_band = bb_df.iloc[-1, 2]
+        lower_band = bb_df.iloc[-1, 0]
         current_price = data['close'].iloc[-1]
         
         band_width = upper_band - lower_band
-        if band_width == 0 or band_width < 1e-10:
+        if band_width == 0:
             return IndicatorResult(name="BB", value=0.5, signal_strength=0, interpretation="neutral")
         
         bb_position = (current_price - lower_band) / band_width
-        bb_position = max(0, min(1, bb_position))
         
         if bb_position > 0.8:
             interpretation = "near_upper_band"
@@ -176,49 +130,25 @@ class BollingerBandsIndicator(TechnicalIndicator):
             interpretation = "middle_range"
             signal_strength = 50
             
-        return IndicatorResult(
-            name="BB",
-            value=bb_position,
-            signal_strength=signal_strength,
-            interpretation=interpretation
-        )
+        return IndicatorResult(name="BB", value=bb_position, signal_strength=signal_strength, interpretation=interpretation)
 
 class StochasticIndicator(TechnicalIndicator):
-    def __init__(self, k_period: int = 14, d_period: int = 3):
+    def __init__(self, k_period: int = 14, d_period: int = 3, s_period: int = 3):
         self.k_period = k_period
         self.d_period = d_period
+        self.s_period = s_period
     
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        if len(data) < self.k_period:
+        slowk, slowd = talib.STOCH(data['high'], data['low'], data['close'],
+                                   fastk_period=self.k_period,
+                                   slowk_period=self.s_period,
+                                   slowd_period=self.d_period)
+
+        if slowk.empty or pd.isna(slowk.iloc[-1]):
             return IndicatorResult(name="STOCH", value=50, signal_strength=0, interpretation="neutral")
             
-        lowest_low = data['low'].rolling(window=self.k_period, min_periods=self.k_period).min()
-        highest_high = data['high'].rolling(window=self.k_period, min_periods=self.k_period).max()
-        
-        range_high_low = highest_high - lowest_low
-        
-        if pd.isna(range_high_low.iloc[-1]) or range_high_low.iloc[-1] == 0 or range_high_low.iloc[-1] < 1e-10:
-            return IndicatorResult(name="STOCH", value=50, signal_strength=0, interpretation="neutral")
-        
-        k_percent = ((data['close'] - lowest_low) / range_high_low) * 100
-        
-        k_percent = k_percent.dropna()
-        if len(k_percent) == 0:
-            return IndicatorResult(name="STOCH", value=50, signal_strength=0, interpretation="neutral")
-            
-        k_percent = k_percent.clip(0, 100)
-        
-        if len(k_percent) < self.d_period:
-            d_percent = k_percent
-        else:
-            d_percent = k_percent.rolling(window=self.d_period, min_periods=1).mean()
-        
-        current_k = k_percent.iloc[-1]
-        current_d = d_percent.iloc[-1]
-        
-        if pd.isna(current_k) or pd.isna(current_d):
-            return IndicatorResult(name="STOCH", value=50, signal_strength=0, interpretation="neutral")
-        
+        current_k = slowk.iloc[-1]
+        current_d = slowd.iloc[-1]
         avg_stoch = (current_k + current_d) / 2
         
         if avg_stoch > 80:
@@ -231,34 +161,24 @@ class StochasticIndicator(TechnicalIndicator):
             interpretation = "neutral"
             signal_strength = max(0, 50 - abs(avg_stoch - 50))
             
-        return IndicatorResult(
-            name="STOCH", 
-            value=avg_stoch, 
-            signal_strength=signal_strength, 
-            interpretation=interpretation
-        )
+        return IndicatorResult(name="STOCH", value=avg_stoch, signal_strength=signal_strength, interpretation=interpretation)
 
 class VolumeIndicator(TechnicalIndicator):
     def __init__(self, period: int = 20):
         self.period = period
     
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        if len(data) < self.period or 'volume' not in data.columns:
+        if 'volume' not in data.columns or len(data) < self.period:
             return IndicatorResult(name="VOLUME", value=1, signal_strength=50, interpretation="normal_volume")
             
-        volume_ma = data['volume'].rolling(window=self.period, min_periods=self.period).mean()
+        volume_ma = talib.SMA(data['volume'], timeperiod=self.period)
+        if volume_ma.empty or pd.isna(volume_ma.iloc[-1]):
+            return IndicatorResult(name="VOLUME", value=1, signal_strength=50, interpretation="normal_volume")
+            
         current_volume = data['volume'].iloc[-1]
         average_volume = volume_ma.iloc[-1]
         
-        if pd.isna(average_volume) or pd.isna(current_volume):
-            return IndicatorResult(name="VOLUME", value=1, signal_strength=50, interpretation="normal_volume")
-            
-        if average_volume == 0:
-            volume_ratio = 1
-        else:
-            volume_ratio = current_volume / average_volume
-            
-        volume_ratio = max(0, volume_ratio)
+        volume_ratio = current_volume / average_volume if average_volume > 0 else 1
             
         if volume_ratio > 1.5:
             interpretation = "high_volume"
@@ -270,40 +190,21 @@ class VolumeIndicator(TechnicalIndicator):
             interpretation = "normal_volume"
             signal_strength = 50
             
-        return IndicatorResult(
-            name="VOLUME",
-            value=volume_ratio,
-            signal_strength=signal_strength,
-            interpretation=interpretation
-        )
+        return IndicatorResult(name="VOLUME", value=volume_ratio, signal_strength=signal_strength, interpretation=interpretation)
 
 class ATRIndicator(TechnicalIndicator):
     def __init__(self, period: int = 14):
         self.period = period
     
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        if len(data) < self.period + 1:
+        atr_series = talib.ATR(data['high'], data['low'], data['close'], timeperiod=self.period)
+        if atr_series.empty or pd.isna(atr_series.iloc[-1]):
             return IndicatorResult(name="ATR", value=0, signal_strength=0, interpretation="neutral")
             
-        high_low = data['high'] - data['low']
-        high_close = (data['high'] - data['close'].shift()).abs()
-        low_close = (data['low'] - data['close'].shift()).abs()
-        
-        ranges = pd.concat([high_low, high_close, low_close], axis=1)
-        true_range = ranges.max(axis=1)
-        
-        atr = true_range.rolling(window=self.period, min_periods=self.period).mean()
-        current_atr = atr.iloc[-1]
-        
-        if pd.isna(current_atr) or current_atr < 0:
-            return IndicatorResult(name="ATR", value=0, signal_strength=0, interpretation="neutral")
-            
+        current_atr = atr_series.iloc[-1]
         current_price = data['close'].iloc[-1]
         
-        if current_price == 0 or pd.isna(current_price):
-            atr_percentage = 0
-        else:
-            atr_percentage = (current_atr / current_price) * 100
+        atr_percentage = (current_atr / current_price) * 100 if current_price > 0 else 0
             
         if atr_percentage > 3:
             interpretation = "high_volatility"
@@ -315,27 +216,16 @@ class ATRIndicator(TechnicalIndicator):
             interpretation = "normal_volatility"
             signal_strength = 50
             
-        return IndicatorResult(
-            name="ATR",
-            value=current_atr,
-            signal_strength=signal_strength,
-            interpretation=interpretation
-        )
+        return IndicatorResult(name="ATR", value=current_atr, signal_strength=signal_strength, interpretation=interpretation)
 
 class IchimokuIndicator(TechnicalIndicator):
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        if len(data) < 24:
+        ichimoku_df, _ = ichimoku(data['high'], data['low'], data['close'])
+        if ichimoku_df is None or ichimoku_df.empty or ichimoku_df.iloc[-1].isna().any():
             return IndicatorResult(name="Ichimoku", value=0, signal_strength=0, interpretation="neutral")
-        high_9 = data['high'].rolling(window=6).max().iloc[-1]
-        low_9 = data['low'].rolling(window=6).min().iloc[-1]
-        tenkan = (high_9 + low_9) / 2
-        high_26 = data['high'].rolling(window=12).max().iloc[-1]
-        low_26 = data['low'].rolling(window=12).min().iloc[-1]
-        kijun = (high_26 + low_26) / 2
-        senkou_a = (tenkan + kijun) / 2
-        high_52 = data['high'].rolling(window=24).max().iloc[-1]
-        low_52 = data['low'].rolling(window=24).min().iloc[-1]
-        senkou_b = (high_52 + low_52) / 2
+
+        senkou_a = ichimoku_df.iloc[-1, 0]
+        senkou_b = ichimoku_df.iloc[-1, 1]
         current_price = data['close'].iloc[-1]
         
         if current_price > senkou_a and current_price > senkou_b:
@@ -347,35 +237,18 @@ class IchimokuIndicator(TechnicalIndicator):
         else:
             interpretation = "price_in_cloud"
             signal_strength = 50
-        return IndicatorResult(
-            name="Ichimoku",
-            value=current_price,
-            signal_strength=signal_strength,
-            interpretation=interpretation
-        )
+        return IndicatorResult(name="Ichimoku", value=current_price, signal_strength=signal_strength, interpretation=interpretation)
 
 class WilliamsRIndicator(TechnicalIndicator):
     def __init__(self, period: int = 14):
         self.period = period
-        self.wiliamsR = 'Williams %R'
         
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        if len(data) < self.period:
-            return IndicatorResult(name=self.wiliamsR, value=-50, signal_strength=0, interpretation="neutral")
+        willr_series = talib.WILLR(data['high'], data['low'], data['close'], timeperiod=self.period)
+        if willr_series.empty or pd.isna(willr_series.iloc[-1]):
+            return IndicatorResult(name="Williams %R", value=-50, signal_strength=0, interpretation="neutral")
             
-        highest_high = data['high'].rolling(window=self.period, min_periods=self.period).max().iloc[-1]
-        lowest_low = data['low'].rolling(window=self.period, min_periods=self.period).min().iloc[-1]
-        current_close = data['close'].iloc[-1]
-        
-        if pd.isna(highest_high) or pd.isna(lowest_low) or pd.isna(current_close):
-            return IndicatorResult(name=self.wiliamsR, value=-50, signal_strength=0, interpretation="neutral")
-            
-        if highest_high - lowest_low == 0 or highest_high - lowest_low < 1e-10:
-            value = -50
-        else:
-            value = (highest_high - current_close) / (highest_high - lowest_low) * -100
-            
-        value = max(-100, min(0, value))
+        value = willr_series.iloc[-1]
         
         if value > -20:
             interpretation = "overbought"
@@ -387,41 +260,18 @@ class WilliamsRIndicator(TechnicalIndicator):
             interpretation = "neutral"
             signal_strength = max(0, 50 - abs(value + 50) / 30 * 50)
             
-        return IndicatorResult(
-            name=self.wiliamsR,
-            value=value,
-            signal_strength=signal_strength,
-            interpretation=interpretation
-        )
+        return IndicatorResult(name="Williams %R", value=value, signal_strength=signal_strength, interpretation=interpretation)
 
 class CCIIndicator(TechnicalIndicator):
     def __init__(self, period: int = 20):
         self.period = period
         
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        if len(data) < self.period:
+        cci_series = talib.CCI(data['high'], data['low'], data['close'], timeperiod=self.period)
+        if cci_series.empty or pd.isna(cci_series.iloc[-1]):
             return IndicatorResult(name="CCI", value=0, signal_strength=0, interpretation="neutral")
             
-        tp = (data['high'] + data['low'] + data['close']) / 3
-        sma = tp.rolling(window=self.period, min_periods=self.period).mean()
-        
-        current_tp = tp.iloc[-1]
-        current_sma = sma.iloc[-1]
-        
-        if pd.isna(current_sma) or pd.isna(current_tp):
-            return IndicatorResult(name="CCI", value=0, signal_strength=0, interpretation="neutral")
-        
-        recent_tp = tp.tail(self.period)
-        if len(recent_tp) < self.period:
-            return IndicatorResult(name="CCI", value=0, signal_strength=0, interpretation="neutral")
-            
-        mean_dev = (recent_tp - current_sma).abs().mean()
-        
-        if pd.isna(mean_dev) or mean_dev == 0 or mean_dev < 1e-10:
-            return IndicatorResult(name="CCI", value=0, signal_strength=0, interpretation="neutral")
-        
-        cci = (current_tp - current_sma) / (0.015 * mean_dev)
-        cci = max(-300, min(300, cci))
+        cci = cci_series.iloc[-1]
         
         if cci > 100:
             interpretation = "overbought"
@@ -433,12 +283,7 @@ class CCIIndicator(TechnicalIndicator):
             interpretation = "neutral"
             signal_strength = max(0, 50 - abs(cci) / 2)
             
-        return IndicatorResult(
-            name="CCI",
-            value=cci,
-            signal_strength=signal_strength,
-            interpretation=interpretation
-        )
+        return IndicatorResult(name="CCI", value=cci, signal_strength=signal_strength, interpretation=interpretation)
 
 class SuperTrendIndicator(TechnicalIndicator):
     def __init__(self, period=7, multiplier=3):
@@ -446,164 +291,75 @@ class SuperTrendIndicator(TechnicalIndicator):
         self.multiplier = multiplier
     
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        high = data['high']
-        low = data['low']
-        close = data['close']
+        st_df = supertrend(data['high'], data['low'], data['close'], length=self.period, multiplier=self.multiplier)
+        if st_df is None or st_df.empty or st_df.iloc[-1].isna().any():
+            return IndicatorResult(name="SuperTrend", value=0, signal_strength=50, interpretation="neutral")
         
-        tr1 = high - low
-        tr2 = (high - close.shift()).abs()
-        tr3 = (low - close.shift()).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(self.period).mean()
+        current_value = st_df.iloc[-1, 0]
+        current_direction = st_df.iloc[-1, 1]
         
-        hl2 = (high + low) / 2
-        upperband = hl2 + (self.multiplier * atr)
-        lowerband = hl2 - (self.multiplier * atr)
-        
-        supertrend = pd.Series(index=data.index, dtype=float)
-        direction = pd.Series(index=data.index, dtype=bool)
-        
-        direction.iloc[0] = True
-        supertrend.iloc[0] = lowerband.iloc[0] if direction.iloc[0] else upperband.iloc[0]
-        
-        for i in range(1, len(data)):
-            if close.iloc[i] > upperband.iloc[i-1]:
-                direction.iloc[i] = True
-            elif close.iloc[i] < lowerband.iloc[i-1]:
-                direction.iloc[i] = False
-            else:
-                direction.iloc[i] = direction.iloc[i-1]
-            
-            if direction.iloc[i]:
-                lowerband.iloc[i] = max(lowerband.iloc[i], lowerband.iloc[i-1])
-                supertrend.iloc[i] = lowerband.iloc[i]
-            else:
-                upperband.iloc[i] = min(upperband.iloc[i], upperband.iloc[i-1])
-                supertrend.iloc[i] = upperband.iloc[i]
-        
-        current_value = supertrend.iloc[-1]
-        current_price = close.iloc[-1]
-        
-        if current_price > current_value:
+        if current_direction == 1:
             interpretation = "bullish"
             strength = 100
-        elif current_price < current_value:
+        elif current_direction == -1:
             interpretation = "bearish"
             strength = 100
         else:
             interpretation = "neutral"
             strength = 50
             
-        return IndicatorResult(
-            name="SuperTrend",
-            value=current_value,
-            signal_strength=strength,
-            interpretation=interpretation
-            )
+        return IndicatorResult(name="SuperTrend", value=current_value, signal_strength=strength, interpretation=interpretation)
 
 class ADXIndicator(TechnicalIndicator):
     def __init__(self, period=14):
         self.period = period
     
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        high = data['high']
-        low = data['low']
-        close = data['close']
-        
-        high_diff = high.diff()
-        low_diff = -low.diff()
-        
-        plus_dm = high_diff.where(high_diff > low_diff, 0).where(high_diff > 0, 0)
-        minus_dm = low_diff.where(low_diff > high_diff, 0).where(low_diff > 0, 0)
-        
-        tr1 = high - low
-        tr2 = (high - close.shift()).abs()
-        tr3 = (low - close.shift()).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
-        plus_dm_smooth = plus_dm.rolling(self.period).mean()
-        minus_dm_smooth = minus_dm.rolling(self.period).mean()
-        tr_smooth = tr.rolling(self.period).mean()
-        
-        plus_di = 100 * (plus_dm_smooth / tr_smooth)
-        minus_di = 100 * (minus_dm_smooth / tr_smooth)
-        
-        plus_di = plus_di.fillna(0)
-        minus_di = minus_di.fillna(0)
-        
-        dx_denominator = plus_di + minus_di
-        dx = 100 * (plus_di - minus_di).abs() / dx_denominator.where(dx_denominator != 0, np.nan)
-        dx = dx.fillna(0)
-        
-        adx = dx.rolling(self.period).mean().iloc[-1]
-        
-        if pd.isna(adx):
-            adx = 0
+        adx_series = talib.ADX(data['high'], data['low'], data['close'], timeperiod=self.period)
+        if adx_series.empty or pd.isna(adx_series.iloc[-1]):
+            return IndicatorResult(name="ADX", value=0, signal_strength=0, interpretation="weak_trend")
             
+        adx = adx_series.iloc[-1]
+        
         if adx > 25:
             interpretation = "strong_trend"
-            strength = min(adx, 100)
         else:
             interpretation = "weak_trend"
-            strength = min(adx, 100)
+        strength = min(adx, 100)
 
-        return IndicatorResult(
-            name="ADX",
-            value=adx,
-            signal_strength=strength,
-            interpretation=interpretation
-        )
+        return IndicatorResult(name="ADX", value=adx, signal_strength=strength, interpretation=interpretation)
 
 class ChaikinMoneyFlowIndicator(TechnicalIndicator):
     def __init__(self, period=20):
         self.period = period
     
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        high = data['high']
-        low = data['low']
-        close = data['close']
-        volume = data['volume']
-        
-        mfm = ((close - low) - (high - close)) / (high - low)
-        mfm = mfm.replace([np.inf, -np.inf], 0).fillna(0)
-        mfv = mfm * volume
-        
-        cmf = mfv.rolling(self.period).sum() / volume.rolling(self.period).sum()
-        current_value = cmf.iloc[-1]
-        
-        if pd.isna(current_value):
-            current_value = 0
+        cmf_series = cmf(data['high'], data['low'], data['close'], data['volume'], length=self.period)
+        if cmf_series is None or cmf_series.empty or pd.isna(cmf_series.iloc[-1]):
+            return IndicatorResult(name="CMF", value=0, signal_strength=50, interpretation="neutral")
+            
+        current_value = cmf_series.iloc[-1]
             
         if current_value > 0:
             interpretation = "buy_pressure"
-            strength = min(abs(current_value) * 100, 100)
+            strength = min(abs(current_value) * 200, 100)
         elif current_value < 0:
             interpretation = "sell_pressure"
-            strength = min(abs(current_value) * 100, 100)
+            strength = min(abs(current_value) * 200, 100)
         else:
             interpretation = "neutral"
             strength = 50
 
-        return IndicatorResult(
-            name="CMF",
-            value=current_value,
-            signal_strength=strength,
-            interpretation=interpretation
-        )
+        return IndicatorResult(name="CMF", value=current_value, signal_strength=strength, interpretation=interpretation)
 
 class OBVIndicator(TechnicalIndicator):
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        close = data['close']
-        volume = data['volume']
-        
-        price_change = close.diff()
-        volume_direction = np.sign(price_change)
-        volume_direction = volume_direction.fillna(0)
-        
-        obv = (volume * volume_direction).cumsum()
-        
-        current_value = obv.iloc[-1]
-        previous_value = obv.iloc[-2] if len(obv) > 1 else current_value
+        obv_series = obv(data['close'], data['volume'])
+        if obv_series is None or obv_series.empty or len(obv_series) < 2:
+            return IndicatorResult(name="OBV", value=0, signal_strength=50, interpretation="neutral")
+
+        current_value = obv_series.iloc[-1]
+        previous_value = obv_series.iloc[-2]
         
         if current_value > previous_value:
             interpretation = "bullish"
@@ -615,9 +371,336 @@ class OBVIndicator(TechnicalIndicator):
             interpretation = "neutral"
             strength = 50
 
+        return IndicatorResult(name="OBV", value=current_value, signal_strength=strength, interpretation=interpretation)
+
+class ParabolicSARIndicator(TechnicalIndicator):
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        psar_series = talib.SAR(data['high'], data['low'])
+        if psar_series.empty or psar_series.iloc[-1] is None or np.isnan(psar_series.iloc[-1]):
+            return IndicatorResult("ParabolicSAR", 0, 0, "neutral")
+
+        current_psar = psar_series.iloc[-1]
+        current_close = data['close'].iloc[-1]
+        
+        interpretation = "neutral"
+        strength = 50
+
+        if current_close > current_psar:
+            interpretation = "bullish_trend"
+            strength = 100
+        elif current_close < current_psar:
+            interpretation = "bearish_trend"
+            strength = 100
+
         return IndicatorResult(
-            name="OBV",
-            value=current_value,
+            name="ParabolicSAR",
+            value=current_psar,
             signal_strength=strength,
             interpretation=interpretation
         )
+
+from pandas_ta.momentum import squeeze
+class SqueezeMomentumIndicator(TechnicalIndicator):
+    def __init__(self, length=20, mult=2, length_kc=20, mult_kc=1.5):
+        self.length = length
+        self.mult = mult
+        self.length_kc = length_kc
+        self.mult_kc = mult_kc
+
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        squeeze_df = squeeze(data['high'], data['low'], data['close'], 
+                                bb_length=self.length, bb_std=self.mult, 
+                                kc_length=self.length_kc, kc_scalar=self.mult_kc)
+        if squeeze_df is None or squeeze_df.empty or squeeze_df.iloc[-1].isna().any():
+            return IndicatorResult("SqueezeMomentum", 0, 0, "neutral")
+
+        momentum_val = squeeze_df.iloc[-1, 3] 
+        current_squeeze = squeeze_df.iloc[-1, 0] 
+        
+        interpretation = "neutral"
+        strength = 0
+
+        if current_squeeze == 1:
+            interpretation = "squeeze_on"
+            strength = 50
+        else:
+            if momentum_val > 0:
+                interpretation = "bullish_momentum"
+                strength = min(abs(momentum_val) * 100, 100)
+            else:
+                interpretation = "bearish_momentum"
+                strength = min(abs(momentum_val) * 100, 100)
+
+        return IndicatorResult(
+            name="SqueezeMomentum",
+            value=momentum_val,
+            signal_strength=strength,
+            interpretation=interpretation
+        )
+
+class VWAPIndicator(TechnicalIndicator):
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        vwap_df = vwap(high=data['high'], low=data['low'], close=data['close'], volume=data['volume'])
+        if vwap_df is None or vwap_df.empty or pd.isna(vwap_df.iloc[-1]):
+            return IndicatorResult(name="VWAP", value=0, signal_strength=0, interpretation="neutral")
+        
+        current_vwap = vwap_df.iloc[-1]
+        current_price = data['close'].iloc[-1]
+        
+        interpretation = "price_above_vwap" if current_price > current_vwap else "price_below_vwap"
+        strength = min(abs(current_price - current_vwap) / current_vwap * 100, 100) if current_vwap > 0 else 0
+        
+        return IndicatorResult(name="VWAP", value=current_vwap, signal_strength=strength, interpretation=interpretation)
+
+class MoneyFlowIndexIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 14):
+        self.period = period
+    
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        mfi_series = mfi(high=data['high'], low=data['low'], close=data['close'], volume=data['volume'], length=self.period)
+        if mfi_series is None or mfi_series.empty or pd.isna(mfi_series.iloc[-1]):
+            return IndicatorResult(name="MFI", value=50, signal_strength=0, interpretation="neutral")
+            
+        current_mfi = mfi_series.iloc[-1]
+        
+        if current_mfi > 80:
+            interpretation = "overbought"
+            signal_strength = min((current_mfi - 80) / 20 * 100, 100)
+        elif current_mfi < 20:
+            interpretation = "oversold"
+            signal_strength = min((20 - current_mfi) / 20 * 100, 100)
+        else:
+            interpretation = "neutral"
+            signal_strength = 50
+            
+        return IndicatorResult(name="MFI", value=current_mfi, signal_strength=signal_strength, interpretation=interpretation)
+
+class AroonIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 14):
+        self.period = period
+        
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        aroon_df = aroon(data['high'], data['low'], length=self.period)
+        if aroon_df is None or aroon_df.empty or aroon_df.iloc[-1].isna().any():
+            return IndicatorResult(name="Aroon", value=0, signal_strength=0, interpretation="neutral")
+            
+        aroon_up = aroon_df.iloc[-1, 0]
+        aroon_down = aroon_df.iloc[-1, 1]
+        
+        if aroon_up > 70 and aroon_down < 30:
+            interpretation = "strong_uptrend"
+            strength = aroon_up
+        elif aroon_down > 70 and aroon_up < 30:
+            interpretation = "strong_downtrend"
+            strength = aroon_down
+        else:
+            interpretation = "ranging"
+            strength = 50
+            
+        return IndicatorResult(name="Aroon", value=aroon_up - aroon_down, signal_strength=strength, interpretation=interpretation)
+
+class UltimateOscillatorIndicator(TechnicalIndicator):
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        uo_series = ultimate_oscillator(data['high'], data['low'], data['close'])
+        if uo_series is None or uo_series.empty or pd.isna(uo_series.iloc[-1]):
+            return IndicatorResult(name="UltimateOscillator", value=50, signal_strength=0, interpretation="neutral")
+            
+        current_uo = uo_series.iloc[-1]
+        
+        if current_uo > 70:
+            interpretation = "overbought"
+            strength = min((current_uo - 70) / 30 * 100, 100)
+        elif current_uo < 30:
+            interpretation = "oversold"
+            strength = min((30 - current_uo) / 30 * 100, 100)
+        else:
+            interpretation = "neutral"
+            strength = 50
+            
+        return IndicatorResult(name="UltimateOscillator", value=current_uo, signal_strength=strength, interpretation=interpretation)
+
+class ROCIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 10):
+        self.period = period
+        
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        roc_series = roc(data['close'], length=self.period)
+        if roc_series is None or roc_series.empty or pd.isna(roc_series.iloc[-1]):
+            return IndicatorResult(name="ROC", value=0, signal_strength=0, interpretation="neutral")
+            
+        current_roc = roc_series.iloc[-1]
+        
+        if current_roc > 0:
+            interpretation = "bullish_momentum"
+        else:
+            interpretation = "bearish_momentum"
+            
+        strength = min(abs(current_roc) * 10, 100)
+        
+        return IndicatorResult(name="ROC", value=current_roc, signal_strength=strength, interpretation=interpretation)
+
+class ADLineIndicator(TechnicalIndicator):
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        ad_series = ad(data['high'], data['low'], data['close'], data['volume'])
+        if ad_series is None or ad_series.empty or len(ad_series) < 2:
+            return IndicatorResult(name="AD_Line", value=0, signal_strength=50, interpretation="neutral")
+        
+        if ad_series.iloc[-1] > ad_series.iloc[-2]:
+            interpretation = "accumulation"
+            strength = 100
+        else:
+            interpretation = "distribution"
+            strength = 100
+            
+        return IndicatorResult(name="AD_Line", value=ad_series.iloc[-1], signal_strength=strength, interpretation=interpretation)
+
+class ForceIndexIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 13):
+        self.period = period
+        
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        fi_series = force_index(data['close'], data['volume'], length=self.period)
+        if fi_series is None or fi_series.empty or pd.isna(fi_series.iloc[-1]):
+            return IndicatorResult(name="ForceIndex", value=0, signal_strength=0, interpretation="neutral")
+            
+        current_fi = fi_series.iloc[-1]
+        
+        if current_fi > 0:
+            interpretation = "bull_power"
+        else:
+            interpretation = "bear_power"
+        
+        strength = min(abs(current_fi) / 1_000_000, 100)
+        
+        return IndicatorResult(name="ForceIndex", value=current_fi, signal_strength=strength, interpretation=interpretation)
+
+class VWMAIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 20):
+        self.period = period
+        
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        vwma_series = vwma(data['close'], data['volume'], length=self.period)
+        if vwma_series is None or vwma_series.empty or pd.isna(vwma_series.iloc[-1]):
+            return IndicatorResult(name="VWMA", value=0, signal_strength=0, interpretation="neutral")
+            
+        current_vwma = vwma_series.iloc[-1]
+        current_price = data['close'].iloc[-1]
+        
+        interpretation = "price_above_vwma" if current_price > current_vwma else "price_below_vwma"
+        strength = min(abs(current_price - current_vwma) / current_vwma * 100, 100) if current_vwma > 0 else 0
+        
+        return IndicatorResult(name="VWMA", value=current_vwma, signal_strength=strength, interpretation=interpretation)
+
+class KeltnerChannelsIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 20, atr_period: int = 10):
+        self.period = period
+        self.atr_period = atr_period
+        
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        kc_df = kc(data['high'], data['low'], data['close'], length=self.period, atr_length=self.atr_period)
+        if kc_df is None or kc_df.empty or kc_df.iloc[-1].isna().any():
+            return IndicatorResult(name="KeltnerChannels", value=0.5, signal_strength=0, interpretation="neutral")
+            
+        upper = kc_df.iloc[-1, 1]
+        lower = kc_df.iloc[-1, 0]
+        current_price = data['close'].iloc[-1]
+        
+        if current_price > upper:
+            interpretation = "breakout_above"
+            strength = 100
+        elif current_price < lower:
+            interpretation = "breakdown_below"
+            strength = 100
+        else:
+            interpretation = "in_channel"
+            strength = 50
+            
+        return IndicatorResult(name="KeltnerChannels", value=current_price, signal_strength=strength, interpretation=interpretation)
+
+class DonchianChannelsIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 20):
+        self.period = period
+        
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        dc_df = donchian(data['high'], data['low'], lower_length=self.period, upper_length=self.period)
+        if dc_df is None or dc_df.empty or dc_df.iloc[-1].isna().any():
+            return IndicatorResult(name="DonchianChannels", value=0.5, signal_strength=0, interpretation="neutral")
+            
+        upper = dc_df.iloc[-1, 1]
+        lower = dc_df.iloc[-1, 0]
+        current_price = data['close'].iloc[-1]
+        
+        if current_price >= upper:
+            interpretation = "at_upper_channel"
+            strength = 100
+        elif current_price <= lower:
+            interpretation = "at_lower_channel"
+            strength = 100
+        else:
+            interpretation = "in_channel"
+            strength = 50
+            
+        return IndicatorResult(name="DonchianChannels", value=current_price, signal_strength=strength, interpretation=interpretation)
+
+class TRIXIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 14):
+        self.period = period
+        
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        trix_series = trix(data['close'], length=self.period)
+        if trix_series is None or trix_series.empty or trix_series.iloc[-1].isna().any():
+            return IndicatorResult(name="TRIX", value=0, signal_strength=0, interpretation="neutral")
+            
+        current_trix = trix_series.iloc[-1, 0]
+        
+        if current_trix > 0:
+            interpretation = "bullish"
+        else:
+            interpretation = "bearish"
+        
+        strength = min(abs(current_trix) * 100, 100)
+        
+        return IndicatorResult(name="TRIX", value=current_trix, signal_strength=strength, interpretation=interpretation)
+
+class EaseOfMovementIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 14):
+        self.period = period
+        
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        eom_series = eom(data['high'], data['low'], data['close'], data['volume'], length=self.period)
+        if eom_series is None or eom_series.empty or pd.isna(eom_series.iloc[-1]):
+            return IndicatorResult(name="EOM", value=0, signal_strength=0, interpretation="neutral")
+            
+        current_eom = eom_series.iloc[-1]
+        
+        if current_eom > 0:
+            interpretation = "easy_upward_move"
+            strength = min(current_eom / 1000, 100)
+        else:
+            interpretation = "easy_downward_move"
+            strength = min(abs(current_eom) / 1000, 100)
+            
+        return IndicatorResult(name="EOM", value=current_eom, signal_strength=strength, interpretation=interpretation)
+
+class StandardDeviationIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 20):
+        self.period = period
+        
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        std_dev_series = talib.STDDEV(data['close'], timeperiod=self.period)
+        if std_dev_series.empty or pd.isna(std_dev_series.iloc[-1]):
+            return IndicatorResult(name="StdDev", value=0, signal_strength=0, interpretation="neutral")
+            
+        current_std_dev = std_dev_series.iloc[-1]
+        avg_std_dev = std_dev_series.mean()
+        
+        if current_std_dev > avg_std_dev * 1.5:
+            interpretation = "high_volatility"
+        elif current_std_dev < avg_std_dev * 0.5:
+            interpretation = "low_volatility"
+        else:
+            interpretation = "normal_volatility"
+        
+        strength = min((current_std_dev / data['close'].iloc[-1]) * 100, 100) if data['close'].iloc[-1] > 0 else 0
+            
+        return IndicatorResult(name="StdDev", value=current_std_dev, signal_strength=strength, interpretation=interpretation)
