@@ -1,13 +1,16 @@
+import asyncio
 import logging
 import os
+import platform
 import sys
+import threading
 import traceback
 from datetime import datetime
-from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
-import threading
-import psutil
-import platform
 from functools import wraps
+from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
+
+import psutil
+
 
 class DetailedFormatter(logging.Formatter):
     """فرمتر سفارشی برای نمایش جزئیات بیشتر"""
@@ -256,45 +259,79 @@ class YujTradeLogger:
         return self.perf_logger
     
     def log_function_call(self, func):
-        """دکوریتر برای لاگ کردن فراخوانی توابع"""
         @wraps(func)
-        def wrapper(*args, **kwargs):
+        def _sync_wrapper(*args, **kwargs):
             start_time = datetime.now()
-            func_name = f"{func.__module__}.{func.__qualname__}"  # استفاده از qualname بهتر است
-            
-            # محدود کردن طول args برای جلوگیری از لاگ‌های طولانی
-            safe_args = str(args)[:200] + "..." if len(str(args)) > 200 else str(args)
-            safe_kwargs = str(kwargs)[:200] + "..." if len(str(kwargs)) > 200 else str(kwargs)
-            
-            # لاگ شروع تابع
-            self.logger.debug(f"CALL START: {func_name} with args={safe_args}, kwargs={safe_kwargs}")
-            
+            func_name = f"{func.__module__}.{func.__qualname__}"
+            try:
+                safe_args = str(args)
+                safe_kwargs = str(kwargs)
+            except Exception:
+                safe_args = "args_unserializable"
+                safe_kwargs = "kwargs_unserializable"
             try:
                 result = func(*args, **kwargs)
                 end_time = datetime.now()
                 duration = (end_time - start_time).total_seconds()
-                
-                # لاگ پایان موفق
-                self.logger.debug(f"CALL SUCCESS: {func_name} completed in {duration:.4f}s")
-                
-                # فقط عملکردهای طولانی را در performance لاگ کن
-                if duration > 0.1:  # بیش از 100ms
-                    self.perf_logger.info(f"PERFORMANCE: {func_name} executed in {duration:.4f}s")
-                
+                try:
+                    if self.logger:
+                        self.logger.debug(f"CALL START: {func_name} with args={safe_args}, kwargs={safe_kwargs}")
+                        self.logger.debug(f"CALL SUCCESS: {func_name} completed in {duration:.4f}s")
+                except Exception:
+                    pass
+                try:
+                    if duration > 0.1 and self.perf_logger:
+                        self.perf_logger.info(f"PERFORMANCE: {func_name} executed in {duration:.4f}s")
+                except Exception:
+                    pass
                 return result
-                
             except Exception as e:
                 end_time = datetime.now()
                 duration = (end_time - start_time).total_seconds()
-                
-                # لاگ خطا با جزئیات کامل
-                self.logger.error(
-                    f"CALL ERROR: {func_name} failed after {duration:.4f}s - {str(e)}",
-                    exc_info=True
-                )
+                try:
+                    if self.logger:
+                        self.logger.error(f"CALL ERROR: {func_name} failed after {duration:.4f}s - {str(e)}", exc_info=True)
+                except Exception:
+                    pass
                 raise
-        
-        return wrapper
+        @wraps(func)
+        async def _async_wrapper(*args, **kwargs):
+            start_time = datetime.now()
+            func_name = f"{func.__module__}.{func.__qualname__}"
+            try:
+                safe_args = str(args)
+                safe_kwargs = str(kwargs)
+            except Exception:
+                safe_args = "args_unserializable"
+                safe_kwargs = "kwargs_unserializable"
+            try:
+                result = await func(*args, **kwargs)
+                end_time = datetime.now()
+                duration = (end_time - start_time).total_seconds()
+                try:
+                    if self.logger:
+                        self.logger.debug(f"CALL START: {func_name} with args={safe_args}, kwargs={safe_kwargs}")
+                        self.logger.debug(f"CALL SUCCESS: {func_name} completed in {duration:.4f}s")
+                except Exception:
+                    pass
+                try:
+                    if duration > 0.1 and self.perf_logger:
+                        self.perf_logger.info(f"PERFORMANCE: {func_name} executed in {duration:.4f}s")
+                except Exception:
+                    pass
+                return result
+            except Exception as e:
+                end_time = datetime.now()
+                duration = (end_time - start_time).total_seconds()
+                try:
+                    if self.logger:
+                        self.logger.error(f"CALL ERROR: {func_name} failed after {duration:.4f}s - {str(e)}", exc_info=True)
+                except Exception:
+                    pass
+                raise
+        if asyncio.iscoroutinefunction(func):
+            return _async_wrapper
+        return _sync_wrapper
     
     def log_with_context(self, level, message, **context):
         """لاگ با context اضافی"""
@@ -368,6 +405,7 @@ try:
     yuj_logger = YujTradeLogger()
     logger = yuj_logger.get_logger()
     perf_logger = yuj_logger.get_performance_logger()
+
 except Exception as e:
     print(f"خطا در ایجاد logger سراسری: {e}")
     # ایجاد logger ساده در صورت خطا

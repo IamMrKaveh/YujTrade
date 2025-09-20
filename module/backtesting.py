@@ -1,9 +1,12 @@
+from datetime import datetime, timedelta
+from typing import Any, Dict
 
-
-from datetime import datetime
-from typing import Any, Dict, List
-
+import numpy as np
 import pandas as pd
+import ta
+
+from module.core import Portfolio, TradingSignal
+
 
 class BacktestingEngine:
     def __init__(self, trading_service):
@@ -25,7 +28,7 @@ class BacktestingEngine:
         
         self.portfolio = Portfolio(initial_capital, commission_rate)
         
-        signals = await self._generate_signals(data)
+        signals = await self._generate_signals(data, symbol, timeframe)
         
         for i, (timestamp, row) in enumerate(data.iterrows()):
             current_prices = {
@@ -53,17 +56,21 @@ class BacktestingEngine:
         
         return self._calculate_performance_metrics()
     
-    async def _generate_signals(self, data: pd.DataFrame) -> Dict[datetime, Dict[str, Any]]:
+    async def _generate_signals(self, data: pd.DataFrame, symbol: str, timeframe: str) -> Dict[datetime, Dict[str, Any]]:
         signals = {}
         
         if hasattr(self.trading_service, 'signal_generator'):
             try:
-                raw_signals = await self.trading_service.signal_generator.generate_signals(data)
+                raw_signals = await self.trading_service.signal_generator.generate_signals(data, symbol, timeframe)
                 
                 for signal in raw_signals:
-                    if isinstance(signal, dict) and 'timestamp' in signal:
-                        timestamp = pd.to_datetime(signal['timestamp'])
-                        signals[timestamp] = signal
+                    if hasattr(signal, 'timestamp'):
+                        timestamp = pd.to_datetime(signal.timestamp)
+                        signals[timestamp] = {
+                            'action': signal.signal_type.value,
+                            'stop_loss': signal.stop_loss,
+                            'take_profit': signal.exit_price
+                        }
                         
             except Exception as e:
                 print(f"Error generating signals: {e}")
@@ -114,7 +121,7 @@ class BacktestingEngine:
         
         if self.portfolio.equity_curve:
             equity_values = [e['equity'] for e in self.portfolio.equity_curve]
-            returns = np.diff(equity_values) / equity_values[:-1]
+            returns = pd.Series(equity_values).pct_change().dropna()
             
             sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) != 0 else 0
             
@@ -122,8 +129,8 @@ class BacktestingEngine:
             downside_std = np.std(negative_returns) if len(negative_returns) > 0 else np.std(returns)
             sortino_ratio = np.mean(returns) / downside_std * np.sqrt(252) if downside_std != 0 else 0
             
-            peak = np.maximum.accumulate(equity_values)
-            drawdown = (np.array(equity_values) - peak) / peak
+            peak = pd.Series(equity_values).cummax()
+            drawdown = (pd.Series(equity_values) - peak) / peak
             max_drawdown = np.min(drawdown) * 100
             
             total_return = (equity_values[-1] - self.portfolio.initial_capital) / self.portfolio.initial_capital * 100
@@ -191,138 +198,170 @@ class BacktestingEngine:
         
         return self._calculate_performance_metrics()
 
-class Trade:
-    def __init__(self, entry_time: datetime, entry_price: float, quantity: float, 
-                    trade_type: str, stop_loss: float = None, take_profit: float = None):
-        self.entry_time = entry_time
-        self.entry_price = entry_price
-        self.quantity = quantity
-        self.trade_type = trade_type
-        self.stop_loss = stop_loss
-        self.take_profit = take_profit
-        self.exit_time = None
-        self.exit_price = None
-        self.pnl = 0.0
-        self.commission = 0.0
-        self.status = "open"
-
-    def close_trade(self, exit_time: datetime, exit_price: float, commission_rate: float = 0.001):
-        self.exit_time = exit_time
-        self.exit_price = exit_price
-        self.status = "closed"
+class WalkForwardOptimizer:
+    def __init__(self, trading_service):
+        self.trading_service = trading_service
+        self.best_params = None
+        self.performance_history = []
+    
+    async def optimize_parameters(self, train_data):
+        param_combinations = [
+            {'rsi_period': 14, 'rsi_oversold': 30, 'rsi_overbought': 70},
+            {'rsi_period': 21, 'rsi_oversold': 25, 'rsi_overbought': 75},
+            {'rsi_period': 14, 'rsi_oversold': 35, 'rsi_overbought': 65},
+            {'rsi_period': 28, 'rsi_oversold': 20, 'rsi_overbought': 80}
+        ]
         
-        if self.trade_type == "long":
-            gross_pnl = (exit_price - self.entry_price) * self.quantity
-        else:
-            gross_pnl = (self.entry_price - exit_price) * self.quantity
+        best_params = None
+        best_score = -float('inf')
+        
+        for params in param_combinations:
+            try:
+                signals = self.generate_signals_with_params(train_data, params)
+                if len(signals) > 0:
+                    score = self.calculate_parameter_score(train_data, signals)
+                    if score > best_score:
+                        best_score = score
+                        best_params = params
+            except Exception:
+                continue
+        
+        return best_params or param_combinations[0]
+    
+    def generate_signals_with_params(self, data, params):
+        rsi = ta.momentum.RSIIndicator(data['close'], window=params['rsi_period']).rsi()
+        signals = []
+        
+        for i in range(1, len(data)):
+            if rsi.iloc[i-1] <= params['rsi_oversold'] and rsi.iloc[i] > params['rsi_oversold']:
+                signals.append({'timestamp': data.index[i], 'action': 'buy', 'price': data['close'].iloc[i]})
+            elif rsi.iloc[i-1] >= params['rsi_overbought'] and rsi.iloc[i] < params['rsi_overbought']:
+                signals.append({'timestamp': data.index[i], 'action': 'sell', 'price': data['close'].iloc[i]})
+        
+        return signals
+    
+    def calculate_parameter_score(self, data, signals):
+        if len(signals) < 2:
+            return -1
+        
+        returns = []
+        position = 0
+        entry_price = 0
+        
+        for signal in signals:
+            if signal['action'] == 'buy' and position == 0:
+                position = 1
+                entry_price = signal['price']
+            elif signal['action'] == 'sell' and position == 1:
+                ret = (signal['price'] - entry_price) / entry_price
+                returns.append(ret)
+                position = 0
+        
+        if not returns:
+            return -1
+        
+        avg_return = sum(returns) / len(returns)
+        return avg_return * len(returns)
+    
+    async def run(self, symbol: str, timeframe: str, lookback_days: int, test_days: int):
+        end = datetime.now()
+        start = end - timedelta(days=lookback_days + test_days * 5)
+        df = await self.trading_service.exchange_manager.fetch_ohlcv_data(symbol, timeframe, limit=2000)
+        
+        if df.empty:
+            return {}
+        
+        df = df.set_index('timestamp').sort_index()
+        results = []
+        window = timedelta(days=lookback_days)
+        step = timedelta(days=test_days)
+        current_start = df.index[0]
+        
+        while current_start + window + step <= df.index[-1]:
+            train_data = df[current_start:current_start + window]
+            test_data = df[current_start + window:current_start + window + step]
             
-        self.commission = (self.entry_price + exit_price) * self.quantity * commission_rate
-        self.pnl = gross_pnl - self.commission
+            if len(train_data) < 50 or len(test_data) < 10:
+                current_start = current_start + step
+                continue
+            
+            optimized_params = await self.optimize_parameters(train_data)
+            
+            backtest_result = await self.trading_service.backtesting_engine.run_backtest_with_params(
+                test_data, optimized_params
+            )
+            
+            period_result = {
+                'train_start': current_start,
+                'train_end': current_start + window,
+                'test_start': current_start + window,
+                'test_end': current_start + window + step,
+                'params': optimized_params,
+                'performance': backtest_result
+            }
+            
+            results.append(period_result)
+            self.performance_history.append(backtest_result)
+            current_start = current_start + step
+        
+        self.best_params = self.select_best_params(results)
+        return {
+            'periods': results,
+            'best_params': self.best_params,
+            'avg_performance': self.calculate_average_performance()
+        }
+    
+    def select_best_params(self, results):
+        if not results:
+            return None
+        
+        param_scores = {}
+        for result in results:
+            param_key = str(sorted(result['params'].items()))
+            if param_key not in param_scores:
+                param_scores[param_key] = {'params': result['params'], 'scores': []}
+            
+            sharpe = result['performance'].get('sharpe_ratio', 0)
+            param_scores[param_key]['scores'].append(sharpe)
+        
+        best_param_key = None
+        best_avg_score = -float('inf')
+        
+        for param_key, data in param_scores.items():
+            avg_score = sum(data['scores']) / len(data['scores'])
+            if avg_score > best_avg_score:
+                best_avg_score = avg_score
+                best_param_key = param_key
+        
+        return param_scores[best_param_key]['params'] if best_param_key else None
+    
+    def calculate_average_performance(self):
+        if not self.performance_history:
+            return {}
+        
+        avg_metrics = {}
+        for metric in ['sharpe_ratio', 'sortino_ratio', 'max_drawdown']:
+            values = [p.get(metric, 0) for p in self.performance_history if p.get(metric) is not None]
+            avg_metrics[metric] = sum(values) / len(values) if values else 0
+        
+        return avg_metrics
 
-class Portfolio:
-    def __init__(self, initial_capital: float, commission_rate: float = 0.001):
-        self.initial_capital = initial_capital
-        self.capital = initial_capital
-        self.commission_rate = commission_rate
-        self.open_trades: List[Trade] = []
-        self.closed_trades: List[Trade] = []
-        self.equity_curve = []
+class PaperTradingSimulator:
+    def __init__(self, initial_balance: float):
+        self.balance = initial_balance
+        self.positions = {}
         self.trade_history = []
-
-    def open_trade(self, timestamp: datetime, price: float, signal: Dict[str, Any]) -> bool:
-        if len(self.open_trades) > 0:
-            return False
-            
-        trade_type = "long" if signal['action'] == 'buy' else "short"
-        risk_amount = self.capital * signal.get('risk_percent', 0.02)
-        
-        if signal.get('stop_loss'):
-            if trade_type == "long":
-                risk_per_share = abs(price - signal['stop_loss'])
-            else:
-                risk_per_share = abs(signal['stop_loss'] - price)
-            
-            if risk_per_share > 0:
-                quantity = risk_amount / risk_per_share
-            else:
-                quantity = self.capital * 0.1 / price
-        else:
-            quantity = self.capital * 0.1 / price
-
-        if quantity * price > self.capital * 0.95:
-            return False
-
-        trade = Trade(
-            entry_time=timestamp,
-            entry_price=price,
-            quantity=quantity,
-            trade_type=trade_type,
-            stop_loss=signal.get('stop_loss'),
-            take_profit=signal.get('take_profit')
-        )
-        
-        self.open_trades.append(trade)
-        return True
-
-    def close_trade(self, timestamp: datetime, price: float, trade_idx: int = 0) -> bool:
-        if not self.open_trades:
-            return False
-            
-        trade = self.open_trades.pop(trade_idx)
-        trade.close_trade(timestamp, price, self.commission_rate)
-        
-        self.capital += trade.pnl
-        self.closed_trades.append(trade)
-        
-        self.trade_history.append({
-            'entry_time': trade.entry_time,
-            'exit_time': trade.exit_time,
-            'entry_price': trade.entry_price,
-            'exit_price': trade.exit_price,
-            'quantity': trade.quantity,
-            'type': trade.trade_type,
-            'pnl': trade.pnl,
-            'commission': trade.commission,
-            'return_pct': (trade.pnl / (trade.entry_price * trade.quantity)) * 100
-        })
-        
-        return True
-
-    def update_equity(self, timestamp: datetime, current_prices: Dict[str, float]):
-        unrealized_pnl = 0
-        for trade in self.open_trades:
-            current_price = current_prices.get('close', trade.entry_price)
-            if trade.trade_type == "long":
-                unrealized_pnl += (current_price - trade.entry_price) * trade.quantity
-            else:
-                unrealized_pnl += (trade.entry_price - current_price) * trade.quantity
-        
-        total_equity = self.capital + unrealized_pnl
-        self.equity_curve.append({
-            'timestamp': timestamp,
-            'equity': total_equity,
-            'cash': self.capital,
-            'unrealized_pnl': unrealized_pnl
-        })
-
-    def check_stop_loss_take_profit(self, timestamp: datetime, current_price: float) -> List[int]:
-        trades_to_close = []
-        
-        for i, trade in enumerate(self.open_trades):
-            should_close = False
-            
-            if trade.trade_type == "long":
-                if trade.stop_loss and current_price <= trade.stop_loss:
-                    should_close = True
-                elif trade.take_profit and current_price >= trade.take_profit:
-                    should_close = True
-            else:
-                if trade.stop_loss and current_price >= trade.stop_loss:
-                    should_close = True
-                elif trade.take_profit and current_price <= trade.take_profit:
-                    should_close = True
-            
-            if should_close:
-                trades_to_close.append(i)
-        
-        return trades_to_close
+    
+    def simulate_trade(self, signal: TradingSignal):
+        if signal.signal_type == "BUY":
+            self.positions[signal.symbol] = self.balance / signal.entry_price if signal.entry_price else 0
+            self.balance = 0
+        elif signal.signal_type == "SELL" and signal.symbol in self.positions:
+            self.balance = self.positions[signal.symbol] * signal.exit_price
+            del self.positions[signal.symbol]
+        self.trade_history.append(signal)
+    
+    def get_performance(self) -> Dict[str, float]:
+        total_trades = len(self.trade_history)
+        profit_loss = self.balance - 0
+        return {"total_trades": total_trades, "final_balance": self.balance, "profit_loss": profit_loss}

@@ -1,66 +1,54 @@
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 import pickle
 import threading
 import warnings
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Dict, Optional
+
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
-
 import tensorflow as tf
-from tensorflow.keras.models import Sequential # type: ignore
-from tensorflow.keras.optimizers import Adam # type: ignore
-from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization # type: ignore
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau # type: ignore
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.layers import (LSTM, BatchNormalization, Dense, Dropout)
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.optimizers import Adam
+
+from module.logger_config import logger
 
 tf.get_logger().setLevel('ERROR')
 tf.config.set_visible_devices([], 'GPU')
 
 class LSTMModel:
-    def __init__(self, input_shape=(60, 15), units=64, lr=0.001, model_path='lstm-model', symbol=None):
+    def __init__(self, input_shape=(60, 15), units=64, lr=0.001, model_path='lstm-model', symbol=None, timeframe=None):
         self.model = None
         self.input_shape = input_shape
         self.trained = False
         self.scaler = MinMaxScaler()
         self.is_fitted = False
         self.symbol = symbol
+        self.timeframe = timeframe
         self.model_path = Path(model_path)
         self.model_path.mkdir(exist_ok=True)
-        self.executor = None
-        self._lock = threading.Lock()
-        self.logger = None
+        self.logger = logger
         self._setup_gpu()
         self._load_or_create_model(units, lr)
         
     def __del__(self):
-        self._cleanup_safely()
-
-    def _cleanup_safely(self):
-        try:
-            with self._lock:
-                if hasattr(self, 'executor') and self.executor and not getattr(self.executor, '_shutdown', True):
-                    try:
-                        self.executor.shutdown(wait=True, cancel_futures=True)
-                    except:
-                        pass
-                    finally:
-                        self.executor = None
-                
-                if hasattr(self, 'model') and self.model:
-                    try:
-                        del self.model
-                        self.model = None
-                        tf.keras.backend.clear_session()
-                        import gc
-                        gc.collect()
-                    except:
-                        pass
-        except:
-            pass
+        self.clear_cache()
 
     def clear_cache(self):
-        self._cleanup_safely()
+        try:
+            if hasattr(self, 'model') and self.model:
+                del self.model
+                self.model = None
+                tf.keras.backend.clear_session()
+                import gc
+                gc.collect()
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Error during model cleanup: {e}")
 
     def _setup_gpu(self):
         try:
@@ -74,11 +62,21 @@ class LSTMModel:
         except Exception:
             pass
 
+    def _get_model_paths(self):
+        if self.symbol and self.timeframe:
+            model_suffix = f"_{self.symbol.lower().replace('/', '')}-{self.timeframe}"
+        elif self.symbol:
+            model_suffix = f"_{self.symbol.lower().replace('/', '')}"
+        else:
+            model_suffix = ""
+            
+        model_file = self.model_path / f"model{model_suffix}.keras"
+        scaler_file = self.model_path / f"scaler{model_suffix}.pkl"
+        return model_file, scaler_file
+
     def _load_or_create_model(self, units, lr):
         try:
-            symbol_suffix = f"_{self.symbol.lower()}" if self.symbol else ""
-            model_file = self.model_path / f"model{symbol_suffix}.keras"
-            scaler_file = self.model_path / f"scaler{symbol_suffix}.pkl"
+            model_file, scaler_file = self._get_model_paths()
             
             if model_file.exists() and scaler_file.exists():
                 try:
@@ -94,10 +92,12 @@ class LSTMModel:
                     
                     self.trained = True
                     self.is_fitted = True
+                    if self.logger:
+                        self.logger.info(f"Loaded existing model and scaler from {model_file}")
                     return
                 except Exception as e:
                     if self.logger:
-                        self.logger.warning(f"Failed to load model: {e}")
+                        self.logger.warning(f"Failed to load model {model_file}: {e}. Creating a new one.")
                     if self.model:
                         try:
                             del self.model
@@ -131,31 +131,19 @@ class LSTMModel:
                 ])
                 optimizer = Adam(learning_rate=lr, clipnorm=1.0)
                 self.model.compile(optimizer=optimizer, loss='huber', metrics=['mae'])
-        except Exception:
+                if self.logger:
+                    self.logger.info("Created a new LSTM model instance.")
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to create LSTM model: {e}")
             self.model = None
-
-    def _get_executor(self):
-        with self._lock:
-            if self.executor is None or getattr(self.executor, '_shutdown', True):
-                self.executor = ThreadPoolExecutor(max_workers=2)
-            return self.executor
-
-    async def _run_in_executor(self, func, *args, **kwargs):
-        try:
-            loop = asyncio.get_event_loop()
-            executor = self._get_executor()
-            return await loop.run_in_executor(executor, lambda: func(*args, **kwargs))
-        except Exception:
-            return None
 
     def save_model(self):
         try:
             if not self.model or not hasattr(self, 'scaler'):
                 return False
-                
-            symbol_suffix = f"_{self.symbol.lower()}" if self.symbol else ""
-            model_file = self.model_path / f"model{symbol_suffix}.keras"
-            scaler_file = self.model_path / f"scaler{symbol_suffix}.pkl"
+            
+            model_file, scaler_file = self._get_model_paths()
             
             if self.model and self.trained:
                 with warnings.catch_warnings():
@@ -166,6 +154,8 @@ class LSTMModel:
                 import joblib
                 joblib.dump(self.scaler, str(scaler_file))
             
+            if self.logger:
+                self.logger.info(f"Saved model to {model_file} and scaler to {scaler_file}")
             return True
         except Exception as e:
             if self.logger:
@@ -176,42 +166,57 @@ class LSTMModel:
         if len(data) < 50:
             return pd.DataFrame()
         
-        features_df = pd.DataFrame()
+        df = data.copy()
+        features_df = pd.DataFrame(index=df.index)
         
-        features_df['close_norm'] = (data['close'].rolling(20).apply(lambda x: (x.iloc[-1] - x.mean()) / x.std() if x.std() > 0 else 0))
-        features_df['volume_norm'] = (data['volume'].rolling(20).apply(lambda x: (x.iloc[-1] - x.mean()) / x.std() if x.std() > 0 else 0))
-        features_df['high_low_ratio'] = (data['high'] - data['low']) / data['close']
-        features_df['close_open_ratio'] = (data['close'] - data['open']) / data['open']
+        features_df['close_norm'] = (df['close'].rolling(20).apply(lambda x: (x.iloc[-1] - x.mean()) / x.std() if x.std() > 0 else 0, raw=False))
+        features_df['volume_norm'] = (df['volume'].rolling(20).apply(lambda x: (x.iloc[-1] - x.mean()) / x.std() if x.std() > 0 else 0, raw=False))
+        features_df['high_low_ratio'] = (df['high'] - df['low']) / df['close']
+        features_df['close_open_ratio'] = (df['close'] - df['open']) / df['open']
         
         try:
             import pandas_ta as ta
-            features_df['rsi'] = ta.rsi(data['close'], length=14).fillna(50) / 100.0
-            macd_line = ta.macd(data['close'])['MACD_12_26_9'].fillna(0)
-            features_df['macd'] = np.tanh(macd_line / data['close'])
-            bb = ta.bbands(data['close'], length=20)
-            features_df['bb_position'] = ((data['close'] - bb['BBL_20_2.0']) / (bb['BBU_20_2.0'] - bb['BBL_20_2.0'])).fillna(0.5)
-            features_df['stoch'] = ta.stoch(data['high'], data['low'], data['close'])['STOCHk_14_3_3'].fillna(50) / 100.0
-            atr = ta.atr(data['high'], data['low'], data['close'], length=14)
-            features_df['atr'] = (atr / data['close']).fillna(0.02)
-        except:
+            features_df['rsi'] = ta.rsi(df['close'], length=14).fillna(50) / 100.0
+            macd = ta.macd(df['close'])
+            if macd is not None and not macd.empty:
+                macd_line = macd.iloc[:, 0].fillna(0)
+                features_df['macd'] = np.tanh(macd_line / df['close'])
+            else:
+                features_df['macd'] = 0.0
+
+            bb = ta.bbands(df['close'], length=20)
+            if bb is not None and not bb.empty:
+                features_df['bb_position'] = ((df['close'] - bb.iloc[:, 0]) / (bb.iloc[:, 2] - bb.iloc[:, 0])).fillna(0.5)
+            else:
+                features_df['bb_position'] = 0.5
+            
+            stoch = ta.stoch(df['high'], df['low'], df['close'])
+            if stoch is not None and not stoch.empty:
+                features_df['stoch'] = stoch.iloc[:, 0].fillna(50) / 100.0
+            else:
+                features_df['stoch'] = 0.5
+
+            atr = ta.atr(df['high'], df['low'], df['close'], length=14)
+            features_df['atr'] = (atr / df['close']).fillna(0.02)
+        except Exception:
             features_df['rsi'] = 0.5
             features_df['macd'] = 0
             features_df['bb_position'] = 0.5
             features_df['stoch'] = 0.5
             features_df['atr'] = 0.02
         
-        features_df['sma_5'] = data['close'].rolling(5).mean() / data['close']
-        features_df['sma_20'] = data['close'].rolling(20).mean() / data['close']
-        features_df['ema_12'] = data['close'].ewm(span=12).mean() / data['close']
-        features_df['ema_26'] = data['close'].ewm(span=26).mean() / data['close']
+        features_df['sma_5'] = df['close'].rolling(5).mean() / df['close']
+        features_df['sma_20'] = df['close'].rolling(20).mean() / df['close']
+        features_df['ema_12'] = df['close'].ewm(span=12).mean() / df['close']
+        features_df['ema_26'] = df['close'].ewm(span=26).mean() / df['close']
         
-        features_df['price_change_1'] = data['close'].pct_change(1)
-        features_df['price_change_5'] = data['close'].pct_change(5)
-        features_df['volume_change'] = data['volume'].pct_change(1)
+        features_df['price_change_1'] = df['close'].pct_change(1)
+        features_df['price_change_5'] = df['close'].pct_change(5)
+        features_df['volume_change'] = df['volume'].pct_change(1)
         
-        if hasattr(data.index, 'hour') and hasattr(data.index, 'dayofweek'):
-            features_df['hour_sin'] = np.sin(2 * np.pi * data.index.hour / 24)
-            features_df['day_sin'] = np.sin(2 * np.pi * data.index.dayofweek / 7)
+        if hasattr(df.index, 'hour') and hasattr(df.index, 'dayofweek'):
+            features_df['hour_sin'] = np.sin(2 * np.pi * df.index.hour / 24)
+            features_df['day_sin'] = np.sin(2 * np.pi * df.index.dayofweek / 7)
         else:
             features_df['hour_sin'] = 0
             features_df['day_sin'] = 0
@@ -228,7 +233,7 @@ class LSTMModel:
             features_df[col] = np.clip(features_df[col], -3, 3)
         
         return features_df.iloc[:, :self.input_shape[1]]
-
+    
     def _validate_dataframe(self, data):
         required_columns = ['close', 'open', 'high', 'low', 'volume']
         missing_columns = [col for col in required_columns if col not in data.columns]
@@ -444,20 +449,78 @@ class LSTMModel:
                 self.logger.error(f"Error in predict: {e}")
             return None
 
-    async def fit_async(self, data, epochs=15, batch_size=32, verbose=0, validation_split=0.2):
-        try:
-            return await self._run_in_executor(self.fit, data, epochs, batch_size, verbose, validation_split)
-        except Exception:
-            return False
-
-    async def predict_async(self, data):
-        try:
-            return await self._run_in_executor(self.predict, data)
-        except Exception:
-            return None
-
     def is_ready(self):
         return (self.model is not None and 
                 self.trained and 
                 self.is_fitted and 
                 hasattr(self.scaler, 'scale_'))
+
+class LSTMModelManager:
+    def __init__(self, model_path: str = 'lstm-model', input_shape=(60, 15), units=50, lr=0.001):
+        self.model_path = Path(model_path)
+        self.input_shape = input_shape
+        self.units = units
+        self.lr = lr
+        self._cache: Dict[str, LSTMModel] = {}
+        self._lock = threading.Lock()
+        self.executor: Optional[ThreadPoolExecutor] = None
+        self.logger = logger
+
+    def _get_executor(self) -> ThreadPoolExecutor:
+        with self._lock:
+            if self.executor is None or getattr(self.executor, '_shutdown', True):
+                self.executor = ThreadPoolExecutor(max_workers=2)
+            return self.executor
+
+    async def _run_in_executor(self, func, *args, **kwargs):
+        try:
+            loop = asyncio.get_running_loop()
+            executor = self._get_executor()
+            return await loop.run_in_executor(executor, lambda: func(*args, **kwargs))
+        except Exception as e:
+            self.logger.error(f"Error running function in executor: {e}")
+            return None
+
+    def get_model(self, symbol: str, timeframe: str) -> Optional[LSTMModel]:
+        key = f"{symbol}-{timeframe}"
+        with self._lock:
+            if key in self._cache:
+                return self._cache[key]
+        
+        try:
+            self.logger.info(f"Loading/creating model for {key}...")
+            model = LSTMModel(
+                symbol=symbol,
+                timeframe=timeframe,
+                model_path=self.model_path,
+                input_shape=self.input_shape,
+                units=self.units,
+                lr=self.lr
+            )
+            if model.is_ready():
+                with self._lock:
+                    self._cache[key] = model
+                return model
+            else:
+                self.logger.warning(f"Model for {key} is not ready (likely not trained).")
+                return None
+        except Exception as e:
+            self.logger.error(f"Failed to get model for {key}: {e}")
+            return None
+
+    async def predict_async(self, symbol: str, timeframe: str, data: pd.DataFrame):
+        model = self.get_model(symbol, timeframe)
+        if model and model.is_ready():
+            return await self._run_in_executor(model.predict, data)
+        return None
+
+    def cleanup(self):
+        self.logger.info("Cleaning up LSTMModelManager...")
+        with self._lock:
+            for model in self._cache.values():
+                model.clear_cache()
+            self._cache.clear()
+            if self.executor and not getattr(self.executor, '_shutdown', True):
+                self.executor.shutdown(wait=True, cancel_futures=True)
+                self.executor = None
+        self.logger.info("LSTMModelManager cleanup complete.")

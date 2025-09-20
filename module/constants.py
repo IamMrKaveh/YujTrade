@@ -1,5 +1,6 @@
 import os
-from logger_config import logger
+
+from module.logger_config import logger
 
 TIME_FRAMES = [
     "1m",
@@ -45,23 +46,30 @@ MULTI_TF_CONFIRMATION_WEIGHTS = {
 
 def load_symbols():
     try:
-        if not os.path.exists('symbols.txt'):
+        path = 'symbols.txt'
+        if not os.path.exists(path):
             logger.error("symbols.txt file not found")
             return []
-            
-        with open('symbols.txt', 'r', encoding='utf-8') as f:
-            symbols = [line.strip().upper() for line in f.readlines() if line.strip()]
-        
-        symbols = list(set(symbols))
-        
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = [line.rstrip('\n\r') for line in f]
+        seen = set()
+        symbols = []
+        for line in lines:
+            s = line.strip()
+            if not s:
+                continue
+            s = s.upper()
+            if s not in seen:
+                seen.add(s)
+                symbols.append(s)
         if not symbols:
             logger.warning("No symbols found in symbols.txt")
             return []
-            
         logger.info(f"Loaded {len(symbols)} symbols from symbols.txt")
         return symbols
     except Exception as e:
         logger.error(f"Error loading symbols: {e}")
         return []
+
 
 SYMBOLS = load_symbols()

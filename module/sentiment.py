@@ -1,44 +1,21 @@
-import aiosqlite
 import asyncio
 import time
-import aiohttp
-
-from ast import Dict
-from datetime import datetime, timedelta
-from typing import Any, List, Optional
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+
+import aiohttp
+import aiosqlite
+import ccxt.async_support as ccxt
 import numpy as np
+import pandas as pd
 from web3 import Web3
 
-import ccxt.async_support as ccxt
-import pandas as pd
+from module.config import Config
+from module.logger_config import logger
+from module.utils import RateLimiter, async_retry
 
-from config import Config
-from logger_config import logger
-
-class RateLimiter:
-    def __init__(self, max_requests: int, time_window: int):
-        self.max_requests = max_requests
-        self.time_window = time_window
-        self.requests: Dict[str, list] = {}
-        self._lock = asyncio.Lock()
-    
-    async def wait_if_needed(self, endpoint: str):
-        async with self._lock:
-            now = time.time()
-            reqs = self.requests.setdefault(endpoint, [])
-            reqs = [t for t in reqs if now - t < self.time_window]
-            if len(reqs) >= self.max_requests:
-                sleep_time = self.time_window - (now - reqs[0])
-                if sleep_time > 0:
-                    await asyncio.sleep(sleep_time)
-                    reqs.clear()
-            reqs.append(now)
-            self.requests[endpoint] = reqs
-        
 rate_limiter = RateLimiter(max_requests=10, time_window=60)
-
-#===================================================================================#
 
 class SentimentFetcher:
     def __init__(self, cryptopanic_key: str):
@@ -112,8 +89,8 @@ class SentimentFetcher:
         return score
 
 class OnChainFetcher:
-    def __init__(self, alchemy_url: str = None, glassnode_api_key: str = None, 
-                coinmetrics_api_key: str = None, dune_api_key: str = None):
+    def __init__(self, alchemy_url: str = "", glassnode_api_key: str = "", 
+                coinmetrics_api_key: str = "", dune_api_key: str = ""):
         self.alchemy_url = alchemy_url
         self.glassnode_api_key = glassnode_api_key
         self.coinmetrics_api_key = coinmetrics_api_key
@@ -157,7 +134,7 @@ class OnChainFetcher:
             await asyncio.sleep(self.glassnode_rate_limit - time_since_last_call)
         self.last_glassnode_call = time.time()
 
-    async def _glassnode_request(self, endpoint: str, params: Dict = None) -> Optional[Dict]:
+    async def _glassnode_request(self, endpoint: str, params: Dict = {}) -> Optional[Dict]:
         if not self.glassnode_api_key:
             logger.warning("Glassnode API key not provided")
             return None
@@ -592,64 +569,61 @@ class ExchangeManager:
                         
                 if rows:
                     await db.executemany(
-                        "INSERT OR IGNORE INTO ohlcv VALUES (?,?,?,?,?,?,?,?)", rows
+                        "INSERT OR REPLACE INTO ohlcv VALUES (?,?,?,?,?,?,?,?)", rows
                     )
         except Exception as e:
             logger.error(f"Database save error: {e}")
-                
+    
+    @async_retry(attempts=3, delay=5, exceptions=(ccxt.NetworkError, ccxt.RequestTimeout, asyncio.TimeoutError))
     async def fetch_ohlcv_data(self, symbol: str, timeframe: str, limit: int = 1000) -> pd.DataFrame:
-        if self._closed:
-            return pd.DataFrame()
-            
-        if not symbol or not timeframe or limit <= 0:
-            return pd.DataFrame()
-            
-        cache_key = (symbol, timeframe)
-        now = datetime.now().timestamp()
-        expiry = 300
-        
-        if cache_key in self.ohlcv_cache:
-            cached_time, cached_df = self.ohlcv_cache[cache_key]
-            if now - cached_time < expiry and not cached_df.empty:
-                return cached_df.copy()
+        if self._closed: return pd.DataFrame()
+        if not symbol or not timeframe or limit <= 0: return pd.DataFrame()
 
-        logger.info(f"Fetching OHLCV data for {symbol} on {timeframe} (limit: {limit})")
+        since = None
+        db_data = pd.DataFrame()
+
+        try:
+            async with self._get_db_connection() as db:
+                cursor = await db.execute(
+                    "SELECT * FROM ohlcv WHERE symbol = ? AND timeframe = ? ORDER BY timestamp DESC",
+                    (symbol, timeframe)
+                )
+                rows = await cursor.fetchall()
+                if rows:
+                    db_data = pd.DataFrame(rows, columns=['symbol', 'timeframe', 'timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    db_data['timestamp'] = pd.to_datetime(db_data['timestamp'], unit='ms', utc=True)
+                    latest_timestamp = db_data['timestamp'].max()
+                    since = int(latest_timestamp.timestamp() * 1000)
+                    logger.debug(f"Found {len(db_data)} records for {symbol}/{timeframe} in DB. Fetching new data since {latest_timestamp}.")
+        except Exception as e:
+            logger.error(f"DB read error for {symbol}/{timeframe}: {e}")
+
+        logger.debug(f"Fetching OHLCV data for {symbol} on {timeframe} (limit: {limit})")
         
         try:
             await rate_limiter.wait_if_needed(f"ohlcv_{symbol}")
             
+            ohlcv = None
             async with self.get_exchange() as exchange:
-                max_retries = 3
-                ohlcv = None
-                
-                for attempt in range(max_retries):
-                    try:
-                        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-                        if ohlcv:
-                            break
-                    except ccxt.NetworkError as ne:
-                        logger.warning(f"Network error for {symbol} (attempt {attempt+1}): {ne}")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(5)
-                        else:
-                            raise
-                    except ccxt.ExchangeError as ee:
-                        logger.error(f"Exchange error for {symbol}: {ee}")
-                        return pd.DataFrame()
+                try:
+                    ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit, since=since)
+                except ccxt.ExchangeError as ee:
+                    logger.error(f"Exchange error for {symbol}: {ee}")
+                    return db_data
 
             if not ohlcv:
-                logger.warning(f"No OHLCV data received for {symbol} on {timeframe}")
-                return pd.DataFrame()
+                logger.debug(f"No new OHLCV data received for {symbol} on {timeframe}. Using DB data.")
+                return db_data.sort_values('timestamp').reset_index(drop=True)
 
             df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
             
             if df.empty:
-                return pd.DataFrame()
+                return db_data.sort_values('timestamp').reset_index(drop=True)
                 
             df = df.dropna()
             if df.empty:
-                logger.warning(f"All data invalid after cleaning for {symbol}")
-                return pd.DataFrame()
+                logger.warning(f"All new data invalid after cleaning for {symbol}")
+                return db_data.sort_values('timestamp').reset_index(drop=True)
 
             try:
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
@@ -661,8 +635,8 @@ class ExchangeManager:
                 df = df.dropna(subset=numeric_columns)
                 
                 if df.empty:
-                    logger.warning(f"No valid numeric data for {symbol}")
-                    return pd.DataFrame()
+                    logger.warning(f"No valid numeric new data for {symbol}")
+                    return db_data.sort_values('timestamp').reset_index(drop=True)
 
                 invalid_mask = (
                     (df[numeric_columns] <= 0).any(axis=1) |
@@ -677,24 +651,23 @@ class ExchangeManager:
                 df = df[~invalid_mask]
                 
                 if df.empty:
-                    logger.warning(f"No valid data after validation for {symbol}")
-                    return pd.DataFrame()
+                    logger.warning(f"No valid new data after validation for {symbol}")
+                    return db_data.sort_values('timestamp').reset_index(drop=True)
 
                 for col in numeric_columns:
                     df[col] = df[col].astype('float32')
 
-                df_sorted = df.sort_values('timestamp').reset_index(drop=True)
-                
                 if not self._closed:
-                    await self._save_ohlcv_to_db(df_sorted, symbol, timeframe)
-                    self.ohlcv_cache[cache_key] = (now, df_sorted.copy())
+                    await self._save_ohlcv_to_db(df, symbol, timeframe)
                 
-                return df_sorted
+                combined_df = pd.concat([db_data, df]).drop_duplicates(subset=['timestamp'], keep='last')
+                
+                return combined_df.sort_values('timestamp').reset_index(drop=True)
 
             except Exception as e:
                 logger.error(f"Data processing error for {symbol}: {e}")
-                return pd.DataFrame()
+                return db_data.sort_values('timestamp').reset_index(drop=True)
 
         except Exception as e:
             logger.error(f"Unexpected error fetching {symbol} on {timeframe}: {e}")
-            return pd.DataFrame()
+            return db_data.sort_values('timestamp').reset_index(drop=True)

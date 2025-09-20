@@ -1,85 +1,24 @@
 import asyncio
-import platform
-import signal
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from typing import Dict, List
 
-from signals import (ADXIndicator, ATRIndicator,
-                        BollingerBandsIndicator, CCIIndicator,
-                        ChaikinMoneyFlowIndicator, IchimokuIndicator,
-                        MACDIndicator, MovingAverageIndicator, MultiTimeframeAnalyzer,
-                        OBVIndicator, RSIIndicator, SignalGenerator, StochasticIndicator,
-                        SuperTrendIndicator, VolumeIndicator, WilliamsRIndicator)
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
+                          ContextTypes)
 
-from web_tools import ExchangeManager, OnChainFetcher, SentimentFetcher
-from models import SignalType, TradingSignal
-from main import LSTMModel, SignalRanking
-from config import Config, ConfigManager
-from constants import TIME_FRAMES
-from logger_config import logger
+from module.config import Config, ConfigManager
+from module.constants import TIME_FRAMES
+from module.core import SignalType, TradingSignal
+from module.logger_config import logger
+from module.signals import SignalGenerator, SignalRanking
+
 
 class TradingBotService:
-    def __init__(self, config: ConfigManager):
-        self.exchange_manager = ExchangeManager()
+    def __init__(self, config: ConfigManager, exchange_manager, signal_generator: SignalGenerator, signal_ranking: SignalRanking):
+        self.config = config
+        self.exchange_manager = exchange_manager
+        self.signal_generator = signal_generator
+        self.signal_ranking = signal_ranking
         self._initialized = False
-
-        cryptopanic_key = config.get('cryptopanic_key', Config.CRYPTOPANIC_KEY)
-        alchemy_url = config.get('alchemy_url', Config.ALCHEMY_URL)
-
-        self.sentiment_fetcher = None
-        self.onchain_fetcher = None
-        
-        if cryptopanic_key and cryptopanic_key.strip():
-            self.sentiment_fetcher = SentimentFetcher(cryptopanic_key)
-        else:
-            logger.warning("Sentiment analysis disabled - no CryptoPanic API key")
-            
-        if alchemy_url and alchemy_url.strip():
-            self.onchain_fetcher = OnChainFetcher(alchemy_url)
-        else:
-            logger.warning("On-chain analysis disabled - no Alchemy URL")
-        
-        try:
-            self.lstm_model = LSTMModel(
-                input_shape=(60, 1),
-                units=50,
-                lr=0.001
-            )
-            logger.info("LSTM model initialized")
-        except Exception as e:
-            logger.error(f"LSTM initialization failed: {e}")
-            self.lstm_model = None
-
-        self.multi_tf_analyzer = MultiTimeframeAnalyzer(self.exchange_manager, {
-            'sma_20': MovingAverageIndicator(20, "sma"),
-            'sma_50': MovingAverageIndicator(50, "sma"),
-            'ema_12': MovingAverageIndicator(12, "ema"),
-            'ema_26': MovingAverageIndicator(26, "ema"),
-            'rsi': RSIIndicator(),
-            'macd': MACDIndicator(),
-            'bb': BollingerBandsIndicator(),
-            'stoch': StochasticIndicator(),
-            'volume': VolumeIndicator(),
-            'atr': ATRIndicator(),
-            'ichimoku': IchimokuIndicator(),
-            'williams_r': WilliamsRIndicator(),
-            'cci': CCIIndicator(),
-            'supertrend': SuperTrendIndicator(),
-            'adx': ADXIndicator(),
-            'cmf': ChaikinMoneyFlowIndicator(),
-            'obv': OBVIndicator()
-        })
-        
-        self.signal_generator = SignalGenerator(
-            sentiment_fetcher=self.sentiment_fetcher,
-            onchain_fetcher=self.onchain_fetcher,
-            lstm_model=self.lstm_model,
-            multi_tf_analyzer=self.multi_tf_analyzer,
-            config=self.config
-        )
-
-        self.signal_ranking = SignalRanking()
         
     async def initialize(self):
         if self._initialized:
@@ -162,21 +101,23 @@ class TradingBotService:
         try:
             if hasattr(self, 'exchange_manager'):
                 await self.exchange_manager.close()
-            if hasattr(self, 'lstm_model'):
-                self.lstm_model.clear_cache()
+            if hasattr(self.signal_generator, 'lstm_model_manager') and self.signal_generator.lstm_model_manager:
+                self.signal_generator.lstm_model_manager.cleanup()
             if hasattr(self, 'application'):
                 await self.application.shutdown()
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error during TradingBotService stop: {e}")
     
     async def cleanup(self):
-        if hasattr(self, 'lstm_model') and self.lstm_model:
-            if hasattr(self.lstm_model, 'executor') and self.lstm_model.executor:
-                self.lstm_model.executor.shutdown(wait=False)
-        await self.exchange_manager.close_exchange()
+        if hasattr(self, 'exchange_manager') and self._initialized:
+            await self.exchange_manager.close()
+        
+        if (hasattr(self, 'signal_generator') and self.signal_generator and
+            hasattr(self.signal_generator, 'lstm_model_manager') and 
+            self.signal_generator.lstm_model_manager):
+            self.signal_generator.lstm_model_manager.cleanup()
+            
         self._initialized = False
-
-#===================================================================================#
 
 class MessageFormatter:
     @staticmethod
@@ -233,20 +174,21 @@ class MessageFormatter:
         return summary
 
 class TelegramBotHandler:
-    def __init__(self, bot_token, config_manager):
+    def __init__(self, bot_token: str, config_manager: ConfigManager, trading_service: TradingBotService):
         self.bot_token = bot_token
         self.config = config_manager
-        self.trading_service = None
+        self.trading_service = trading_service
         self.formatter = MessageFormatter()
         self.user_sessions = {}
         self._initialized = False
+        self.analysis_queue = asyncio.Queue()
+        self.worker_task = None
 
     async def initialize(self):
         if self._initialized:
             return
-        if self.trading_service is None:
-            self.trading_service = TradingBotService(self.config)
         await self.trading_service.initialize()
+        self.worker_task = asyncio.create_task(self._analysis_worker())
         self._initialized = True
         
     def create_application(self):
@@ -271,38 +213,59 @@ class TelegramBotHandler:
         query = update.callback_query
         await query.answer()
         if query.data == "full_analysis":
-            await self.run_full_analysis(query)
+            await query.edit_message_text("🚀 Full analysis request has been queued and will start shortly.", parse_mode='Markdown')
+            await self.analysis_queue.put(query)
         elif query.data == "quick_scan":
             await self.run_quick_scan(query)
         elif query.data == "settings":
             await self.show_settings(query)
-    
+
+    async def _analysis_worker(self):
+        logger.info("Analysis worker started.")
+        while True:
+            try:
+                query = await self.analysis_queue.get()
+                await self.run_full_analysis(query)
+                self.analysis_queue.task_done()
+            except asyncio.CancelledError:
+                logger.info("Analysis worker is shutting down.")
+                break
+            except Exception as e:
+                logger.error(f"Error in analysis worker: {e}")
+
     async def run_full_analysis(self, query) -> None:
         user_id = query.from_user.id
-        logger.info(f"User {user_id} started full analysis")
+        logger.info(f"User {user_id} started full analysis from worker")
+        
         try:
             timeframes = self.config.get('timeframes', TIME_FRAMES)
-            results = {}
-            total_signals = 0
-            for i, timeframe in enumerate(timeframes, 1):
-                await query.edit_message_text(f"🔄 Analyzing {timeframe}... ({i}/{len(timeframes)})", parse_mode='Markdown')
-                signals = await self.trading_service.find_best_signals_for_timeframe(timeframe)
-                results[timeframe] = signals
-                total_signals += len(signals)
-            await query.edit_message_text(f"✅ Analysis complete. Found {total_signals} signal(s).", parse_mode='Markdown')
-            signal_count = 0
-            for timeframe, signals in results.items():
-                for signal in signals:
-                    signal_count += 1
-                    signal_message = self.formatter.format_signal_message(signal)
-                    await query.message.reply_text(signal_message, parse_mode='Markdown')
-                    await asyncio.sleep(2)
-            if signal_count == 0:
-                await query.message.reply_text("No signals found.", parse_mode='Markdown')
+            await query.edit_message_text(f"🔄 Starting parallel analysis for {len(timeframes)} timeframes...", parse_mode='Markdown')
+
+            async def analyze_and_send(timeframe: str):
+                try:
+                    signals = await self.trading_service.find_best_signals_for_timeframe(timeframe)
+                    if signals:
+                        await query.message.reply_text(f"--- Signals for {timeframe} ---", parse_mode='Markdown')
+                        for signal in signals:
+                            signal_message = self.formatter.format_signal_message(signal)
+                            await query.message.reply_text(signal_message, parse_mode='Markdown')
+                            await asyncio.sleep(1) # Rate limit sending
+                    return len(signals)
+                except Exception as e:
+                    logger.error(f"Analysis task for {timeframe} failed: {e}")
+                    await query.message.reply_text(f"⚠️ Error analyzing {timeframe}: {e}", parse_mode='Markdown')
+                    return 0
+
+            tasks = [analyze_and_send(tf) for tf in timeframes]
+            results = await asyncio.gather(*tasks)
+            
+            total_signals = sum(results)
+            await query.message.reply_text(f"✅ Full analysis complete. Found a total of {total_signals} signal(s).", parse_mode='Markdown')
+
         except Exception as e:
             logger.error(f"Full analysis failed for user {user_id}: {e}")
             await query.edit_message_text(f"❌ Analysis Error: {str(e)}", parse_mode='Markdown')
-    
+
     async def run_quick_scan(self, query) -> None:
         await query.edit_message_text("⚡ Quick scan in progress...", parse_mode='Markdown')
         try:
@@ -344,94 +307,14 @@ class TelegramBotHandler:
             await progress_msg.edit_text(f"❌ Quick Analysis Error: {str(e)}", parse_mode='Markdown')
     
     async def cleanup(self):
+        if self.worker_task:
+            self.worker_task.cancel()
+            try:
+                await self.worker_task
+            except asyncio.CancelledError:
+                pass
+        
         if self.trading_service and self._initialized:
             await self.trading_service.cleanup()
             self.trading_service = None
         self._initialized = False
-
-#===================================================================================#
-
-_bot_instance = None
-
-async def create_bot_application():
-    global _bot_instance
-    
-    if _bot_instance is not None:
-        logger.info("Bot instance already exists, cleaning up...")
-        await _bot_instance.cleanup()
-        _bot_instance = None
-    
-    config_manager = ConfigManager()
-    logger.info("Configuration loaded successfully")
-    
-    application = None
-    
-    try:
-        bot_token = Config.TELEGRAM_BOT_TOKEN
-        if not bot_token:
-            raise ValueError("Bot token is required")
-            
-        _bot_instance = TelegramBotHandler(bot_token, config_manager)
-        await _bot_instance.initialize()
-        
-        application = _bot_instance.create_application()
-        
-        logger.info("Bot application created successfully")
-        logger.info("Bot is ready and waiting for commands...")
-        
-        await application.initialize()
-        await application.start()
-        
-        try:
-            await application.updater.start_polling(
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True
-            )
-            
-            stop_event = asyncio.Event()
-            
-            def signal_handler():
-                logger.info("Received shutdown signal")
-                stop_event.set()
-            
-            signal.signal(signal.SIGINT, lambda s, f: signal_handler())
-            
-            if platform.system() != 'Windows':
-                signal.signal(signal.SIGTERM, lambda s, f: signal_handler())
-            
-            await stop_event.wait()
-                
-        except (KeyboardInterrupt, SystemExit):
-            logger.info("Received shutdown signal")
-        finally:
-            try:
-                if application and hasattr(application, 'updater') and application.updater.running:
-                    await application.updater.stop()
-                    
-                if application and application.running:
-                    await application.stop()
-                    
-                if application:
-                    await application.shutdown()
-            except Exception as e:
-                logger.error(f"Error during shutdown: {e}")
-    
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user (Ctrl+C)")
-    except Exception as e:
-        logger.error(f"Bot crashed with error: {e}")
-        import traceback
-        logger.error(f"Traceback:\n{traceback.format_exc()}")
-    finally:
-        logger.info("Starting cleanup...")
-        
-        if _bot_instance:
-            try:
-                await _bot_instance.cleanup()
-                logger.info("Bot handler cleanup completed")
-            except Exception as e:
-                logger.error(f"Error cleaning up bot handler: {e}")
-            finally:
-                _bot_instance = None
-    
-    logger.info("Bot shutdown completed successfully")
