@@ -217,9 +217,10 @@ class SignalGenerator:
             if 'volume' in df_copy.columns:
                 df_copy = df_copy[df_copy['volume'] >= 0]
 
-            invalid_ohlc = (df_copy['high'] < df_copy['low'])
-            if invalid_ohlc.any():
-                df_copy = df_copy[~invalid_ohlc]
+            if 'high' in df_copy.columns and 'low' in df_copy.columns:
+                invalid_ohlc = (df_copy['high'] < df_copy['low'])
+                if invalid_ohlc.any():
+                    df_copy = df_copy[~invalid_ohlc]
 
             return df_copy.reset_index(drop=True)
 
@@ -476,7 +477,7 @@ class SignalGenerator:
 
         market_analysis = self.market_analyzer.analyze_market_condition(
             data,
-            derivatives_data=derivatives_data,
+            derivatives_analysis=derivatives_data,
             order_book_analysis=order_book_data,
             fundamental_analysis=fundamental_data
         )
@@ -547,8 +548,8 @@ class SignalRanking:
     def rank_signals(signals: List[TradingSignal]) -> List[TradingSignal]:
         def signal_score(signal: TradingSignal) -> float:
             base_score = signal.confidence_score
-            rr_bonus = min(signal.risk_reward_ratio * 10, 20)
-            profit_bonus = min(abs(signal.predicted_profit) * 2, 15)
+            rr_bonus = min(signal.risk_reward_ratio * 10, 20) if signal.risk_reward_ratio is not None else 0
+            profit_bonus = min(abs(signal.predicted_profit) * 2, 15) if signal.predicted_profit is not None else 0
             
             volume_bonus = 0
             if signal.volume_analysis and signal.volume_analysis.get('volume_ratio', 1) > 1.5:

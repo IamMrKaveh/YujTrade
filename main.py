@@ -12,7 +12,6 @@ from prometheus_client import start_http_server
 from telegram import Update
 
 from module.config import Config, ConfigManager
-from module.indicators import (RSIIndicator, MACDIndicator, BollingerBandsIndicator, MovingAverageIndicator)
 from module.logger_config import logger
 from module.monitoring import ERRORS_TOTAL, set_app_info
 from module.sentiment import (
@@ -96,15 +95,9 @@ async def main():
         coingecko_fetcher = CoinGeckoFetcher(redis_client=redis_client)
         market_indices_fetcher = MarketIndicesFetcher(Config.ALPHA_VANTAGE_KEY, redis_client=redis_client)
         onchain_fetcher = OnChainFetcher(glassnode_api_key=Config.GLASSNODE_API_KEY) if Config.GLASSNODE_API_KEY else None
+        
         lstm_manager = LSTMModelManager(model_path='lstm-model')
-
-        mta_indicators = {
-            'rsi': RSIIndicator(),
-            'macd': MACDIndicator(),
-            'bb': BollingerBandsIndicator(),
-            'sma_50': MovingAverageIndicator(50, "sma"),
-        }
-        multi_tf_analyzer = MultiTimeframeAnalyzer(exchange_manager, mta_indicators)
+        await lstm_manager.initialize_models()
 
         signal_generator = SignalGenerator(
             exchange_manager=exchange_manager,
@@ -113,9 +106,12 @@ async def main():
             coingecko_fetcher=coingecko_fetcher,
             market_indices_fetcher=market_indices_fetcher,
             lstm_model_manager=lstm_manager,
-            multi_tf_analyzer=multi_tf_analyzer,
+            multi_tf_analyzer=None,
             config=config_manager.config,
         )
+
+        multi_tf_analyzer = MultiTimeframeAnalyzer(exchange_manager, signal_generator.indicators)
+        signal_generator.multi_tf_analyzer = multi_tf_analyzer
 
         trading_service = TradingBotService(
             config=config_manager,
@@ -132,6 +128,10 @@ async def main():
 
         await bot_instance.initialize()
         application = bot_instance.create_application()
+        
+        # Share the application instance with the trading service for task callbacks
+        trading_service.set_telegram_app(application)
+
 
         scheduler = AsyncIOScheduler()
         if config_manager.get("enable_scheduled_analysis", True):

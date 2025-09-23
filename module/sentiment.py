@@ -20,6 +20,9 @@ from module.utils import RateLimiter, async_retry
 
 rate_limiter = RateLimiter(max_requests=10, time_window=60)
 coingecko_rate_limiter = RateLimiter(max_requests=30, time_window=60)
+alpha_vantage_rate_limiter = RateLimiter(max_requests=5, time_window=60)
+cryptopanic_rate_limiter = RateLimiter(max_requests=20, time_window=60)
+alternative_me_rate_limiter = RateLimiter(max_requests=20, time_window=60)
 
 
 class MarketIndicesFetcher:
@@ -35,14 +38,16 @@ class MarketIndicesFetcher:
         self.redis = redis_client
         self.cache_ttl = 600
 
-    async def _fetch_json(self, url, params=None):
+    @async_retry(attempts=3, delay=5)
+    async def _fetch_json(self, url, params=None, limiter: Optional[RateLimiter] = None, endpoint_name: str = "default"):
+        if limiter:
+            await limiter.wait_if_needed(endpoint_name)
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params, timeout=15) as response:
                     if response.status == 200:
                         return await response.json()
-                    logger.warning(f"API request to {url} failed with status: {response.status}")
-                    return None
+                    response.raise_for_status()
         except Exception as e:
             logger.error(f"Error fetching from {url}: {e}")
             return None
@@ -59,7 +64,7 @@ class MarketIndicesFetcher:
 
 
         tasks = {
-            "global": self._fetch_json(f"{self.coingecko_url}/global"),
+            "global": self._fetch_json(f"{self.coingecko_url}/global", limiter=coingecko_rate_limiter, endpoint_name="global"),
             "defi": self._fetch_json(f"{self.defillama_url}/v2/historicalChainTvl"),
         }
         results = await asyncio.gather(*tasks.values())
@@ -76,11 +81,11 @@ class MarketIndicesFetcher:
             indices["TOTAL"] = total_mcap
             
             if total_mcap and indices.get("BTC.D"):
-                 btc_mcap = total_mcap * (indices["BTC.D"] / 100)
-                 indices["TOTAL2"] = total_mcap - btc_mcap
-                 if indices.get("ETH.D"):
-                     eth_mcap = total_mcap * (indices["ETH.D"] / 100)
-                     indices["TOTAL3"] = indices["TOTAL2"] - eth_mcap
+                btc_mcap = total_mcap * (indices["BTC.D"] / 100)
+                indices["TOTAL2"] = total_mcap - btc_mcap
+                if indices.get("ETH.D"):
+                    eth_mcap = total_mcap * (indices["ETH.D"] / 100)
+                    indices["TOTAL3"] = indices["TOTAL2"] - eth_mcap
 
             others_dominance = 100 - sum(d for d in [indices.get("BTC.D"), indices.get("ETH.D"), indices.get("USDT.D")] if d is not None)
             indices["OTHERS.D"] = others_dominance
@@ -95,6 +100,7 @@ class MarketIndicesFetcher:
                 logger.warning(f"Redis set failed for {cache_key}: {e}")
         return indices
 
+    @async_retry(attempts=3, delay=5)
     async def get_traditional_indices_yf(self):
         cache_key = "cache:trad_indices_yf"
         if self.redis:
@@ -138,11 +144,13 @@ class MarketIndicesFetcher:
         tasks = {
             "cpi": self._fetch_json(
                 self.alpha_vantage_url,
-                params={"function": "CPI", "interval": "monthly", "apikey": self.alpha_vantage_key}
+                params={"function": "CPI", "interval": "monthly", "apikey": self.alpha_vantage_key},
+                limiter=alpha_vantage_rate_limiter, endpoint_name="cpi"
             ),
             "fed_rate": self._fetch_json(
                 self.alpha_vantage_url,
-                params={"function": "FEDERAL_FUNDS_RATE", "interval": "monthly", "apikey": self.alpha_vantage_key}
+                params={"function": "FEDERAL_FUNDS_RATE", "interval": "monthly", "apikey": self.alpha_vantage_key},
+                limiter=alpha_vantage_rate_limiter, endpoint_name="fed_rate"
             )
         }
         results = await asyncio.gather(*tasks.values())
@@ -178,7 +186,8 @@ class NewsFetcher:
         self.cryptopanic_key = cryptopanic_key
         self.redis = redis_client
 
-    async def fetch_fear_greed(self, max_retries=3, retry_delay=5):
+    @async_retry(attempts=3, delay=5)
+    async def fetch_fear_greed(self):
         cache_key = "cache:fear_greed"
         if self.redis:
             try:
@@ -188,36 +197,25 @@ class NewsFetcher:
             except Exception as e:
                 logger.warning(f"Redis get failed for {cache_key}: {e}")
 
+        await alternative_me_rate_limiter.wait_if_needed("fng")
         async with aiohttp.ClientSession() as session:
-            for attempt in range(max_retries):
-                try:
-                    async with session.get("https://api.alternative.me/fng/", timeout=10) as response:
-                        if response.status == 200:
-                            j = await response.json()
-                            data = j.get("data", [])
-                            if data:
-                                value = data[0].get("value")
-                                if value is not None:
-                                    value_int = int(value)
-                                    if self.redis:
-                                        try:
-                                            await self.redis.set(cache_key, value_int, ex=3600)
-                                        except Exception as e:
-                                            logger.warning(f"Redis set failed for {cache_key}: {e}")
-                                    return value_int
-
-                    logger.warning(f"Attempt {attempt+1}: Invalid response from Fear & Greed API status {response.status}")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(retry_delay)
-                except aiohttp.ClientError as e:
-                    logger.warning(f"Attempt {attempt+1}: Error connecting to Fear & Greed API: {e}")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(retry_delay)
-                    continue
-
-        logger.error("Failed to fetch Fear & Greed index after multiple attempts")
+            async with session.get("https://api.alternative.me/fng/", timeout=10) as response:
+                response.raise_for_status()
+                j = await response.json()
+                data = j.get("data", [])
+                if data:
+                    value = data[0].get("value")
+                    if value is not None:
+                        value_int = int(value)
+                        if self.redis:
+                            try:
+                                await self.redis.set(cache_key, value_int, ex=3600)
+                            except Exception as e:
+                                logger.warning(f"Redis set failed for {cache_key}: {e}")
+                        return value_int
         return None
 
+    @async_retry(attempts=3, delay=5)
     async def fetch_news(self, currencies: List[str] = ["BTC", "ETH"]):
         key = "cache:news:" + ",".join(sorted(currencies))
         if self.redis:
@@ -228,30 +226,27 @@ class NewsFetcher:
             except Exception as e:
                 logger.warning(f"Redis get failed for {key}: {e}")
 
-        try:
-            url = "https://cryptopanic.com/api/v2/posts/"
-            params = {"auth_token": self.cryptopanic_key, "currencies": ",".join(currencies), "public": "true"}
+        url = "https://cryptopanic.com/api/v2/posts/"
+        params = {"auth_token": self.cryptopanic_key, "currencies": ",".join(currencies), "public": "true"}
 
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=10) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        results = data.get("results", [])
-                        if self.redis:
-                            try:
-                                await self.redis.set(key, json.dumps(results), ex=600)
-                            except Exception as e:
-                                logger.warning(f"Redis set failed for {key}: {e}")
-                        return results
-                    else:
-                        logger.warning(f"CryptoPanic API returned status {response.status}")
-                        return []
-        except Exception as e:
-            logger.error(f"Error fetching news: {e}")
-            return []
+        await cryptopanic_rate_limiter.wait_if_needed("posts")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=10) as response:
+                response.raise_for_status()
+                data = await response.json()
+                results = data.get("results", [])
+                if self.redis:
+                    try:
+                        await self.redis.set(key, json.dumps(results), ex=600)
+                    except Exception as e:
+                        logger.warning(f"Redis set failed for {key}: {e}")
+                return results
+        return []
 
     def score_news(self, news_items: List[Dict[str, Any]]):
         score = 0
+        if not news_items:
+            return score
         for it in news_items:
             title = (it.get("title") or "").lower()
             if any(k in title for k in ["bull", "rally", "surge", "gain", "pump"]):
@@ -266,6 +261,7 @@ class CoinGeckoFetcher:
         self.base_url = "https://api.coingecko.com/api/v3"
         self.redis = redis_client
 
+    @async_retry(attempts=3, delay=5)
     async def _get_coin_list(self):
         cache_key = "cache:coingecko:coin_list"
         if self.redis:
@@ -277,22 +273,20 @@ class CoinGeckoFetcher:
                 logger.warning(f"Redis get failed for {cache_key}: {e}")
 
         async with aiohttp.ClientSession() as session:
-            try:
-                await coingecko_rate_limiter.wait_if_needed("coins_list")
-                async with session.get(f"{self.base_url}/coins/list") as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        coin_list = {item["symbol"].upper(): item["id"] for item in data}
-                        if self.redis:
-                            try:
-                                await self.redis.set(cache_key, json.dumps(coin_list), ex=86400)
-                            except Exception as e:
-                                logger.warning(f"Redis set failed for {cache_key}: {e}")
-                        return coin_list
-            except Exception as e:
-                logger.error(f"Failed to fetch CoinGecko coin list: {e}")
+            await coingecko_rate_limiter.wait_if_needed("coins_list")
+            async with session.get(f"{self.base_url}/coins/list") as response:
+                response.raise_for_status()
+                data = await response.json()
+                coin_list = {item["symbol"].upper(): item["id"] for item in data}
+                if self.redis:
+                    try:
+                        await self.redis.set(cache_key, json.dumps(coin_list), ex=86400)
+                    except Exception as e:
+                        logger.warning(f"Redis set failed for {cache_key}: {e}")
+                return coin_list
         return {}
 
+    @async_retry(attempts=3, delay=5)
     async def get_fundamental_data(self, symbol: str) -> Optional[FundamentalAnalysis]:
         coin_list = await self._get_coin_list()
         coin_id = coin_list.get(symbol.upper())
@@ -315,25 +309,22 @@ class CoinGeckoFetcher:
                 logger.warning(f"Redis get failed for {cache_key}: {e}")
 
         async with aiohttp.ClientSession() as session:
-            try:
-                await coingecko_rate_limiter.wait_if_needed(f"coins_{coin_id}")
-                async with session.get(f"{self.base_url}/coins/{coin_id}") as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        market_data = data.get("market_data", {})
-                        fund_data = {
-                            "market_cap": market_data.get("market_cap", {}).get("usd", 0),
-                            "circulating_supply": market_data.get("circulating_supply", 0),
-                            "developer_score": data.get("developer_score", 0),
-                        }
-                        if self.redis:
-                            try:
-                                await self.redis.set(cache_key, json.dumps(fund_data), ex=3600)
-                            except Exception as e:
-                                logger.warning(f"Redis set failed for {cache_key}: {e}")
-                        return FundamentalAnalysis(**fund_data)
-            except Exception as e:
-                logger.error(f"Failed to fetch fundamental data for {symbol}: {e}")
+            await coingecko_rate_limiter.wait_if_needed(f"coins_{coin_id}")
+            async with session.get(f"{self.base_url}/coins/{coin_id}") as response:
+                response.raise_for_status()
+                data = await response.json()
+                market_data = data.get("market_data", {})
+                fund_data = {
+                    "market_cap": market_data.get("market_cap", {}).get("usd", 0),
+                    "circulating_supply": market_data.get("circulating_supply", 0),
+                    "developer_score": data.get("developer_score", 0),
+                }
+                if self.redis:
+                    try:
+                        await self.redis.set(cache_key, json.dumps(fund_data), ex=3600)
+                    except Exception as e:
+                        logger.warning(f"Redis set failed for {cache_key}: {e}")
+                return FundamentalAnalysis(**fund_data)
         return None
 
 
@@ -347,21 +338,14 @@ class OnChainFetcher:
         self.coinmetrics_base_url = "https://api.coinmetrics.io/v4"
         self.dune_base_url = "https://api.dune.com/api/v1"
 
-        self.last_glassnode_call = 0
-        self.glassnode_rate_limit = 1
+        self.glassnode_rate_limiter = RateLimiter(max_requests=10, time_window=60)
 
-    async def _rate_limit_glassnode(self):
-        current_time = time.time()
-        time_since_last_call = current_time - self.last_glassnode_call
-        if time_since_last_call < self.glassnode_rate_limit:
-            await asyncio.sleep(self.glassnode_rate_limit - time_since_last_call)
-        self.last_glassnode_call = time.time()
-
+    @async_retry(attempts=3, delay=10)
     async def _glassnode_request(self, endpoint: str, params: Dict = {}) -> Optional[Dict]:
         if not self.glassnode_api_key:
             return None
 
-        await self._rate_limit_glassnode()
+        await self.glassnode_rate_limiter.wait_if_needed(endpoint)
 
         url = f"{self.glassnode_base_url}/{endpoint}"
 
@@ -369,38 +353,30 @@ class OnChainFetcher:
         if params:
             default_params.update(params)
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=default_params, timeout=30) as response:
-                    response.raise_for_status()
-                    return await response.json()
-        except aiohttp.ClientError as e:
-            logger.error(f"Glassnode API error: {e}")
-            return None
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=default_params, timeout=30) as response:
+                response.raise_for_status()
+                return await response.json()
 
     async def active_addresses(self) -> Optional[int]:
-        if self.glassnode_api_key:
-            try:
-                data = await self._glassnode_request("addresses/active_count", {"i": "24h"})
-                if data and len(data) > 0:
-                    return int(data[-1]["v"])
-            except Exception as e:
-                logger.warning(f"Failed to get active addresses from Glassnode: {e}")
+        try:
+            data = await self._glassnode_request("addresses/active_count", {"i": "24h"})
+            if data and len(data) > 0:
+                return int(data[-1]["v"])
+        except Exception as e:
+            logger.warning(f"Failed to get active addresses from Glassnode: {e}")
         return None
 
     async def transaction_volume(self) -> Optional[float]:
-        if self.glassnode_api_key:
-            try:
-                data = await self._glassnode_request("transactions/transfers_volume_sum", {"i": "24h"})
-                if data and len(data) > 0:
-                    return float(data[-1]["v"])
-            except Exception as e:
-                logger.warning(f"Failed to get transaction volume from Glassnode: {e}")
+        try:
+            data = await self._glassnode_request("transactions/transfers_volume_sum", {"i": "24h"})
+            if data and len(data) > 0:
+                return float(data[-1]["v"])
+        except Exception as e:
+            logger.warning(f"Failed to get transaction volume from Glassnode: {e}")
         return None
     
     async def get_hash_rate(self) -> Optional[float]:
-        if not self.glassnode_api_key:
-            return None
         try:
             data = await self._glassnode_request("mining/hash_rate_mean", {"i": "24h"})
             if data and len(data) > 0:
@@ -410,8 +386,6 @@ class OnChainFetcher:
         return None
     
     async def get_eth_gas_fees(self) -> Optional[float]:
-        if not self.glassnode_api_key:
-            return None
         try:
             data = await self._glassnode_request("fees/gas_price_mean", {"a": "ETH", "i": "24h"})
             if data and len(data) > 0:
@@ -500,27 +474,23 @@ class ExchangeManager:
             except Exception as e:
                 logger.warning(f"Redis get failed for {cache_key}: {e}")
 
-        try:
-            async with self.get_exchange() as exchange:
-                ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            if not ohlcv:
-                return pd.DataFrame()
-
-            df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-            df = df.astype(
-                {"open": float, "high": float, "low": float, "close": float, "volume": float}
-            )
-
-            if self.redis:
-                try:
-                    await self.redis.set(cache_key, df.to_json(orient="split"), ex=300)
-                except Exception as e:
-                    logger.warning(f"Redis set failed for {cache_key}: {e}")
-            return df
-        except Exception as e:
-            logger.error(f"Error fetching OHLCV for {symbol}/{timeframe}: {e}")
+        async with self.get_exchange() as exchange:
+            ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        if not ohlcv:
             return pd.DataFrame()
+
+        df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        df = df.astype(
+            {"open": float, "high": float, "low": float, "close": float, "volume": float}
+        )
+
+        if self.redis:
+            try:
+                await self.redis.set(cache_key, df.to_json(orient="split"), ex=300)
+            except Exception as e:
+                logger.warning(f"Redis set failed for {cache_key}: {e}")
+        return df
 
     @async_retry(attempts=2, delay=3)
     async def fetch_derivatives_data(self, symbol: str) -> Optional[DerivativesAnalysis]:

@@ -21,12 +21,12 @@ class Config:
             logger.critical("Failed to create encryptor. Check your ENCRYPTION_PASSWORD.")
             _encryptor = None
 
-    @classmethod
-    def get_secret(cls, key: str) -> str:
+    @staticmethod
+    def get_secret(key: str) -> str:
         encrypted_key = f"ENCRYPTED_{key}"
         value = decouple_config(encrypted_key, default=None)
-        if value and cls._encryptor:
-            decrypted = cls._encryptor.decrypt(value)
+        if value and Config._encryptor:
+            decrypted = Config._encryptor.decrypt(value)
             if not decrypted:
                 logger.error(f"Failed to decrypt {key}. Please re-encrypt your keys.")
                 return None
@@ -44,9 +44,11 @@ class Config:
 
     TF_CPP_MIN_LOG_LEVEL = decouple_config("TF_CPP_MIN_LOG_LEVEL", default="3")
     TF_ENABLE_ONEDNN_OPTS = decouple_config("TF_ENABLE_ONEDNN_OPTS", default="0")
+    
     REDIS_HOST = decouple_config("REDIS_HOST", default="localhost")
     REDIS_PORT = decouple_config("REDIS_PORT", default=6379, cast=int)
-    PROMETHEUS_PORT = decouple_config("PROMETHEUS_PORT", default=8000, cast=int)
+    
+    PROMETHEUS_PORT = decouple_config("PROMETHEUS_PORT", default=9090, cast=int)
 
 
 class ConfigManager:
@@ -54,8 +56,8 @@ class ConfigManager:
         "symbols": SYMBOLS,
         "timeframes": TIME_FRAMES,
         "min_confidence_score": 90,
-        "max_signals_per_timeframe": 5,
-        "risk_reward_threshold": 1.5,
+        "max_signals_per_timeframe": 2,
+        "risk_reward_threshold": 3.0,
         "enable_scheduled_analysis": True,
         "schedule_hour": "*/4",
         "app_version": "2.0.0",

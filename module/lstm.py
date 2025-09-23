@@ -15,6 +15,7 @@ from tensorflow.keras.layers import (LSTM, BatchNormalization, Dense, Dropout)
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.optimizers import Adam
 import pandas_ta as ta
+import os
 
 from module.logger_config import logger
 
@@ -36,9 +37,6 @@ class LSTMModel:
         self._setup_gpu()
         self._load_or_create_model(units, lr)
         
-    def __del__(self):
-        self.clear_cache()
-
     def clear_cache(self):
         try:
             if hasattr(self, 'model') and self.model:
@@ -47,9 +45,10 @@ class LSTMModel:
                 tf.keras.backend.clear_session()
                 import gc
                 gc.collect()
+                self.logger.info(f"Cleared cache for model {self.symbol}-{self.timeframe}")
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"Error during model cleanup: {e}")
+                self.logger.warning(f"Error during model cleanup for {self.symbol}-{self.timeframe}: {e}")
 
     def _setup_gpu(self):
         try:
@@ -78,7 +77,7 @@ class LSTMModel:
             try:
                 self.model = tf.keras.models.load_model(str(model_file), compile=False)
                 self.model.compile(optimizer=Adam(learning_rate=lr, clipnorm=1.0), 
-                                   loss='huber', metrics=['mae'])
+                                    loss='huber', metrics=['mae'])
                 
                 with open(scaler_file, 'rb') as f:
                     self.scaler = pickle.load(f)
@@ -96,11 +95,11 @@ class LSTMModel:
         try:
             self.model = Sequential([
                 LSTM(units, input_shape=self.input_shape, return_sequences=True, 
-                     dropout=0.15, recurrent_dropout=0.15),
+                    dropout=0.15, recurrent_dropout=0.15),
                 LSTM(units // 2, return_sequences=True, 
-                     dropout=0.15, recurrent_dropout=0.15),
+                    dropout=0.15, recurrent_dropout=0.15),
                 LSTM(units // 4, return_sequences=False, 
-                     dropout=0.1, recurrent_dropout=0.1),
+                    dropout=0.1, recurrent_dropout=0.1),
                 Dropout(0.25),
                 Dense(50, activation='relu'),
                 BatchNormalization(),
@@ -175,7 +174,7 @@ class LSTMModel:
 
     def _validate_dataframe(self, data):
         required_columns = ['close', 'open', 'high', 'low', 'volume']
-        if not all(col in data.columns for col in data.columns):
+        if not all(col in data.columns for col in required_columns):
             missing = set(required_columns) - set(data.columns)
             raise ValueError(f"Missing one or more required columns: {missing}")
         return True
@@ -229,8 +228,8 @@ class LSTMModel:
         ]
         
         history = self.model.fit(X, y, epochs=epochs, batch_size=batch_size,
-                                 validation_split=validation_split, callbacks=callbacks,
-                                 verbose=verbose, shuffle=False)
+                                validation_split=validation_split, callbacks=callbacks,
+                                verbose=verbose, shuffle=False)
         
         final_val_loss = history.history.get('val_loss', [float('inf')])[-1]
         if final_val_loss < 1.0:
@@ -272,10 +271,48 @@ class LSTMModelManager:
         self.executor: Optional[ThreadPoolExecutor] = None
         self.logger = logger
 
+    async def initialize_models(self):
+        self.logger.info("Initializing and loading all LSTM models...")
+        loop = asyncio.get_running_loop()
+        executor = self._get_executor()
+        
+        tasks = []
+        for model_file in self.model_path.glob("model_*.keras"):
+            task = loop.run_in_executor(executor, self._load_single_model, model_file)
+            tasks.append(task)
+        
+        await asyncio.gather(*tasks)
+        self.logger.info(f"Finished loading models. Total cached models: {len(self._cache)}")
+
+    def _load_single_model(self, model_file: Path):
+        try:
+            filename = model_file.stem
+            parts = filename.split('_')
+            if len(parts) > 1:
+                symbol_tf = parts[1]
+                symbol, timeframe = symbol_tf.split('-')
+                symbol = symbol.upper()
+                
+                key = f"{symbol}-{timeframe}"
+                with self._lock:
+                    if key in self._cache:
+                        return
+                
+                self.logger.debug(f"Loading model for {key} from {model_file}...")
+                model = LSTMModel(symbol=symbol, timeframe=timeframe, model_path=self.model_path,
+                                input_shape=self.input_shape, units=self.units, lr=self.lr)
+                if model.is_ready():
+                    with self._lock:
+                        self._cache[key] = model
+                else:
+                    self.logger.warning(f"Model for {key} loaded but is not ready. It may need training.")
+        except Exception as e:
+            self.logger.error(f"Failed to parse and load model from file {model_file}: {e}")
+
     def _get_executor(self) -> ThreadPoolExecutor:
         with self._lock:
             if self.executor is None or getattr(self.executor, '_shutdown', True):
-                self.executor = ThreadPoolExecutor(max_workers=2)
+                self.executor = ThreadPoolExecutor(max_workers=os.cpu_count())
             return self.executor
 
     async def _run_in_executor(self, func, *args, **kwargs):
@@ -291,22 +328,31 @@ class LSTMModelManager:
         key = f"{symbol}-{timeframe}"
         with self._lock:
             if key in self._cache:
-                return self._cache[key]
+                model = self._cache[key]
+                if model.is_ready():
+                    return model
+                else:
+                    self.logger.warning(f"Model for {key} is in cache but not ready.")
+                    return None
         
+        self.logger.info(f"Model for {key} not in cache. It will be loaded on demand if a file exists.")
         try:
-            self.logger.info(f"Loading/creating model for {key}...")
             model = LSTMModel(symbol=symbol, timeframe=timeframe, model_path=self.model_path,
-                              input_shape=self.input_shape, units=self.units, lr=self.lr)
-            with self._lock:
-                self._cache[key] = model
-            return model
+                            input_shape=self.input_shape, units=self.units, lr=self.lr)
+            if model.is_ready():
+                with self._lock:
+                    self._cache[key] = model
+                return model
+            else:
+                self.logger.warning(f"On-demand model for {key} is not ready.")
+                return None
         except Exception as e:
             self.logger.error(f"Failed to get model for {key}: {e}")
             return None
 
     async def predict_async(self, symbol: str, timeframe: str, data: pd.DataFrame):
         model = self.get_model(symbol, timeframe)
-        if model and model.is_ready():
+        if model:
             return await self._run_in_executor(model.predict, data)
         return None
 

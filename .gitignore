@@ -2,6 +2,8 @@ logs/
 
 lstm-model/
 
+Main/
+
 # TensorFlow model files
 *.h5
 *.pb

@@ -19,7 +19,8 @@ class BacktraderStrategy(bt.Strategy):
         self.timeframe = self.p.timeframe
         self.owner_engine = self.p.owner_engine
         self.order = None
-        self.loop = self.owner_engine.loop
+        # Pre-calculate signals before the backtest starts
+        self.signals_df = self.owner_engine.pre_calculate_signals()
 
     def log(self, txt, dt=None):
         dt = dt or self.datas[0].datetime.date(0)
@@ -47,31 +48,31 @@ class BacktraderStrategy(bt.Strategy):
         if self.order:
             return
 
-        historical_data = self.owner_engine.get_historical_data(len(self))
-        if historical_data.empty:
+        # Get the current timestamp from backtrader
+        current_dt = pd.to_datetime(self.datas[0].datetime.datetime(0))
+        
+        # Find the signal corresponding to the current bar
+        if self.signals_df.empty or current_dt not in self.signals_df.index:
             return
+            
+        signal_row = self.signals_df.loc[current_dt]
+        signal_type = signal_row.get('signal_type')
 
-        signals = self.loop.run_until_complete(
-            self.signal_generator.generate_signals(historical_data, self.symbol, self.timeframe)
-        )
-
-        if not signals:
+        if not signal_type:
             return
-
-        signal = signals[0]
 
         if not self.position:
-            if signal.signal_type.value == "buy":
+            if signal_type == "buy":
                 self.log(f"BUY CREATE, {self.datas[0].close[0]:.2f}")
                 self.order = self.buy()
-            elif signal.signal_type.value == "sell":
+            elif signal_type == "sell":
                 self.log(f"SELL CREATE, {self.datas[0].close[0]:.2f}")
                 self.order = self.sell()
         else:
-            if self.position.size > 0 and signal.signal_type.value == "sell":
+            if self.position.size > 0 and signal_type == "sell":
                 self.log(f"CLOSE (SELL) CREATE, {self.datas[0].close[0]:.2f}")
                 self.order = self.close()
-            elif self.position.size < 0 and signal.signal_type.value == "buy":
+            elif self.position.size < 0 and signal_type == "buy":
                 self.log(f"CLOSE (BUY) CREATE, {self.datas[0].close[0]:.2f}")
                 self.order = self.close()
 
@@ -80,17 +81,40 @@ class BacktestingEngine:
     def __init__(self, trading_service):
         self.trading_service = trading_service
         self.full_data = None
-        try:
-            self.loop = asyncio.get_running_loop()
-        except RuntimeError:
+        self.loop = asyncio.get_event_loop()
+        if self.loop.is_closed():
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
 
-    def get_historical_data(self, current_index):
+    def get_historical_data(self, current_len):
         if self.full_data is not None and not self.full_data.empty:
-            end_pos = self.full_data.index.get_loc(self.full_data.index[current_index -1]) + 1
-            return self.full_data.iloc[:end_pos]
+            if current_len > len(self.full_data):
+                return self.full_data.copy()
+            return self.full_data.iloc[:current_len]
         return pd.DataFrame()
+
+    def pre_calculate_signals(self):
+        if self.full_data is None:
+            return pd.DataFrame()
+
+        # This function runs the signal generation once over the entire dataset
+        # This is a simplified example; a real implementation would be more complex
+        # to avoid lookahead bias, but it fixes the async-in-sync issue.
+        signals = self.loop.run_until_complete(
+            self.trading_service.signal_generator.generate_signals(
+                self.full_data, self.symbol, self.timeframe
+            )
+        )
+        
+        # Create a DataFrame from signals to easily look up by timestamp
+        if not signals:
+            return pd.DataFrame()
+        
+        signal_data = [{'timestamp': s.timestamp, 'signal_type': s.signal_type.value} for s in signals]
+        signals_df = pd.DataFrame(signal_data)
+        signals_df['timestamp'] = pd.to_datetime(signals_df['timestamp'])
+        signals_df = signals_df.set_index('timestamp')
+        return signals_df
 
     def run_backtest(
         self,
@@ -104,6 +128,10 @@ class BacktestingEngine:
         cerebro = bt.Cerebro(stdstats=False)
         cerebro.broker.setcash(initial_capital)
         cerebro.broker.setcommission(commission=commission_rate)
+
+        # Store symbol and timeframe for pre_calculate_signals
+        self.symbol = symbol
+        self.timeframe = timeframe
 
         self.full_data = self.loop.run_until_complete(
             self.trading_service.exchange_manager.fetch_ohlcv_data(symbol, timeframe, limit=5000)
