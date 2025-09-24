@@ -1,217 +1,229 @@
-# 🤖 ربات تحلیل و سیگنال‌دهی پیشرفته ارز دیجیتال
+<div dir="rtl">
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Open Source](https://badges.frapsoft.com/os/v1/open-source.svg?v=103)](https://opensource.org/)
-[![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python)](https://www.python.org/)
-[![Telegram](https://img.shields.io/badge/Telegram-Bot-blue?logo=telegram)](https://telegram.org/)
+# 🤖 ربات تحلیلگر و معامله‌گر ارز دیجیتال
+
+این پروژه یک ربات پیشرفته برای تحلیل بازار ارزهای دیجیتال و تولید سیگنال‌های معاملاتی است که با استفاده از پایتون و مجموعه‌ای از کتابخانه‌های قدرتمند توسعه داده شده است. ربات از طریق تلگرام با کاربر در ارتباط است و تحلیل‌های جامع و سریعی را ارائه می‌دهد.
+
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/License-GPLv3-green.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
+---
+
+## 🌟 ویژگی‌های اصلی
+
+- **تحلیل چندبعدی**: ترکیب تحلیل تکنیکال، آن‌چین، سنتیمنتال و فاندامنتال برای تولید سیگنال‌های دقیق‌تر.
+- **یادگیری ماشین (LSTM)**: استفاده از مدل‌های `LSTM` برای پیش‌بینی قیمت و افزایش اطمینان سیگنال‌ها.
+- **ارتباط با تلگرام**: رابط کاربری ساده از طریق ربات تلگرام برای اجرای تحلیل‌ها و دریافت نتایج.
+- **پردازش غیرهمزمان**: استفاده از `Celery` و `Redis` برای اجرای تحلیل‌های سنگین در پس‌زمینه بدون مسدود کردن ربات.
+- **تحلیل چند تایم‌فریم (Multi-Timeframe)**: تأیید سیگنال‌ها با بررسی هم‌راستایی روند در تایم‌فریم‌های مختلف.
+- **مدیریت پیکربندی پیشرفته**: قابلیت تنظیم پارامترهای ربات از طریق فایل‌های `.env` و `config.json`.
+- **امنیت**: رمزنگاری کلیدهای API برای محافظت از اطلاعات حساس.
+- **مانیتورینگ**: مانیتورینگ عملکرد ربات با استفاده از `Prometheus` و گزارش خطاها با `Sentry`.
+- **بک‌تستینگ (Backtesting)**: قابلیت ارزیابی استراتژی‌ها با استفاده از داده‌های تاریخی (با `backtrader`).
+- **بهینه‌سازی هایپرپارامترها**: استفاده از `Optuna` برای یافتن بهترین پارامترها برای مدل‌های یادگیری ماشین.
 
 ---
 
-## 🇮🇷 نسخه فارسی (Persian Version)
+## 🏗️ معماری پروژه
 
-به ربات پیشرفته تحلیل تکنیکال و سیگنال‌دهی ارزهای دیجیتال خوش آمدید! 🚀 این پروژه یک ابزار قدرتمند و متن-باز است که با استفاده از ترکیبی از اندیکاتورهای تکنیکال کلاسیک، الگوهای کندل استیک، تحلیل حجمی، یادگیری عمیق (LSTM)، تحلیل احساسات بازار و داده‌های آن-چین، فرصت‌های معاملاتی را شناسایی کرده و از طریق یک ربات تلگرام کاربرپسند به شما اطلاع می‌دهد.
+پروژه به صورت ماژولار طراحی شده تا توسعه و نگهداری آن آسان باشد. در ادامه، بخش‌های اصلی شرح داده شده‌اند:
 
-### ✨ ویژگی‌های کلیدی
+### ۱. هسته اصلی (`main.py`, `config.py`, `core.py`)
+- **`main.py`**: نقطه ورود اصلی برنامه که تمام سرویس‌ها، ربات تلگرام، زمان‌بند (`APScheduler`) و سرور مانیتورینگ را راه‌اندازی می‌کند.
+- **`config.py`**: مسئول مدیریت تنظیمات برنامه است. `Config` کلیدهای حساس را از متغیرهای محیطی می‌خواند و `ConfigManager` تنظیمات کاربر را از `config.json` مدیریت می‌کند.
+- **`core.py`**: شامل ساختارهای داده اصلی (Data Classes) مانند `TradingSignal` و `MarketAnalysis` است.
 
-- ✅ **تحلیل جامع تکنیکال**: استفاده از بیش از ۱۵ اندیکاتور محبوب مانند `RSI`, `MACD`, `Bollinger Bands`, `Ichimoku Cloud`, `SuperTrend` و `ADX`.
-- 🧠 **مدل یادگیری عمیق (LSTM)**: پیش‌بینی قیمت آینده با استفاده از یک مدل شبکه عصبی بازگشتی برای افزایش دقت سیگنال‌ها.
-- 🕒 **تحلیل چند-زمانی (Multi-Timeframe)**: تأیید سیگنال‌ها در تایم‌فریم‌های بالاتر برای کاهش نویز و افزایش اطمینان.
-- 😊 **تحلیل احساسات بازار**: دریافت شاخص ترس و طمع (Fear & Greed) و تحلیل اخبار از طریق CryptoPanic API برای درک بهتر جو بازار.
-- 🔗 **تحلیل آن-چین (On-Chain)**: بررسی معیارهایی مانند آدرس‌های فعال و حجم تراکنش‌ها برای تأیید قدرت روند (در صورت ارائه Alchemy URL).
-- 📈 **شناسایی الگوهای کلاسیک**: تشخیص خودکار الگوهایی مانند `Engulfing`, `Double Top/Bottom` و `Head and Shoulders`.
--  dynamic **سطوح ورود و خروج داینامیک**: محاسبه هوشمند نقاط ورود، حد سود، حد ضرر و حتی حد ضرر متحرک (Trailing Stop) بر اساس نوسانات بازار (ATR) و سطوح فیبوناچی.
-- 🤖 **رابط کاربری تلگرام**: تعامل آسان با ربات از طریق دستورات و دکمه‌های شیشه‌ای برای دریافت تحلیل‌های سریع یا جامع.
-- ⚙️ **پیکربندی آسان**: مدیریت آسان لیست ارزها، تایم‌فریم‌ها و تنظیمات کلیدی از طریق فایل `config.json` و متغیرهای محیطی.
-- 🗄️ **پایگاه داده داخلی**: ذخیره‌سازی و کش کردن داده‌های OHLCV در یک پایگاه داده SQLite برای دسترسی سریع‌تر و کاهش درخواست‌ها به صرافی.
+### ۲. تحلیل تکنیکال (`indicators.py`, `analyzers.py`)
+- **`indicators.py`**: مجموعه‌ای بزرگ از اندیکاتورهای تکنیکال (RSI, MACD, Bollinger Bands, ...) که با استفاده از کتابخانه‌های `TA-Lib` و `Pandas-TA` پیاده‌سازی شده‌اند.
+- **`analyzers.py`**: کلاس‌هایی برای تحلیل الگوهای کندل استیک، دایورجنس‌ها، شرایط بازار (روند، قدرت، نوسان) و حجم معاملات.
 
-### 🛠️ نصب و راه‌اندازی
+### ۳. جمع‌آوری داده و سنتیمنت (`sentiment.py`)
+این ماژول وظیفه جمع‌آوری داده از منابع خارجی را بر عهده دارد:
+- **`ExchangeManager`**: ارتباط با صرافی (از طریق `CCXT`) برای دریافت داده‌های OHLCV، دفتر سفارشات (Order Book) و داده‌های مربوط به مشتقات (Derivatives). همچنین از `Redis` برای کش کردن داده‌ها استفاده می‌کند.
+- **`NewsFetcher`**: دریافت شاخص ترس و طمع و آخرین اخبار از منابعی مانند CryptoPanic.
+- **`MarketIndicesFetcher`**: دریافت داده‌های شاخص‌های بازار (مانند دامیننس بیت‌کوین) و داده‌های اقتصاد کلان.
+- **`OnChainFetcher`**: دریافت داده‌های درون‌زنجیره‌ای از Glassnode.
 
-برای اجرای این ربات، مراحل زیر را دنبال کنید:
+### ۴. تولید سیگنال (`signals.py`)
+قلب تپنده ربات که در آن سیگنال‌ها تولید می‌شوند:
+- **`SignalGenerator`**: تمام تحلیل‌ها را ترکیب کرده و با ارزیابی شرایط، یک امتیاز اطمینان (Confidence Score) برای سیگنال‌های خرید یا فروش تولید می‌کند.
+- **`MultiTimeframeAnalyzer`**: سیگنال‌ها را با بررسی تایم‌فریم‌های بالاتر اعتبارسنجی می‌کند.
+- **`SignalRanking`**: سیگنال‌های تولید شده را بر اساس امتیاز و فاکتورهای دیگر رتبه‌بندی می‌کند.
 
-#### ۱. پیش‌نیازها
-- پایتون نسخه 3.9 یا بالاتر
-- `pip` و `venv`
-- دسترسی به یک صرافی پشتیبانی شده توسط `ccxt` (کد فعلی برای CoinEx تنظیم شده است)
+### ۵. یادگیری ماشین (`lstm.py`, `train_models.py`)
+- **`lstm.py`**: پیاده‌سازی مدل `LSTM` و یک `LSTMModelManager` برای مدیریت، آموزش و بارگذاری مدل‌های مختلف برای هر نماد و تایم‌فریم.
+- **`train_models.py`**: اسکریپتی برای آموزش دسته‌ای تمام مدل‌های `LSTM` بر اساس داده‌های تاریخی.
 
-#### ۲. کلون کردن مخزن
-```bash
-git clone [https://github.com/your-username/your-repository-name.git](https://github.com/your-username/your-repository-name.git)
-cd your-repository-name
-```
+### ۶. تعامل با کاربر (`telegram.py`, `tasks.py`)
+- **`telegram.py`**: مدیریت کامل ربات تلگرام، شامل تعریف دستورات و دکمه‌ها و فرمت‌بندی پیام‌ها.
+- **`tasks.py`**: تعریف وظایف `Celery` برای اجرای تحلیل‌های زمان‌بر در پس‌زمینه. این کار باعث می‌شود ربات همیشه پاسخگو بماند.
 
-#### ۳. ایجاد و فعال‌سازی محیط مجازی
-- **در ویندوز:**
-  ```bash
-  python -m venv venv
-  .\venv\Scripts\activate
-  ```
-- **در macOS/Linux:**
-  ```bash
-  python3 -m venv venv
-  source venv/bin/activate
-  ```
-
-#### ۴. نصب نیازمندی‌ها
-پیشنهاد می‌شود یک فایل `requirements.txt` ایجاد کرده و کتابخانه‌های زیر را در آن قرار دهید:
-```
-pandas
-numpy
-tensorflow
-scikit-learn
-ccxt
-python-telegram-bot[ext]
-aiosqlite
-requests
-web3
-```
-سپس با دستور زیر نصب کنید:
-```bash
-pip install -r requirements.txt
-```
-
-#### ۵. پیکربندی
-مهم‌ترین بخش، تنظیم کلیدهای API و توکن‌ها است. یک فایل به نام `.env` در ریشه پروژه ایجاد کرده و مقادیر زیر را در آن قرار دهید:
-
-```env
-# کلیدهای API صرافی (مثال برای CoinEx)
-COINEX_API_KEY="YOUR_COINEX_API_KEY"
-COINEX_SECRET="YOUR_COINEX_SECRET_KEY"
-
-# توکن ربات تلگرام از BotFather
-BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
-
-# (اختیاری) کلید API برای تحلیل اخبار
-CRYPTOPANIC_KEY="YOUR_CRYPTOPANIC_API_KEY"
-
-# (اختیاری) کلید API برای تحلیل آن-چین
-ALCHEMY_URL="YOUR_ALCHEMY_ETHEREUM_MAINNET_URL"
-```
-همچنین می‌توانید فایل `config.json` را برای تغییر لیست ارزها، تایم‌فریم‌ها و حداقل امتیاز اطمینان سیگنال ویرایش کنید.
-
-### ▶️ نحوه استفاده
-پس از اتمام مراحل نصب و پیکربندی، ربات را با دستور زیر اجرا کنید:
-```bash
-python main.py
-```
-سپس به ربات تلگرام خود رفته و دستور `/start` را ارسال کنید. از طریق دکمه‌های نمایش داده شده می‌توانید تحلیل سریع (`1m`) یا تحلیل جامع (برای تمام تایم‌فریم‌ها) را درخواست دهید.
-
-### 🤝 مشارکت
-مشارکت شما باعث پیشرفت جامعه متن-باز می‌شود. هرگونه مشارکت از طریق Pull Request یا ثبت Issue مورد استقبال قرار می‌گیرد.
-
-۱. پروژه را Fork کنید.
-۲. یک شاخه جدید برای ویژگی خود ایجاد کنید (`git checkout -b feature/AmazingFeature`).
-۳. تغییرات خود را Commit کنید (`git commit -m 'Add some AmazingFeature'`).
-۴. به شاخه خود Push کنید (`git push origin feature/AmazingFeature`).
-۵. یک Pull Request باز کنید.
-
-### 📜 لایسنس
-این پروژه تحت لایسنس `GPL v3` منتشر شده است. برای اطلاعات بیشتر فایل `LICENSE` را مطالعه کنید.
-
-### ⚠️ سلب مسئولیت
-این پروژه یک ابزار **آموزشی و تحقیقاتی** است و به هیچ عنوان توصیه مالی یا سرمایه‌گذاری محسوب نمی‌شود. بازار ارزهای دیجیتال بسیار پرنوسان است و ریسک بالایی دارد. نویسندگان این پروژه هیچ مسئولیتی در قبال سود یا زیان احتمالی شما نخواهند داشت. **همیشه خودتان تحقیق کنید (DYOR)**.
+### ۷. ابزارهای کمکی (`utils.py`, `security.py`, `monitoring.py`)
+- **`security.py`**: ابزارهایی برای رمزنگاری و محافظت از کلیدهای API.
+- **`monitoring.py`**: تعریف متریک‌های `Prometheus` برای نظارت بر عملکرد برنامه.
+- **`utils.py`**: شامل ابزارهای کاربردی مانند `RateLimiter` برای مدیریت درخواست‌ها به APIها.
 
 ---
+
+## 🚀 راهنمای راه‌اندازی
+
+۱. **پیش‌نیازها**:
+   - پایتون نسخه 3.10 یا بالاتر
+   - Redis
+   - نصب TA-Lib (دستورالعمل نصب آن بسته به سیستم‌عامل متفاوت است)
+
+۲. **نصب وابستگی‌ها**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+۳. **پیکربندی**:
+   - یک کپی از فایل `.env.example` (در صورت وجود) بسازید و نام آن را به `.env` تغییر دهید.
+   - کلیدهای API خود را برای تلگرام، صرافی و سایر سرویس‌ها در فایل `.env` وارد کنید.
+   - نمادهای مورد نظر خود را در فایل `symbols.txt` اضافه کنید.
+
+۴. **رمزنگاری کلیدها (اختیاری ولی پیشنهادی)**:
+   برای افزایش امنیت، اسکریپت زیر را اجرا کرده و یک رمز عبور برای رمزنگاری کلیدهای خود وارد کنید:
+   ```bash
+   python encrypt_keys.py
+   ```
+
+۵. **آموزش مدل‌ها (اختیاری)**:
+   برای آموزش اولیه مدل‌های LSTM بر اساس داده‌های تاریخی، اسکریپت زیر را اجرا کنید:
+   ```bash
+   python train_models.py
+   ```
+
+۶. **اجرای برنامه**:
+   - ابتدا سرور Celery را در یک ترمینال جداگانه اجرا کنید:
+     ```bash
+     celery -A module.celery_app worker --loglevel=info
+     ```
+   - سپس برنامه اصلی را اجرا کنید:
+     ```bash
+     python main.py
+     ```
+
+۷. **استفاده از ربات**:
+   - ربات تلگرام خود را باز کرده و دستور `/start` را ارسال کنید.
+   - از دکمه‌ها برای درخواست "تحلیل کامل" یا "اسکن سریع" استفاده کنید.
+
+---
+</div>
+
+<br>
+<hr>
+<br>
+
+<div dir="ltr">
+
+# 🤖 Crypto Analyst & Trading Bot
+
+This project is an advanced bot for analyzing the cryptocurrency market and generating trading signals, developed using Python and a suite of powerful libraries. The bot interacts with the user via Telegram, providing comprehensive and quick analyses.
+
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/License-GPLv3-green.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
 ---
 
-## 🇬🇧 English Version
+## 🌟 Key Features
 
-Welcome to the Advanced Crypto Technical Analysis & Signaling Bot! 🚀 This project is a powerful, open-source tool that identifies trading opportunities by combining classic technical indicators, candlestick patterns, volume analysis, Deep Learning (LSTM), market sentiment, and on-chain data. Signals are delivered through a user-friendly Telegram bot.
+- **Multi-dimensional Analysis**: Combines technical, on-chain, sentimental, and fundamental analysis to generate more accurate signals.
+- **Machine Learning (LSTM)**: Uses `LSTM` models to predict prices and increase signal confidence.
+- **Telegram Integration**: Simple user interface via a Telegram bot to run analyses and receive results.
+- **Asynchronous Processing**: Utilizes `Celery` and `Redis` to run heavy analyses in the background without blocking the bot.
+- **Multi-Timeframe Analysis**: Confirms signals by checking for trend alignment across different timeframes.
+- **Advanced Configuration Management**: Ability to set bot parameters through `.env` and `config.json` files.
+- **Security**: Encrypts API keys to protect sensitive information.
+- **Monitoring**: Monitors bot performance using `Prometheus` and reports errors with `Sentry`.
+- **Backtesting**: Capability to evaluate strategies using historical data (with `backtrader`).
+- **Hyperparameter Optimization**: Uses `Optuna` to find the best parameters for machine learning models.
 
-### ✨ Key Features
+---
 
-- ✅ **Comprehensive Technical Analysis**: Utilizes over 15 popular indicators, including `RSI`, `MACD`, `Bollinger Bands`, `Ichimoku Cloud`, `SuperTrend`, and `ADX`.
-- 🧠 **Deep Learning Model (LSTM)**: Predicts future price movements using a Recurrent Neural Network to enhance signal accuracy.
-- 🕒 **Multi-Timeframe Analysis**: Confirms signals on higher timeframes to reduce market noise and increase reliability.
-- 😊 **Market Sentiment Analysis**: Fetches the Fear & Greed Index and analyzes news from the CryptoPanic API to gauge market sentiment.
-- 🔗 **On-Chain Analysis**: Examines metrics like active addresses and transaction volume to confirm trend strength (requires an Alchemy URL).
-- 📈 **Classic Pattern Recognition**: Automatically detects patterns such as `Engulfing`, `Double Top/Bottom`, and `Head and Shoulders`.
-- 🎯 **Dynamic Entry & Exit Levels**: Intelligently calculates entry points, take-profit, stop-loss, and even a trailing stop based on market volatility (ATR) and Fibonacci levels.
-- 🤖 **Telegram User Interface**: Interact with the bot easily through commands and inline buttons to get quick scans or comprehensive analyses.
-- ⚙️ **Easy Configuration**: Manage the list of symbols, timeframes, and key settings through a `config.json` file and environment variables.
-- 🗄️ **Internal Database**: Caches OHLCV data in a local SQLite database for faster access and to reduce API calls to the exchange.
+## 🏗️ Project Architecture
 
-### 🛠️ Getting Started
+The project is designed modularly to facilitate easy development and maintenance. The main components are described below:
 
-Follow these steps to get the bot up and running.
+### 1. Core (`main.py`, `config.py`, `core.py`)
+- **`main.py`**: The main entry point of the application, which initializes all services, the Telegram bot, the scheduler (`APScheduler`), and the monitoring server.
+- **`config.py`**: Responsible for managing application settings. `Config` reads sensitive keys from environment variables, and `ConfigManager` handles user settings from `config.json`.
+- **`core.py`**: Contains the main data structures (Data Classes) like `TradingSignal` and `MarketAnalysis`.
 
-#### 1. Prerequisites
-- Python 3.9+
-- `pip` and `venv`
-- Access to a crypto exchange supported by `ccxt` (the code is currently configured for CoinEx).
+### 2. Technical Analysis (`indicators.py`, `analyzers.py`)
+- **`indicators.py`**: A large collection of technical indicators (RSI, MACD, Bollinger Bands, ...) implemented using the `TA-Lib` and `Pandas-TA` libraries.
+- **`analyzers.py`**: Classes for analyzing candlestick patterns, divergences, market conditions (trend, strength, volatility), and trading volume.
 
-#### 2. Clone the Repository
-```bash
-git clone [https://github.com/your-username/your-repository-name.git](https://github.com/your-username/your-repository-name.git)
-cd your-repository-name
-```
+### 3. Data Collection & Sentiment (`sentiment.py`)
+This module is responsible for gathering data from external sources:
+- **`ExchangeManager`**: Connects to the exchange (via `CCXT`) to fetch OHLCV, order book, and derivatives data. It also uses `Redis` for caching.
+- **`NewsFetcher`**: Fetches the Fear & Greed Index and the latest news from sources like CryptoPanic.
+- **`MarketIndicesFetcher`**: Fetches market index data (like Bitcoin dominance) and macroeconomic data.
+- **`OnChainFetcher`**: Fetches on-chain data from Glassnode.
 
-#### 3. Create and Activate a Virtual Environment
-- **On Windows:**
-  ```bash
-  python -m venv venv
-  .\venv\Scripts\activate
-  ```
-- **On macOS/Linux:**
-  ```bash
-  python3 -m venv venv
-  source venv/bin/activate
-  ```
+### 4. Signal Generation (`signals.py`)
+The heart of the bot where signals are generated:
+- **`SignalGenerator`**: Combines all analyses and generates a confidence score for buy or sell signals by evaluating conditions.
+- **`MultiTimeframeAnalyzer`**: Validates signals by checking higher timeframes.
+- **`SignalRanking`**: Ranks the generated signals based on their score and other factors.
 
-#### 4. Install Dependencies
-It's recommended to create a `requirements.txt` file and add the following libraries:
-```
-pandas
-numpy
-tensorflow
-scikit-learn
-ccxt
-python-telegram-bot[ext]
-aiosqlite
-requests
-web3
-```
-Then, install them using:
-```bash
-pip install -r requirements.txt
-```
+### 5. Machine Learning (`lstm.py`, `train_models.py`)
+- **`lstm.py`**: Implements the `LSTM` model and an `LSTMModelManager` to manage, train, and load different models for each symbol and timeframe.
+- **`train_models.py`**: A script for batch-training all `LSTM` models based on historical data.
 
-#### 5. Configuration
-This is the most critical step. Create a file named `.env` in the project's root directory and add your credentials:
+### 6. User Interaction (`telegram.py`, `tasks.py`)
+- **`telegram.py`**: Manages the entire Telegram bot, including defining commands, buttons, and message formatting.
+- **`tasks.py`**: Defines `Celery` tasks to run time-consuming analyses in the background, ensuring the bot remains responsive.
 
-```env
-# Exchange API Keys (Example for CoinEx)
-COINEX_API_KEY="YOUR_COINEX_API_KEY"
-COINEX_SECRET="YOUR_COINEX_SECRET_KEY"
+### 7. Utilities (`utils.py`, `security.py`, `monitoring.py`)
+- **`security.py`**: Tools for encrypting and protecting API keys.
+- **`monitoring.py`**: Defines `Prometheus` metrics for monitoring application performance.
+- **`utils.py`**: Contains useful utilities like a `RateLimiter` for managing API requests.
 
-# Telegram Bot Token from @BotFather
-BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
+---
 
-# (Optional) API Key for News Sentiment Analysis
-CRYPTOPANIC_KEY="YOUR_CRYPTOPANIC_API_KEY"
+## 🚀 Setup Guide
 
-# (Optional) API Key for On-Chain Analysis
-ALCHEMY_URL="YOUR_ALCHEMY_ETHEREUM_MAINNET_URL"
-```
-You can also edit the `config.json` file to modify the list of symbols, timeframes, and the minimum signal confidence score.
+1. **Prerequisites**:
+   - Python 3.10+
+   - Redis
+   - TA-Lib (installation instructions vary by OS)
 
-### ▶️ Usage
-After completing the installation and configuration, run the bot with the following command:
-```bash
-python main.py
-```
-Navigate to your Telegram bot and send the `/start` command. You can request a quick scan (`1m`) or a comprehensive analysis across all timeframes using the inline buttons.
+2. **Install Dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-### 🤝 Contributing
-Contributions are what make the open-source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
+3. **Configuration**:
+   - Create a copy of `.env.example` (if it exists) and rename it to `.env`.
+   - Enter your API keys for Telegram, the exchange, and other services in the `.env` file.
+   - Add your desired symbols to the `symbols.txt` file.
 
-1. Fork the Project.
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`).
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`).
-4. Push to the Branch (`git push origin feature/AmazingFeature`).
-5. Open a Pull Request.
+4. **Encrypt Keys (Optional but Recommended)**:
+   For enhanced security, run the following script and enter a password to encrypt your keys:
+   ```bash
+   python encrypt_keys.py
+   ```
 
-### 📜 License
-This project is distributed under the `GPL v3` License. See the `LICENSE` file for more information.
+5. **Train Models (Optional)**:
+   To perform an initial training of the LSTM models on historical data, run the following script:
+   ```bash
+   python train_models.py
+   ```
 
-### ⚠️ Disclaimer
-This project is for **educational and research purposes only**. It is not financial advice. The cryptocurrency market is extremely volatile and carries a high degree of risk. The authors of this project are not responsible for any potential profits or losses. **Always Do Your Own Research (DYOR)**.
+6. **Run the Application**:
+   - First, run the Celery worker in a separate terminal:
+     ```bash
+     celery -A module.celery_app worker --loglevel=info
+     ```
+   - Then, run the main application:
+     ```bash
+     python main.py
+     ```
+
+7. **Using the Bot**:
+   - Open your Telegram bot and send the `/start` command.
+   - Use the buttons to request a "Full Analysis" or a "Quick Scan".
+
+---
+</div>
