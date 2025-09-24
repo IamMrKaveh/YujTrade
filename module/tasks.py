@@ -4,6 +4,7 @@ from typing import Optional
 
 from celery.signals import task_failure, task_postrun, task_prerun
 from telegram.ext import Application
+import redis.asyncio as redis
 
 from module.celery_app import celery_app
 from module.config import Config, ConfigManager
@@ -41,7 +42,6 @@ class TaskServiceContainer:
         self.loop = asyncio.get_running_loop()
         self.config_manager = ConfigManager()
         
-        # Initialize Redis client once
         try:
             self.redis_client = redis.Redis(host=Config.REDIS_HOST, port=Config.REDIS_PORT, decode_responses=True)
             await self.redis_client.ping()
@@ -80,7 +80,6 @@ class TaskServiceContainer:
             signal_ranking=SignalRanking(),
         )
         
-        # Telegram app is built and set from the main process
         self.telegram_app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
         self.trading_service.set_telegram_app(self.telegram_app)
         
@@ -111,13 +110,12 @@ def run_full_analysis_task(chat_id: int, message_id: int):
 def run_quick_scan_task(chat_id: int, message_id: int):
     logger.info(f"Celery task 'run_quick_scan_task' started for chat_id: {chat_id}")
     trading_service, loop = asyncio.run(_get_services())
-    loop.run_until_complete(trading_service.run_find_best_signals_task("1h", chat_id, message_id))
+    loop.run_until_complete(trading_service.run_find_best_signals_task("1m", chat_id, message_id))
     logger.info(f"Celery task 'run_quick_scan_task' finished for chat_id: {chat_id}")
 
 
 @task_prerun.connect
 def task_prerun_handler(sender=None, task_id=None, task=None, **kwargs):
-    # Using a simple time recording method as backend might not be immediately available
     task.start_time = time.time()
 
 

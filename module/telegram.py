@@ -229,7 +229,7 @@ class TelegramBotHandler:
         keyboard = [
             [
                 InlineKeyboardButton("🚀 Full Analysis", callback_data="full_analysis"),
-                InlineKeyboardButton("⚡ Quick Scan (1h)", callback_data="quick_scan"),
+                InlineKeyboardButton("⚡ Quick Scan (1m)", callback_data="quick_scan"),
             ],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
