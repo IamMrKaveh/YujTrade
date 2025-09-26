@@ -1,7 +1,7 @@
 import asyncio
 import io
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -14,7 +14,7 @@ from module.config import Config, ConfigManager
 from module.constants import TIME_FRAMES
 from module.core import SignalType, TradingSignal
 from module.logger_config import logger
-from module.monitoring import SIGNALS_GENERATED_TOTAL
+from module.market import MarketDataProvider
 from module.signals import SignalGenerator, SignalRanking
 
 
@@ -22,12 +22,12 @@ class TradingBotService:
     def __init__(
         self,
         config: ConfigManager,
-        exchange_manager,
+        market_data_provider: MarketDataProvider,
         signal_generator: SignalGenerator,
         signal_ranking: SignalRanking,
     ):
         self.config = config
-        self.exchange_manager = exchange_manager
+        self.market_data_provider = market_data_provider
         self.signal_generator = signal_generator
         self.signal_ranking = signal_ranking
         self._initialized = False
@@ -39,13 +39,11 @@ class TradingBotService:
     async def initialize(self):
         if self._initialized:
             return
-        if self.exchange_manager:
-            await self.exchange_manager.init_database()
         self._initialized = True
 
     async def analyze_symbol(self, symbol: str, timeframe: str) -> List[TradingSignal]:
         try:
-            data = await self.exchange_manager.fetch_ohlcv_data(symbol, timeframe, limit=300)
+            data = await self.market_data_provider.fetch_ohlcv_data(symbol, timeframe, limit=300)
             if data is None or data.empty or len(data) < 100:
                 logger.warning(f"Insufficient data for {symbol} on {timeframe}")
                 return []
@@ -54,10 +52,6 @@ class TradingBotService:
             min_confidence = self.config.get("min_confidence_score", 60)
             qualified_signals = [s for s in all_signals if s.confidence_score >= min_confidence]
 
-            for signal in qualified_signals:
-                SIGNALS_GENERATED_TOTAL.labels(
-                    symbol=signal.symbol, timeframe=signal.timeframe, signal_type=signal.signal_type.value
-                ).inc()
             return qualified_signals
         except Exception as e:
             logger.error(f"Analysis failed for {symbol} on {timeframe}: {e}", exc_info=True)
@@ -66,8 +60,15 @@ class TradingBotService:
     async def find_best_signals_for_timeframe(self, timeframe: str) -> List[TradingSignal]:
         symbols = self.config.get("symbols", [])
         tasks = [self.analyze_symbol(symbol, timeframe) for symbol in symbols]
-        results = await asyncio.gather(*tasks)
-        all_signals = [signal for res in results for signal in res]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        all_signals = []
+        for res in results:
+            if isinstance(res, list):
+                all_signals.extend(res)
+            elif isinstance(res, Exception):
+                logger.error(f"An exception occurred during symbol analysis: {res}")
+
         ranked_signals = self.signal_ranking.rank_signals(all_signals)
         return ranked_signals[: self.config.get("max_signals_per_timeframe", 3)]
 
@@ -148,8 +149,8 @@ class TradingBotService:
             await self.telegram_app.bot.send_message(chat_id=chat_id, text=final_message)
 
     async def cleanup(self):
-        if hasattr(self, "exchange_manager") and self.exchange_manager and self._initialized:
-            await self.exchange_manager.close()
+        if hasattr(self, "market_data_provider") and self.market_data_provider and self._initialized:
+            await self.market_data_provider.close()
         self._initialized = False
         if self.signal_generator and self.signal_generator.lstm_model_manager:
             self.signal_generator.lstm_model_manager.cleanup()
@@ -212,12 +213,13 @@ class TelegramBotHandler:
     async def initialize(self):
         await self.trading_service.initialize()
 
-    def create_application(self):
+    def create_application(self, background_tasks: Set[asyncio.Task]):
         app_builder = Application.builder().token(self.bot_token)
+        app_builder.connect_timeout(30).read_timeout(30).write_timeout(30)
         app_builder.post_init(self.post_init)
         self.application = app_builder.build()
         self.application.add_handler(CommandHandler("start", self.start_command))
-        self.application.add_handler(CallbackQueryHandler(self.button_callback))
+        self.application.add_handler(CallbackQueryHandler(self.button_callback_factory(background_tasks)))
         return self.application
     
     async def post_init(self, application: Application):
@@ -235,17 +237,29 @@ class TelegramBotHandler:
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text("Welcome to the Trading Bot! Choose an option:", reply_markup=reply_markup)
 
-    async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        from module.tasks import run_full_analysis_task, run_quick_scan_task
-        query = update.callback_query
-        await query.answer()
+    def button_callback_factory(self, background_tasks: Set[asyncio.Task]):
+        async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            from module.tasks import run_full_analysis_task, run_quick_scan_task
+            query = update.callback_query
+            await query.answer()
 
-        if query.data == "full_analysis":
-            await query.edit_message_text("✅ Full analysis request queued. You will receive updates as each timeframe is processed.")
-            run_full_analysis_task.delay(query.message.chat_id, query.message.message_id)
-        elif query.data == "quick_scan":
-            await query.edit_message_text("✅ Quick scan request queued. This will be processed shortly.")
-            run_quick_scan_task.delay(query.message.chat_id, query.message.message_id)
+            try:
+                task = None
+                if query.data == "full_analysis":
+                    await query.edit_message_text("✅ Full analysis request accepted. You will receive updates as each timeframe is processed.")
+                    task = asyncio.create_task(run_full_analysis_task(query.message.chat_id, query.message.message_id))
+                elif query.data == "quick_scan":
+                    await query.edit_message_text("✅ Quick scan request accepted. This will be processed shortly.")
+                    task = asyncio.create_task(run_quick_scan_task(query.message.chat_id, query.message.message_id))
+                
+                if task:
+                    background_tasks.add(task)
+                    task.add_done_callback(background_tasks.discard)
+
+            except Exception as e:
+                logger.error(f"Error in button_callback: {e}")
+                await query.message.reply_text("An error occurred while processing your request.")
+        return button_callback
 
     async def run_scheduled_analysis(self):
         logger.info("Running scheduled analysis...")

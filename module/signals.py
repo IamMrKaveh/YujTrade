@@ -12,10 +12,11 @@ from module.analyzers import (MarketConditionAnalyzer,
                               PatternAnalyzer)
 from module.constants import (MULTI_TF_CONFIRMATION_MAP,
                               MULTI_TF_CONFIRMATION_WEIGHTS)
-from module.core import (DerivativesAnalysis, DynamicLevels, FundamentalAnalysis,
-                         IndicatorResult, MarketAnalysis, OrderBookAnalysis,
+from module.core import (DynamicLevels, FundamentalAnalysis,
+                         IndicatorResult, MarketAnalysis,
                          SignalType, TradingSignal, TrendDirection,
                          TrendStrength)
+from module.data_sources import MarketIndicesFetcher, NewsFetcher
 from module.indicators import (ADXIndicator, ATRIndicator,
                                BollingerBandsIndicator, CCIIndicator,
                                ChaikinMoneyFlowIndicator, IchimokuIndicator,
@@ -31,14 +32,12 @@ from module.indicators import (ADXIndicator, ATRIndicator,
                                StandardDeviationIndicator)
 from module.logger_config import logger
 from module.lstm import LSTMModelManager
-from module.sentiment import (CoinGeckoFetcher, ExchangeManager,
-                              MarketIndicesFetcher, NewsFetcher,
-                              OnChainFetcher)
+from module.market import MarketDataProvider
 
 
 class MultiTimeframeAnalyzer:
-    def __init__(self, exchange_manager, indicators, cache_ttl=300):
-        self.exchange_manager = exchange_manager
+    def __init__(self, market_data_provider: MarketDataProvider, indicators, cache_ttl=300):
+        self.market_data_provider = market_data_provider
         self.indicators = indicators
         self._cache = {}
         self._cache_expiry = {}
@@ -65,7 +64,7 @@ class MultiTimeframeAnalyzer:
             base_key = (symbol, exec_tf)
             base_signals = await self._get_cache(base_key)
             if not base_signals:
-                base_df = await self.exchange_manager.fetch_ohlcv_data(symbol, exec_tf)
+                base_df = await self.market_data_provider.fetch_ohlcv_data(symbol, exec_tf)
                 if base_df.empty or len(base_df) < 50:
                     return False
                 base_signals = self._analyze_indicators(base_df)
@@ -96,7 +95,7 @@ class MultiTimeframeAnalyzer:
             confirm_key = (symbol, tf)
             confirm_signals = await self._get_cache(confirm_key)
             if not confirm_signals:
-                confirm_df = await self.exchange_manager.fetch_ohlcv_data(symbol, tf)
+                confirm_df = await self.market_data_provider.fetch_ohlcv_data(symbol, tf)
                 if confirm_df.empty or len(confirm_df) < 50:
                     return 0, 0
                 confirm_signals = self._analyze_indicators(confirm_df)
@@ -144,273 +143,142 @@ class MultiTimeframeAnalyzer:
         return signals
 
 class SignalGenerator:
-    def __init__(self, exchange_manager: ExchangeManager, news_fetcher: Optional[NewsFetcher] = None,
-                 onchain_fetcher: Optional[OnChainFetcher] = None,
-                 coingecko_fetcher: Optional[CoinGeckoFetcher] = None,
+
+    INDICATOR_WEIGHTS = {
+        'rsi': 15, 'macd': 12, 'stoch': 10, 'mfi': 12, 'cci': 8, 'williams_r': 8,
+        'bb': 8, 'supertrend': 10, 'psar': 8, 'ichimoku': 10,
+        'volume': 7, 'cmf': 7, 'obv': 5,
+        'trend': 15, 'strength': 10, 'divergence': 15, 'pattern': 10,
+        'fear_greed': 8, 'btc_dominance': 5, 'dxy': 5,
+        'lstm': 15, 'multi_tf': 10
+    }
+    
+    def __init__(self, market_data_provider: MarketDataProvider, news_fetcher: Optional[NewsFetcher] = None,
                  market_indices_fetcher: Optional[MarketIndicesFetcher] = None,
                  lstm_model_manager: Optional[LSTMModelManager] = None,
                  multi_tf_analyzer: Optional[MultiTimeframeAnalyzer] = None,
                  config: Optional[Dict] = None):
-        self.exchange_manager = exchange_manager
+        self.market_data_provider = market_data_provider
         self.indicators = {
-            'sma_20': MovingAverageIndicator(20, "sma"),
-            'sma_50': MovingAverageIndicator(50, "sma"),
-            'ema_12': MovingAverageIndicator(12, "ema"),
-            'ema_26': MovingAverageIndicator(26, "ema"),
-            'rsi': RSIIndicator(),
-            'macd': MACDIndicator(),
-            'bb': BollingerBandsIndicator(),
-            'stoch': StochasticIndicator(),
-            'volume': VolumeIndicator(),
-            'atr': ATRIndicator(),
-            'ichimoku': IchimokuIndicator(),
-            'williams_r': WilliamsRIndicator(),
-            'cci': CCIIndicator(),
-            'supertrend': SuperTrendIndicator(),
-            'adx': ADXIndicator(),
-            'cmf': ChaikinMoneyFlowIndicator(),
-            'obv': OBVIndicator(),
-            'squeeze': SqueezeMomentumIndicator(),
-            'psar': ParabolicSARIndicator(),
-            'vwap': VWAPIndicator(),
-            'mfi': MoneyFlowIndexIndicator(),
-            'aroon': AroonIndicator(),
-            'uo': UltimateOscillatorIndicator(),
-            'roc': ROCIndicator(),
-            'ad_line': ADLineIndicator(),
-            'force_index': ForceIndexIndicator(),
-            'vwma': VWMAIndicator(),
-            'keltner': KeltnerChannelsIndicator(),
-            'donchian': DonchianChannelsIndicator(),
-            'trix': TRIXIndicator(),
-            'eom': EaseOfMovementIndicator(),
+            'sma_20': MovingAverageIndicator(20, "sma"), 'sma_50': MovingAverageIndicator(50, "sma"),
+            'ema_12': MovingAverageIndicator(12, "ema"), 'ema_26': MovingAverageIndicator(26, "ema"),
+            'rsi': RSIIndicator(), 'macd': MACDIndicator(), 'bb': BollingerBandsIndicator(),
+            'stoch': StochasticIndicator(), 'volume': VolumeIndicator(), 'atr': ATRIndicator(),
+            'ichimoku': IchimokuIndicator(), 'williams_r': WilliamsRIndicator(), 'cci': CCIIndicator(),
+            'supertrend': SuperTrendIndicator(), 'adx': ADXIndicator(), 'cmf': ChaikinMoneyFlowIndicator(),
+            'obv': OBVIndicator(), 'squeeze': SqueezeMomentumIndicator(), 'psar': ParabolicSARIndicator(),
+            'vwap': VWAPIndicator(), 'mfi': MoneyFlowIndexIndicator(), 'aroon': AroonIndicator(),
+            'uo': UltimateOscillatorIndicator(), 'roc': ROCIndicator(), 'ad_line': ADLineIndicator(),
+            'force_index': ForceIndexIndicator(), 'vwma': VWMAIndicator(), 'keltner': KeltnerChannelsIndicator(),
+            'donchian': DonchianChannelsIndicator(), 'trix': TRIXIndicator(), 'eom': EaseOfMovementIndicator(),
             'std_dev': StandardDeviationIndicator()
         }
         self.market_analyzer = MarketConditionAnalyzer()
         self.news_fetcher = news_fetcher
-        self.onchain_fetcher = onchain_fetcher
-        self.coingecko_fetcher = coingecko_fetcher
         self.market_indices_fetcher = market_indices_fetcher
         self.lstm_model_manager = lstm_model_manager
         self.multi_tf_analyzer = multi_tf_analyzer
-        self.config = config or {'min_confidence_score': 60}
+        self.config = config or {'min_confidence_score': 75}
 
     def _safe_dataframe(self, df):
-        if df is None or df.empty:
-            return pd.DataFrame()
-
+        if df is None or df.empty: return pd.DataFrame()
         try:
             df_copy = df.copy()
-
             numeric_cols = ['open', 'high', 'low', 'close', 'volume']
             for col in numeric_cols:
-                if col in df_copy.columns:
-                    df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce')
-
-            df_copy = df_copy.replace([np.inf, -np.inf], np.nan)
-            df_copy = df_copy.dropna(subset=numeric_cols, how='any')
-
+                if col in df_copy.columns: df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce')
+            df_copy = df_copy.replace([np.inf, -np.inf], np.nan).dropna(subset=numeric_cols, how='any')
             for col in ['open', 'high', 'low', 'close']:
-                if col in df_copy.columns:
-                    df_copy = df_copy[df_copy[col] > 0]
-
-            if 'volume' in df_copy.columns:
-                df_copy = df_copy[df_copy['volume'] >= 0]
-
-            if 'high' in df_copy.columns and 'low' in df_copy.columns:
-                invalid_ohlc = (df_copy['high'] < df_copy['low'])
-                if invalid_ohlc.any():
-                    df_copy = df_copy[~invalid_ohlc]
-
-            return df_copy.reset_index(drop=True)
-
+                if col in df_copy.columns: df_copy = df_copy[df_copy[col] > 0]
+            if 'volume' in df_copy.columns: df_copy = df_copy[df_copy['volume'] >= 0]
+            if 'high' in df_copy.columns and 'low' in df_copy.columns and (df_copy['high'] < df_copy['low']).any():
+                df_copy = df_copy[~(df_copy['high'] < df_copy['low'])]
+            if not isinstance(df_copy.index, pd.DatetimeIndex): df_copy = df_copy.reset_index(drop=True)
+            return df_copy
         except Exception as e:
             logger.error(f"Error in _safe_dataframe: {e}")
             return pd.DataFrame()
 
-    def calculate_dynamic_levels(self, data: pd.DataFrame, signal_type: SignalType, market_analysis: MarketAnalysis) -> DynamicLevels:
+    def calculate_dynamic_levels(self, data: pd.DataFrame, market_analysis: MarketAnalysis, signal_type: SignalType) -> DynamicLevels:
         last_close = data['close'].iloc[-1]
         atr = market_analysis.volatility / 100 * last_close if market_analysis.volatility > 0 else data['close'].pct_change().std() * last_close
-        if atr == 0 or pd.isna(atr):
-            atr = last_close * 0.01
+        if pd.isna(atr) or atr == 0: atr = last_close * 0.01
 
         if signal_type == SignalType.BUY:
-            primary_entry = last_close
-            secondary_entry = last_close - 0.5 * atr
-            primary_exit = last_close + 2 * atr
-            secondary_exit = last_close + 3 * atr
-            tight_stop = primary_entry - 1 * atr
-            wide_stop = primary_entry - 1.5 * atr
-        else: # SELL
-            primary_entry = last_close
-            secondary_entry = last_close + 0.5 * atr
-            primary_exit = last_close - 2 * atr
-            secondary_exit = last_close - 3 * atr
-            tight_stop = primary_entry + 1 * atr
-            wide_stop = primary_entry + 1.5 * atr
+            primary_entry, secondary_entry = last_close, last_close - 0.5 * atr
+            primary_exit, secondary_exit = last_close + 2 * atr, last_close + 3.5 * atr
+            tight_stop, wide_stop = primary_entry - 1.2 * atr, primary_entry - 2.0 * atr
+        else:
+            primary_entry, secondary_entry = last_close, last_close + 0.5 * atr
+            primary_exit, secondary_exit = last_close - 2 * atr, last_close - 3.5 * atr
+            tight_stop, wide_stop = primary_entry + 1.2 * atr, primary_entry + 2.0 * atr
 
         return DynamicLevels(
-            primary_entry=primary_entry,
-            secondary_entry=secondary_entry,
-            primary_exit=primary_exit,
-            secondary_exit=secondary_exit,
-            tight_stop=tight_stop,
-            wide_stop=wide_stop,
+            primary_entry=primary_entry, secondary_entry=secondary_entry,
+            primary_exit=primary_exit, secondary_exit=secondary_exit,
+            tight_stop=tight_stop, wide_stop=wide_stop,
             breakeven_point=primary_entry + 0.2 * atr if signal_type == SignalType.BUY else primary_entry - 0.2 * atr,
-            trailing_stop=atr * 0.5
+            trailing_stop=atr * 0.7
         )
 
-    def _evaluate_buy_signal(self,
-                            indicators: Dict[str, IndicatorResult],
-                            market_analysis: MarketAnalysis,
-                            patterns: List[str],
-                            sentiment_data: Dict[str, Any],
-                            data: pd.DataFrame,
-                            symbol: str,
-                            timeframe: str
-                            ) -> Optional[TradingSignal]:
-        try:
-            if data.empty or 'close' not in data.columns:
-                return None
+    def _calculate_confidence_score(self, signal_type: SignalType, indicators: Dict, market_analysis: MarketAnalysis, patterns: List, sentiment: Dict) -> Tuple[float, List[str]]:
+        score, total_weight = 0, 0
+        reasons = []
 
-            score = 0
-            reasons = []
+        confirmations = {
+            'rsi': (lambda res: res.interpretation == "oversold"), 'stoch': (lambda res: res.interpretation == "oversold"),
+            'mfi': (lambda res: res.interpretation == "oversold"), 'cci': (lambda res: res.interpretation == "oversold"),
+            'williams_r': (lambda res: res.interpretation == "oversold"), 'macd': (lambda res: "bullish" in res.interpretation),
+            'bb': (lambda res: "lower" in res.interpretation), 'supertrend': (lambda res: "bullish" in res.interpretation),
+            'psar': (lambda res: "bullish" in res.interpretation), 'ichimoku': (lambda res: "above" in res.interpretation),
+            'cmf': (lambda res: "buy" in res.interpretation), 'obv': (lambda res: "bullish" in res.interpretation),
+        } if signal_type == SignalType.BUY else {
+            'rsi': (lambda res: res.interpretation == "overbought"), 'stoch': (lambda res: res.interpretation == "overbought"),
+            'mfi': (lambda res: res.interpretation == "overbought"), 'cci': (lambda res: res.interpretation == "overbought"),
+            'williams_r': (lambda res: res.interpretation == "overbought"), 'macd': (lambda res: "bearish" in res.interpretation),
+            'bb': (lambda res: "upper" in res.interpretation), 'supertrend': (lambda res: "bearish" in res.interpretation),
+            'psar': (lambda res: "bearish" in res.interpretation), 'ichimoku': (lambda res: "below" in res.interpretation),
+            'cmf': (lambda res: "sell" in res.interpretation), 'obv': (lambda res: "bearish" in res.interpretation),
+        }
+        
+        contradictions = {
+            'rsi': (lambda res: res.interpretation == "overbought"), 'stoch': (lambda res: res.interpretation == "overbought"),
+            'mfi': (lambda res: res.interpretation == "overbought"),
+        } if signal_type == SignalType.BUY else {
+            'rsi': (lambda res: res.interpretation == "oversold"), 'stoch': (lambda res: res.interpretation == "oversold"),
+            'mfi': (lambda res: res.interpretation == "oversold"),
+        }
 
-            rsi_res = indicators.get('rsi')
-            if rsi_res and rsi_res.interpretation == "oversold":
-                score += 20; reasons.append(f"RSI oversold ({rsi_res.value:.2f})")
-            
-            macd_res = indicators.get('macd')
-            if macd_res and macd_res.interpretation == "bullish_crossover":
-                score += 15; reasons.append("MACD bullish crossover")
+        for name, check in confirmations.items():
+            res = indicators.get(name)
+            weight = self.INDICATOR_WEIGHTS.get(name, 0)
+            if res and weight > 0:
+                total_weight += weight
+                if check(res):
+                    points = (res.signal_strength / 100) * weight
+                    score += points
+                    reasons.append(f"Confirm: {res.name} ({res.interpretation}, strength: {res.signal_strength:.0f}%) -> +{points:.1f} pts")
 
-            bb_res = indicators.get('bb')
-            if bb_res and bb_res.interpretation == "near_lower_band":
-                score += 10; reasons.append("Price near Bollinger Lower Band")
-            
-            stoch_res = indicators.get('stoch')
-            if stoch_res and stoch_res.interpretation == "oversold":
-                score += 10; reasons.append(f"Stochastic oversold ({stoch_res.value:.2f})")
+        for name, check in contradictions.items():
+            res = indicators.get(name)
+            weight = self.INDICATOR_WEIGHTS.get(name, 0)
+            if res and weight > 0:
+                if check(res):
+                    penalty = (res.signal_strength / 100) * weight * 1.5
+                    score -= penalty
+                    reasons.append(f"Penalty: {res.name} ({res.interpretation}) -> -{penalty:.1f} pts")
 
-            mfi_res = indicators.get('mfi')
-            if mfi_res and mfi_res.interpretation == "oversold":
-                score += 15; reasons.append(f"MFI oversold ({mfi_res.value:.2f})")
-            
-            aroon_res = indicators.get('aroon')
-            if aroon_res and 'uptrend' in aroon_res.interpretation:
-                score += 5; reasons.append("Aroon indicates uptrend")
-            
-            vwap_res = indicators.get('vwap')
-            if vwap_res and 'above' in vwap_res.interpretation:
-                score += 5; reasons.append("Price above VWAP")
-            
-            bullish_patterns = [p for p in patterns if 'bullish' in p or 'Up' in p or 'Morning' in p or 'Hammer' in p or 'Soldiers' in p]
-            if bullish_patterns:
-                score += 10; reasons.append(f"Bullish pattern: {bullish_patterns[0]}")
-
-            if 'bullish_divergence' in patterns:
-                score += 15; reasons.append("Bullish divergence detected")
-            if market_analysis.trend == TrendDirection.BULLISH:
-                score += 10
-                if market_analysis.trend_strength == TrendStrength.STRONG: score += 5
-                reasons.append(f"Aligned with market trend ({market_analysis.trend.value} - {market_analysis.trend_strength.value})")
-
-            btc_d = sentiment_data.get('BTC.D')
-            if btc_d is not None and btc_d < 45:
-                score += 5; reasons.append("Altcoin season (low BTC.D)")
-
-            dxy = sentiment_data.get('DXY')
-            if dxy is not None and dxy < 100:
-                score += 5; reasons.append("Weak US Dollar (DXY)")
-
-            fear_greed = sentiment_data.get('FEAR.GREED')
-            if fear_greed is not None and fear_greed < 30:
-                score += 10; reasons.append("Market in Extreme Fear")
-
-            if score >= self.config.get('min_confidence_score', 60):
-                dynamic_levels = self.calculate_dynamic_levels(data, SignalType.BUY, market_analysis)
-                return self._create_trading_signal(symbol, timeframe, SignalType.BUY, score, reasons, dynamic_levels, data, market_analysis)
-
-            return None
-        except Exception as e:
-            logger.error(f"Error evaluating buy signal for {symbol}: {e}")
-            return None
-
-    def _evaluate_sell_signal(self,
-                             indicators: Dict[str, IndicatorResult],
-                             market_analysis: MarketAnalysis,
-                             patterns: List[str],
-                             sentiment_data: Dict[str, Any],
-                             data: pd.DataFrame,
-                             symbol: str,
-                             timeframe: str
-                             ) -> Optional[TradingSignal]:
-        try:
-            if data.empty or 'close' not in data.columns:
-                return None
-
-            score = 0
-            reasons = []
-
-            rsi_res = indicators.get('rsi')
-            if rsi_res and rsi_res.interpretation == "overbought":
-                score += 20; reasons.append(f"RSI overbought ({rsi_res.value:.2f})")
-            
-            macd_res = indicators.get('macd')
-            if macd_res and macd_res.interpretation == "bearish_crossover":
-                score += 15; reasons.append("MACD bearish crossover")
-
-            bb_res = indicators.get('bb')
-            if bb_res and bb_res.interpretation == "near_upper_band":
-                score += 10; reasons.append("Price near Bollinger Upper Band")
-
-            stoch_res = indicators.get('stoch')
-            if stoch_res and stoch_res.interpretation == "overbought":
-                score += 10; reasons.append(f"Stochastic overbought ({stoch_res.value:.2f})")
-            
-            mfi_res = indicators.get('mfi')
-            if mfi_res and mfi_res.interpretation == "overbought":
-                score += 15; reasons.append(f"MFI overbought ({mfi_res.value:.2f})")
-            
-            aroon_res = indicators.get('aroon')
-            if aroon_res and 'downtrend' in aroon_res.interpretation:
-                score += 5; reasons.append("Aroon indicates downtrend")
-            
-            vwap_res = indicators.get('vwap')
-            if vwap_res and 'below' in vwap_res.interpretation:
-                score += 5; reasons.append("Price below VWAP")
-
-            bearish_patterns = [p for p in patterns if 'bearish' in p or 'Down' in p or 'Evening' in p or 'Hanging' in p or 'Crows' in p]
-            if bearish_patterns:
-                score += 10; reasons.append(f"Bearish pattern: {bearish_patterns[0]}")
-
-            if 'bearish_divergence' in patterns:
-                score += 15; reasons.append("Bearish divergence detected")
-            if market_analysis.trend == TrendDirection.BEARISH:
-                score += 10
-                if market_analysis.trend_strength == TrendStrength.STRONG: score += 5
-                reasons.append(f"Aligned with market trend ({market_analysis.trend.value} - {market_analysis.trend_strength.value})")
-
-            btc_d = sentiment_data.get('BTC.D')
-            if btc_d is not None and btc_d > 55:
-                score += 5; reasons.append("Bitcoin dominance is high")
-
-            dxy = sentiment_data.get('DXY')
-            if dxy is not None and dxy > 105:
-                score += 5; reasons.append("Strong US Dollar (DXY)")
-
-            fear_greed = sentiment_data.get('FEAR.GREED')
-            if fear_greed is not None and fear_greed > 75:
-                score += 10; reasons.append("Market in Extreme Greed")
-
-            if score >= self.config.get('min_confidence_score', 60):
-                dynamic_levels = self.calculate_dynamic_levels(data, SignalType.SELL, market_analysis)
-                return self._create_trading_signal(symbol, timeframe, SignalType.SELL, score, reasons, dynamic_levels, data, market_analysis)
-
-            return None
-        except Exception as e:
-            logger.error(f"Error evaluating sell signal for {symbol}: {e}")
-            return None
+        trend_weight = self.INDICATOR_WEIGHTS['trend']
+        total_weight += trend_weight
+        if (signal_type == SignalType.BUY and market_analysis.trend == TrendDirection.BULLISH) or \
+           (signal_type == SignalType.SELL and market_analysis.trend == TrendDirection.BEARISH):
+            adx_strength = indicators.get('adx', IndicatorResult('',0,0,'')).signal_strength / 100
+            points = trend_weight * (0.5 + 0.5 * adx_strength)
+            score += points
+            reasons.append(f"Confirm: Trend Alignment ({market_analysis.trend.value}) -> +{points:.1f} pts")
+        
+        final_score = (score / total_weight) * 100 if total_weight > 0 else 0
+        return min(max(final_score, 0), 100), reasons
 
     def _create_trading_signal(self, symbol, timeframe, signal_type, score, reasons, dynamic_levels, data, market_analysis):
         entry = dynamic_levels.primary_entry
@@ -423,47 +291,26 @@ class SignalGenerator:
         market_context_dict = self._create_market_context(market_analysis)
 
         return TradingSignal(
-            symbol=symbol,
-            signal_type=signal_type,
-            entry_price=entry,
-            exit_price=exit_price,
-            stop_loss=stop_loss,
-            timestamp=datetime.now(),
-            timeframe=timeframe,
-            confidence_score=score,
-            reasons=reasons,
-            risk_reward_ratio=rr,
-            predicted_profit=profit,
+            symbol=symbol, signal_type=signal_type, entry_price=entry, exit_price=exit_price, stop_loss=stop_loss,
+            timestamp=datetime.now(), timeframe=timeframe, confidence_score=score, reasons=reasons,
+            risk_reward_ratio=rr, predicted_profit=profit,
             volume_analysis=self.market_analyzer.volume_analyzer.analyze_volume_pattern(data),
-            market_context=market_context_dict,
-            dynamic_levels=vars(dynamic_levels),
-            derivatives_analysis=market_analysis.derivatives_analysis,
-            order_book_analysis=market_analysis.order_book_analysis,
+            market_context=market_context_dict, dynamic_levels=vars(dynamic_levels),
             fundamental_analysis=market_analysis.fundamental_analysis
         )
 
-    def _calculate_risk_reward(self, entry: float, exit: float, stop_loss: float) -> float:
-        if pd.isna(entry) or pd.isna(exit) or pd.isna(stop_loss) or entry == stop_loss:
-            return 0
-
-        potential_profit = abs(exit - entry)
+    def _calculate_risk_reward(self, entry: float, exit_price: float, stop_loss: float) -> float:
+        if pd.isna(entry) or pd.isna(exit_price) or pd.isna(stop_loss) or entry == stop_loss: return 0
+        potential_profit = abs(exit_price - entry)
         potential_loss = abs(entry - stop_loss)
         return potential_profit / potential_loss if potential_loss > 0 else float('inf')
 
     def _create_market_context(self, market_analysis: "MarketAnalysis") -> Dict[str, Any]:
         return {
-            'trend': market_analysis.trend.value if hasattr(market_analysis.trend, 'value') else market_analysis.trend,
-            'trend_strength': market_analysis.trend_strength.value if hasattr(market_analysis.trend_strength, 'value') else market_analysis.trend_strength,
-            'volatility': market_analysis.volatility,
-            'momentum_score': market_analysis.momentum_score,
+            'trend': market_analysis.trend.value, 'trend_strength': market_analysis.trend_strength.value,
+            'volatility': market_analysis.volatility, 'momentum_score': market_analysis.momentum_score,
             'hurst_exponent': market_analysis.hurst_exponent,
         }
-
-    def optimize_params(self, train: pd.DataFrame) -> Dict[str, Any]:
-        return {}
-
-    def test_params(self, test: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
-        return {}
 
     async def generate_signals(self, data: pd.DataFrame, symbol: str, timeframe: str) -> List[TradingSignal]:
         data = self._safe_dataframe(data)
@@ -472,75 +319,49 @@ class SignalGenerator:
             return []
 
         indicator_results = {name: indicator.calculate(data) for name, indicator in self.indicators.items()}
-
-        derivatives_data, order_book_data, fundamental_data, sentiment_data = await self._gather_context_data(symbol)
-
-        market_analysis = self.market_analyzer.analyze_market_condition(
-            data,
-            derivatives_analysis=derivatives_data,
-            order_book_analysis=order_book_data,
-            fundamental_analysis=fundamental_data
-        )
-
+        sentiment_data = await self._gather_context_data(symbol)
+        market_analysis = self.market_analyzer.analyze_market_condition(data)
         patterns = PatternAnalyzer.detect_patterns(data)
-        rsi_series = ta.rsi(data['close'])
-        if rsi_series is not None and not rsi_series.empty:
-            patterns.extend(PatternAnalyzer.detect_divergence(data, rsi_series))
-
-        signals = []
-        buy_signal = self._evaluate_buy_signal(indicator_results, market_analysis, patterns, sentiment_data, data, symbol, timeframe)
-        if buy_signal:
-            signals.append(buy_signal)
-
-        sell_signal = self._evaluate_sell_signal(indicator_results, market_analysis, patterns, sentiment_data, data, symbol, timeframe)
-        if sell_signal:
-            signals.append(sell_signal)
-
-        if signals and self.multi_tf_analyzer:
-            is_aligned = await self.multi_tf_analyzer.is_direction_aligned(symbol, timeframe)
-            if not is_aligned:
-                logger.info(f"Signal for {symbol} on {timeframe} rejected due to multi-timeframe misalignment.")
-                return []
-            else:
-                for signal in signals:
-                    signal.confidence_score = min(100, signal.confidence_score + 5)
-                    signal.reasons.append("Multi-timeframe confirmation")
         
-        if self.lstm_model_manager:
-            prediction = await self.lstm_model_manager.predict_async(symbol, timeframe, data)
-            if prediction is not None and len(prediction) > 0:
-                pred_price = prediction[0]
-                last_close = data['close'].iloc[-1]
-                for signal in signals:
-                    if signal.signal_type == SignalType.BUY and pred_price > last_close * 1.005:
-                        signal.confidence_score = min(100, signal.confidence_score + 10)
-                        signal.reasons.append(f"LSTM Prediction Bullish ({pred_price:.4f})")
-                    elif signal.signal_type == SignalType.SELL and pred_price < last_close * 0.995:
-                        signal.confidence_score = min(100, signal.confidence_score + 10)
-                        signal.reasons.append(f"LSTM Prediction Bearish ({pred_price:.4f})")
+        signals = []
+        for signal_type in [SignalType.BUY, SignalType.SELL]:
+            score, reasons = self._calculate_confidence_score(signal_type, indicator_results, market_analysis, patterns, sentiment_data)
+            
+            if score >= self.config.get('min_confidence_score', 75):
+                dynamic_levels = self.calculate_dynamic_levels(data, market_analysis, signal_type)
+                trading_signal = self._create_trading_signal(symbol, timeframe, signal_type, score, reasons, dynamic_levels, data, market_analysis)
+                
+                if self.multi_tf_analyzer:
+                    is_aligned = await self.multi_tf_analyzer.is_direction_aligned(symbol, timeframe)
+                    if is_aligned:
+                        trading_signal.confidence_score = min(100, score + self.INDICATOR_WEIGHTS['multi_tf'])
+                        trading_signal.reasons.append("Confirm: Multi-Timeframe Alignment")
+                    else:
+                        trading_signal.confidence_score *= 0.8
+                        trading_signal.reasons.append("Warning: Multi-Timeframe Misalignment")
 
+                if self.lstm_model_manager:
+                    prediction = await self.lstm_model_manager.predict_async(symbol, timeframe, data)
+                    if prediction is not None and len(prediction) > 0:
+                        pred_price, last_close = prediction[0], data['close'].iloc[-1]
+                        if (signal_type == SignalType.BUY and pred_price > last_close) or \
+                           (signal_type == SignalType.SELL and pred_price < last_close):
+                            trading_signal.confidence_score = min(100, trading_signal.confidence_score + self.INDICATOR_WEIGHTS['lstm'])
+                            trading_signal.reasons.append(f"Confirm: LSTM Prediction ({pred_price:.4f})")
+                
+                signals.append(trading_signal)
         return signals
 
     async def _gather_context_data(self, symbol: str):
         tasks = {
-            "derivatives": self.exchange_manager.fetch_derivatives_data(symbol),
-            "order_book": self.exchange_manager.fetch_order_book(symbol),
-            "fundamentals": self.coingecko_fetcher.get_fundamental_data(symbol.split('/')[0]) if self.coingecko_fetcher else asyncio.sleep(0, result=None),
             "indices": self.market_indices_fetcher.get_all_indices() if self.market_indices_fetcher else asyncio.sleep(0, result={}),
             "fear_greed": self.news_fetcher.fetch_fear_greed() if self.news_fetcher else asyncio.sleep(0, result=None),
-            "hash_rate": self.onchain_fetcher.get_hash_rate() if self.onchain_fetcher else asyncio.sleep(0, result=None),
-            "gas_fees": self.onchain_fetcher.get_eth_gas_fees() if self.onchain_fetcher else asyncio.sleep(0, result=None),
         }
-        
         results = await asyncio.gather(*tasks.values())
-        derivatives_data, order_book_data, fundamental_data, indices, fear_greed, hash_rate, gas_fees = results
-        
+        indices, fear_greed = results
         sentiment_data = indices or {}
         sentiment_data['FEAR.GREED'] = fear_greed
-        sentiment_data['HASH_RATE'] = hash_rate
-        sentiment_data['GAS_FEES'] = gas_fees
-        
-        return derivatives_data, order_book_data, fundamental_data, sentiment_data
+        return sentiment_data
 
 
 class SignalRanking:
@@ -548,20 +369,24 @@ class SignalRanking:
     def rank_signals(signals: List[TradingSignal]) -> List[TradingSignal]:
         def signal_score(signal: TradingSignal) -> float:
             base_score = signal.confidence_score
-            rr_bonus = min(signal.risk_reward_ratio * 10, 20) if signal.risk_reward_ratio is not None else 0
-            profit_bonus = min(abs(signal.predicted_profit) * 2, 15) if signal.predicted_profit is not None else 0
             
-            volume_bonus = 0
-            if signal.volume_analysis and signal.volume_analysis.get('volume_ratio', 1) > 1.5:
-                volume_bonus = 10
+            rr = signal.risk_reward_ratio or 0
+            rr_bonus = 0
+            if rr >= 3.0: rr_bonus = 15
+            elif rr >= 2.0: rr_bonus = 10
+            elif rr >= 1.5: rr_bonus = 5
             
             trend_bonus = 0
-            if signal.market_context:
-                trend_strength = signal.market_context.get('trend_strength')
-                if trend_strength == TrendStrength.STRONG.value:
-                    trend_bonus = 15
-                elif trend_strength == TrendStrength.MODERATE.value:
+            mc = signal.market_context
+            if mc:
+                is_aligned = (signal.signal_type == SignalType.BUY and mc.get('trend') == TrendDirection.BULLISH.value) or \
+                             (signal.signal_type == SignalType.SELL and mc.get('trend') == TrendDirection.BEARISH.value)
+                if is_aligned:
                     trend_bonus = 10
+                    if mc.get('trend_strength') == TrendStrength.STRONG.value:
+                        trend_bonus += 5
             
-            return base_score + rr_bonus + profit_bonus + volume_bonus + trend_bonus
+            final_score = base_score + rr_bonus + trend_bonus
+            return final_score
+
         return sorted(signals, key=signal_score, reverse=True)

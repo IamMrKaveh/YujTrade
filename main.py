@@ -4,52 +4,25 @@ import signal
 import sys
 import traceback
 import warnings
+from typing import Set
 
 import redis.asyncio as redis
-import sentry_sdk
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from prometheus_client import start_http_server
 from telegram import Update
 
 from module.config import Config, ConfigManager
+from module.data_sources import (BinanceFetcher, CoinDeskFetcher,
+                                 MarketIndicesFetcher, NewsFetcher)
 from module.logger_config import logger
-from module.monitoring import ERRORS_TOTAL, set_app_info
-from module.sentiment import (
-    CoinGeckoFetcher,
-    ExchangeManager,
-    MarketIndicesFetcher,
-    NewsFetcher,
-    OnChainFetcher,
-)
-from module.signals import MultiTimeframeAnalyzer, SignalGenerator, SignalRanking
-from module.telegram import TelegramBotHandler, TradingBotService
 from module.lstm import LSTMModelManager
+from module.market import MarketDataProvider
+from module.signals import MultiTimeframeAnalyzer, SignalGenerator, SignalRanking
+from module.tasks import TaskServiceContainer
+from module.telegram import TelegramBotHandler, TradingBotService
 
 warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.runtime_version")
 
-
-def setup_sentry(dsn: str, app_version: str):
-    if dsn:
-        sentry_sdk.init(
-            dsn=dsn,
-            traces_sample_rate=1.0,
-            profiles_sample_rate=1.0,
-            release=f"trading-bot@{app_version}",
-            environment="production",
-        )
-        logger.info("Sentry initialized successfully.")
-    else:
-        logger.warning("Sentry DSN not found. Sentry is disabled.")
-
-
-def start_prometheus_server(port: int):
-    try:
-        start_http_server(port)
-        logger.info(f"Prometheus metrics server started on port {port}")
-    except Exception as e:
-        logger.error(f"Failed to start Prometheus server: {e}")
-        ERRORS_TOTAL.labels(module="main", function="start_prometheus_server").inc()
-
+background_tasks: Set[asyncio.Task] = set()
 
 async def main():
     stop_event = asyncio.Event()
@@ -58,7 +31,8 @@ async def main():
     redis_client = None
     application = None
     lstm_manager = None
-    exchange_manager = None
+    market_data_provider = None
+    task_container = None
 
     def signal_handler():
         logger.info("Shutdown signal received")
@@ -70,17 +44,14 @@ async def main():
             loop.add_signal_handler(sig, signal_handler)
 
     config_manager = ConfigManager()
-    setup_sentry(Config.SENTRY_DSN, config_manager.get("app_version"))
-    set_app_info("TradingBot", config_manager.get("app_version"))
-    start_prometheus_server(Config.PROMETHEUS_PORT)
 
     try:
-        redis_client = redis.Redis(host=Config.REDIS_HOST, port=Config.REDIS_PORT, decode_responses=True)
+        redis_client = redis.Redis.from_url( f"rediss://default:{Config.REDIS_TOKEN}@{Config.REDIS_HOST}:{Config.REDIS_PORT}",
+                                            decode_responses=True)
         await redis_client.ping()
         logger.info("Redis connection successful.")
     except Exception as e:
         logger.error(f"Redis connection failed: {e}. Caching will be disabled.")
-        ERRORS_TOTAL.labels(module="main", function="redis_connection").inc()
         redis_client = None
 
     try:
@@ -88,34 +59,40 @@ async def main():
         if not bot_token:
             raise ValueError("Bot token is required")
 
-        exchange_manager = ExchangeManager(redis_client=redis_client)
-        await exchange_manager.init_database()
+        binance_fetcher = BinanceFetcher(redis_client=redis_client)
+        coindesk_fetcher = CoinDeskFetcher(api_key=Config.COINDESK_API_KEY, redis_client=redis_client) if Config.COINDESK_API_KEY else None
         
-        news_fetcher = NewsFetcher(Config.CRYPTOPANIC_KEY, redis_client=redis_client) if Config.CRYPTOPANIC_KEY else None
-        coingecko_fetcher = CoinGeckoFetcher(redis_client=redis_client)
-        market_indices_fetcher = MarketIndicesFetcher(Config.ALPHA_VANTAGE_KEY, redis_client=redis_client)
-        onchain_fetcher = OnChainFetcher(glassnode_api_key=Config.GLASSNODE_API_KEY) if Config.GLASSNODE_API_KEY else None
+        market_data_provider = MarketDataProvider(
+            redis_client=redis_client, 
+            coindesk_fetcher=coindesk_fetcher,
+            binance_fetcher=binance_fetcher
+        )
+        
+        news_fetcher = NewsFetcher(Config.CRYPTOPANIC_KEY, coindesk_fetcher=coindesk_fetcher, redis_client=redis_client) if Config.CRYPTOPANIC_KEY else None
+        market_indices_fetcher = MarketIndicesFetcher(
+            alpha_vantage_key=Config.ALPHA_VANTAGE_KEY,
+            coingecko_key=Config.COINGECKO_KEY,
+            redis_client=redis_client
+        )
         
         lstm_manager = LSTMModelManager(model_path='lstm-model')
         await lstm_manager.initialize_models()
 
         signal_generator = SignalGenerator(
-            exchange_manager=exchange_manager,
+            market_data_provider=market_data_provider,
             news_fetcher=news_fetcher,
-            onchain_fetcher=onchain_fetcher,
-            coingecko_fetcher=coingecko_fetcher,
             market_indices_fetcher=market_indices_fetcher,
             lstm_model_manager=lstm_manager,
             multi_tf_analyzer=None,
             config=config_manager.config,
         )
 
-        multi_tf_analyzer = MultiTimeframeAnalyzer(exchange_manager, signal_generator.indicators)
+        multi_tf_analyzer = MultiTimeframeAnalyzer(market_data_provider, signal_generator.indicators)
         signal_generator.multi_tf_analyzer = multi_tf_analyzer
 
         trading_service = TradingBotService(
             config=config_manager,
-            exchange_manager=exchange_manager,
+            market_data_provider=market_data_provider,
             signal_generator=signal_generator,
             signal_ranking=SignalRanking(),
         )
@@ -127,9 +104,8 @@ async def main():
         )
 
         await bot_instance.initialize()
-        application = bot_instance.create_application()
+        application = bot_instance.create_application(background_tasks)
         
-        # Share the application instance with the trading service for task callbacks
         trading_service.set_telegram_app(application)
 
 
@@ -150,30 +126,57 @@ async def main():
 
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot stopped by user")
+    except asyncio.CancelledError:
+        logger.info("Main task cancelled, shutting down.")
     except Exception as e:
         logger.error(f"Bot crashed with error: {e}\n{traceback.format_exc()}")
-        sentry_sdk.capture_exception(e)
-        ERRORS_TOTAL.labels(module="main", function="main_loop").inc()
     finally:
         logger.info("Starting cleanup...")
+
         if scheduler and scheduler.running:
             scheduler.shutdown(wait=False)
-        if application:
+        
+        if application and application.updater and application.updater.running:
             await application.updater.stop()
+        
+        logger.info(f"Cancelling {len(background_tasks)} background tasks.")
+        for task in background_tasks:
+            task.cancel()
+        
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+        
+        if application:
             await application.stop()
             await application.shutdown()
+        
         if bot_instance:
             await bot_instance.cleanup()
-        if exchange_manager:
-            await exchange_manager.close()
+        
+        if market_data_provider:
+            await market_data_provider.close()
+        
         if lstm_manager:
             lstm_manager.cleanup()
+        
+        try:
+            task_container = await TaskServiceContainer.instance()
+            if task_container:
+                await task_container.cleanup()
+        except RuntimeError:
+            pass
+
         if redis_client:
-            await redis_client.close()
+            await redis_client.aclose()
+            
         logger.info("Bot shutdown completed successfully")
 
 
 if __name__ == "__main__":
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-    asyncio.run(main())
+    
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Application terminated by user.")

@@ -7,47 +7,13 @@ import talib
 from scipy.signal import find_peaks
 
 from module.core import (
-    DerivativesAnalysis,
-    DynamicLevels,
     MarketAnalysis,
     MarketCondition,
-    OrderBookAnalysis,
     SignalType,
     TrendDirection,
     TrendStrength,
 )
 from module.indicators import RSIIndicator
-
-
-class DerivativesAnalyzer:
-    @staticmethod
-    def analyze(derivatives_data: DerivativesAnalysis) -> Dict:
-        analysis = {}
-        if derivatives_data.funding_rate > 0.001:
-            analysis["funding_sentiment"] = "bullish"
-        elif derivatives_data.funding_rate < -0.001:
-            analysis["funding_sentiment"] = "bearish"
-        else:
-            analysis["funding_sentiment"] = "neutral"
-        analysis["oi_interpretation"] = "neutral"
-        return analysis
-
-
-class OrderBookAnalyzer:
-    @staticmethod
-    def analyze(order_book: Dict, wall_threshold: float = 10.0) -> OrderBookAnalysis:
-        bids = order_book.get("bids", [])
-        asks = order_book.get("asks", [])
-        if not bids or not asks:
-            return OrderBookAnalysis()
-        total_bid_volume = sum(amount for _, amount in bids)
-        total_ask_volume = sum(amount for _, amount in asks)
-        market_depth_ratio = total_bid_volume / total_ask_volume if total_ask_volume > 0 else float("inf")
-        avg_bid_size = total_bid_volume / len(bids) if bids else 0
-        avg_ask_size = total_ask_volume / len(asks) if asks else 0
-        buy_wall = next(((p, a) for p, a in bids if avg_bid_size > 0 and a > avg_bid_size * wall_threshold), None)
-        sell_wall = next(((p, a) for p, a in asks if avg_ask_size > 0 and a > avg_ask_size * wall_threshold), None)
-        return OrderBookAnalysis(buy_wall=buy_wall, sell_wall=sell_wall, market_depth_ratio=market_depth_ratio)
 
 
 class PatternAnalyzer:
@@ -120,10 +86,10 @@ class PatternAnalyzer:
         if len(data) < 3:
             return []
         
-        op = data["open"].to_numpy(zero_copy_only=False)
-        hi = data["high"].to_numpy(zero_copy_only=False)
-        lo = data["low"].to_numpy(zero_copy_only=False)
-        cl = data["close"].to_numpy(zero_copy_only=False)
+        op = data["open"].to_numpy()
+        hi = data["high"].to_numpy()
+        lo = data["low"].to_numpy()
+        cl = data["close"].to_numpy()
 
         detected_patterns = []
         for pattern_func_name, pattern_desc in PatternAnalyzer.CANDLE_PATTERNS.items():
@@ -175,12 +141,35 @@ class MarketConditionAnalyzer:
         momentum = self._calculate_momentum(data)
         hurst = self._calculate_hurst_exponent(data["close"])
 
+        volume_analysis = self.volume_analyzer.analyze_volume_pattern(data)
+        volume_trend = "increasing" if volume_analysis.get("volume_ratio", 1) > 1.1 else "decreasing"
+        volume_confirmation = (trend == TrendDirection.BULLISH and volume_trend == "increasing") or \
+                              (trend == TrendDirection.BEARISH and volume_trend == "increasing")
+
+        rsi = talib.RSI(data["close"], timeperiod=14)
+        market_condition = MarketCondition.NEUTRAL
+        if not rsi.empty:
+            last_rsi = rsi.iloc[-1]
+            if last_rsi > 70:
+                market_condition = MarketCondition.OVERBOUGHT
+            elif last_rsi < 30:
+                market_condition = MarketCondition.OVERSOLD
+
+        support, resistance = self._calculate_support_resistance(data)
+        trend_acceleration = self._calculate_trend_acceleration(data)
+
         return MarketAnalysis(
             trend=trend,
             trend_strength=trend_strength,
             volatility=volatility,
             momentum_score=momentum,
             hurst_exponent=hurst,
+            volume_trend=volume_trend,
+            support_levels=[support],
+            resistance_levels=[resistance],
+            market_condition=market_condition,
+            trend_acceleration=trend_acceleration,
+            volume_confirmation=volume_confirmation,
             **kwargs,
         )
 
@@ -199,7 +188,7 @@ class MarketConditionAnalyzer:
         if len(data) < 28:
             return TrendStrength.WEAK
         adx = talib.ADX(data["high"], data["low"], data["close"], timeperiod=14)
-        adx_val = adx[-1] if not np.isnan(adx[-1]) else 0
+        adx_val = adx.iloc[-1] if not np.isnan(adx.iloc[-1]) else 0
         if adx_val > 25:
             return TrendStrength.STRONG
         if adx_val > 20:
@@ -210,7 +199,7 @@ class MarketConditionAnalyzer:
         if len(data) < 14:
             return 0.0
         atr = talib.ATR(data["high"], data["low"], data["close"], timeperiod=14)
-        atr_val = atr[-1] if not np.isnan(atr[-1]) else 0
+        atr_val = atr.iloc[-1] if not np.isnan(atr.iloc[-1]) else 0
         price = data["close"].iloc[-1]
         return (atr_val / price) * 100 if price > 0 else 0.0
 
@@ -218,7 +207,7 @@ class MarketConditionAnalyzer:
         if len(data) < 10:
             return 0.0
         mom = talib.MOM(data["close"], timeperiod=10)
-        return mom[-1] if not np.isnan(mom[-1]) else 0.0
+        return mom.iloc[-1] if not np.isnan(mom.iloc[-1]) else 0.0
 
     def _calculate_hurst_exponent(self, series: pd.Series, max_lag=100) -> Optional[float]:
         if len(series) < max_lag:
@@ -231,6 +220,22 @@ class MarketConditionAnalyzer:
         ]
         poly = np.polyfit(np.log(lags), np.log(tau), 1)
         return poly[0]
+
+    def _calculate_support_resistance(self, data: pd.DataFrame, window: int = 20) -> Tuple[float, float]:
+        if len(data) < window:
+            return (data['low'].min(), data['high'].max())
+        recent_data = data.tail(window)
+        support = recent_data['low'].min()
+        resistance = recent_data['high'].max()
+        return support, resistance
+
+    def _calculate_trend_acceleration(self, data: pd.DataFrame, period: int = 10) -> float:
+        if len(data) < period:
+            return 0.0
+        mom = talib.MOM(data['close'], timeperiod=period)
+        if len(mom.dropna()) < 2:
+            return 0.0
+        return mom.iloc[-1] - mom.iloc[-2]
 
 
 class VolumeAnalyzer:

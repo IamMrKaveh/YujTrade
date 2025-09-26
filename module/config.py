@@ -33,21 +33,21 @@ class Config:
             return decrypted
         return decouple_config(key, default=None)
 
-    COINEX_API_KEY = get_secret("COINEX_API_KEY")
-    COINEX_SECRET = get_secret("COINEX_SECRET")
-    CRYPTOPANIC_KEY = get_secret("CRYPTOPANIC_KEY")
     TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID = get_secret("TELEGRAM_CHAT_ID")
+    CRYPTOPANIC_KEY = get_secret("CRYPTOPANIC_KEY")
     ALPHA_VANTAGE_KEY = get_secret("ALPHA_VANTAGE_KEY")
-    GLASSNODE_API_KEY = get_secret("GLASSNODE_API_KEY")
+    COINGECKO_KEY = get_secret("COINGECKO_KEY")
+    COINDESK_API_KEY = get_secret("COINDESK_API_KEY")
     SENTRY_DSN = get_secret("SENTRY_DSN")
 
     TF_CPP_MIN_LOG_LEVEL = decouple_config("TF_CPP_MIN_LOG_LEVEL", default="3")
     TF_ENABLE_ONEDNN_OPTS = decouple_config("TF_ENABLE_ONEDNN_OPTS", default="0")
     
-    REDIS_HOST = decouple_config("REDIS_HOST", default="localhost")
+    REDIS_HOST = decouple_config("REDIS_HOST", default="localhost", cast=str)
     REDIS_PORT = decouple_config("REDIS_PORT", default=6379, cast=int)
-    
+    REDIS_TOKEN = decouple_config("REDIS_TOKEN", default="none", cast=str)
+
     PROMETHEUS_PORT = decouple_config("PROMETHEUS_PORT", default=9090, cast=int)
 
 
@@ -59,7 +59,7 @@ class ConfigManager:
         "max_signals_per_timeframe": 2,
         "risk_reward_threshold": 3.0,
         "enable_scheduled_analysis": True,
-        "schedule_hour": "*/4",
+        "schedule_hour": "*/1",
         "app_version": "2.0.0",
     }
 

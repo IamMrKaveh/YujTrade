@@ -6,11 +6,11 @@ import pandas as pd
 import talib
 
 import pandas_ta as ta
-from pandas_ta.momentum import stoch, roc, stochrsi, trix, uo
+from pandas_ta.momentum import stoch, roc, stochrsi, trix, uo, squeeze
 from pandas_ta.overlap import ichimoku, supertrend
 from pandas_ta.volatility import bbands, atr
 from pandas_ta.trend import adx as adx_ta, aroon
-from pandas_ta.volume import cmf, obv, ad, eom
+from pandas_ta.volume import cmf, obv, ad, eom, efi
 
 from .core import IndicatorResult
 from .logger_config import logger
@@ -462,12 +462,20 @@ class SqueezeMomentumIndicator(TechnicalIndicator):
 
 class VWAPIndicator(TechnicalIndicator):
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        current_vwap = ta.vwap(high=data['high'], low=data['low'], close=data['close'], volume=data['volume'])
+        df = data.copy()
+        if not isinstance(df.index, pd.DatetimeIndex):
+            if 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df.set_index('timestamp', inplace=True)
+            else:
+                 return IndicatorResult(name="VWAP", value=0, signal_strength=0, interpretation="neutral_no_datetime")
+        
+        current_vwap = ta.vwap(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'])
         if current_vwap is None or (hasattr(current_vwap, "empty") and current_vwap.empty) or pd.isna(current_vwap.iloc[-1]):
             return IndicatorResult(name="VWAP", value=0, signal_strength=0, interpretation="neutral")
 
         current_vwap_val = current_vwap.iloc[-1]
-        current_price = data['close'].iloc[-1]
+        current_price = df['close'].iloc[-1]
 
         interpretation = "price_above_vwap" if current_price > current_vwap_val else "price_below_vwap"
         strength = min(abs(current_price - current_vwap_val) / current_vwap_val * 100, 100) if current_vwap_val > 0 else 0
@@ -586,7 +594,7 @@ class ForceIndexIndicator(TechnicalIndicator):
         self.period = period
 
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        fi_series = ta.force_index(data['close'], data['volume'], length=self.period)
+        fi_series = efi(data['close'], data['volume'], length=self.period)
         if fi_series is None or fi_series.empty or pd.isna(fi_series.iloc[-1]):
             return IndicatorResult(name="ForceIndex", value=0, signal_strength=0, interpretation="neutral")
 

@@ -22,12 +22,10 @@ def run():
     config = Config(RepositoryEnv(str(env_file)))
 
     keys_to_encrypt = [
-        "COINEX_API_KEY",
-        "COINEX_SECRET",
         "CRYPTOPANIC_KEY",
         "TELEGRAM_BOT_TOKEN",
         "ALPHA_VANTAGE_KEY",
-        "GLASSNODE_API_KEY",
+        "COINDESK_API_KEY",
         "SENTRY_DSN",
     ]
 

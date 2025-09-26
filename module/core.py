@@ -37,20 +37,6 @@ class IndicatorResult:
 
 
 @dataclass
-class DerivativesAnalysis:
-    open_interest: float = 0.0
-    funding_rate: float = 0.0
-    long_short_ratio: float = 1.0
-
-
-@dataclass
-class OrderBookAnalysis:
-    buy_wall: Optional[Tuple[float, float]] = None
-    sell_wall: Optional[Tuple[float, float]] = None
-    market_depth_ratio: float = 1.0
-
-
-@dataclass
 class FundamentalAnalysis:
     market_cap: float = 0.0
     circulating_supply: float = 0.0
@@ -69,8 +55,6 @@ class MarketAnalysis:
     market_condition: MarketCondition
     trend_acceleration: float
     volume_confirmation: bool
-    derivatives_analysis: Optional[DerivativesAnalysis] = None
-    order_book_analysis: Optional[OrderBookAnalysis] = None
     fundamental_analysis: Optional[FundamentalAnalysis] = None
     hurst_exponent: Optional[float] = None
 
@@ -103,6 +87,4 @@ class TradingSignal:
     volume_analysis: Dict[str, float]
     market_context: Dict[str, Any]
     dynamic_levels: Dict[str, float]
-    derivatives_analysis: Optional[DerivativesAnalysis] = None
-    order_book_analysis: Optional[OrderBookAnalysis] = None
     fundamental_analysis: Optional[FundamentalAnalysis] = None
