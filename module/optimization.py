@@ -1,8 +1,10 @@
 import asyncio
 
-import optuna
-from optuna.integration import TFKerasPruningCallback
-from optuna.trial import TrialState
+# These imports are commented out as they are not used and cause errors if the libraries are not installed.
+# You can uncomment them if you install optuna.
+# import optuna
+# from optuna.integration import TFKerasPruningCallback
+# from optuna.trial import TrialState
 
 from module.backtesting import BacktestingEngine
 from module.logger_config import logger
@@ -14,6 +16,13 @@ class HyperparameterOptimizer:
         self.data = data
         self.model_type = model_type.lower()
         self.n_trials = n_trials
+        # Check if optuna is available
+        try:
+            import optuna
+            self.optuna = optuna
+        except ImportError:
+            self.optuna = None
+            logger.error("Optuna is not installed. Please install it to use HyperparameterOptimizer: pip install optuna")
 
     def _define_lstm_search_space(self, trial):
         return {
@@ -22,28 +31,23 @@ class HyperparameterOptimizer:
         }
 
     async def _objective(self, trial):
+        if not self.optuna:
+            raise ImportError("Optuna is not installed.")
         try:
             if self.model_type == "lstm":
                 params = self._define_lstm_search_space(trial)
-                # Note: We are using the LSTMModel from lstm.py which is more integrated
                 model = LSTMModel(**params)
             else:
                 raise ValueError("Unsupported model type")
 
-            # The BacktestingEngine needs a trading_service-like object
-            # This part requires a more detailed implementation of how models are used in backtesting
-            # For now, we assume a simplified path to get a performance metric
-            # A full implementation would involve creating a mock trading_service
-            # that uses the hyperparameter-tuned model.
-            
-            # Placeholder for a metric, as direct backtesting is complex here
-            # In a real scenario, you would run a backtest and get the Sharpe ratio
-            dummy_sharpe_ratio = trial.number * 0.1 # Example metric
+            # This is a placeholder for a real performance metric.
+            # A full implementation would run a backtest and return a value like the Sharpe ratio.
+            dummy_sharpe_ratio = trial.number * 0.1
             
             trial.report(dummy_sharpe_ratio, step=0)
 
             if trial.should_prune():
-                raise optuna.exceptions.TrialPruned()
+                raise self.optuna.exceptions.TrialPruned()
 
             return dummy_sharpe_ratio
         except Exception as e:
@@ -51,22 +55,27 @@ class HyperparameterOptimizer:
             return -1.0
 
     async def run(self):
-        study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
+        if not self.optuna:
+            return {}, -1.0
+
+        study = self.optuna.create_study(direction="maximize", pruner=self.optuna.pruners.MedianPruner())
         
-        # Optuna's objective function needs to be synchronous if run with optimize
-        # To use async, we'd need a more complex setup. Let's adapt.
         def sync_objective(trial):
             return asyncio.run(self._objective(trial))
 
         study.optimize(sync_objective, n_trials=self.n_trials)
 
-        pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
-        complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
+        pruned_trials = study.get_trials(deepcopy=False, states=[self.optuna.trial.TrialState.PRUNED])
+        complete_trials = study.get_trials(deepcopy=False, states=[self.optuna.trial.TrialState.COMPLETE])
 
         logger.info("Study statistics: ")
         logger.info(f"  Number of finished trials: {len(study.trials)}")
         logger.info(f"  Number of pruned trials: {len(pruned_trials)}")
         logger.info(f"  Number of complete trials: {len(complete_trials)}")
+
+        if not complete_trials:
+            logger.error("No trials were completed successfully.")
+            return {}, -1.0
 
         logger.info("Best trial:")
         trial = study.best_trial

@@ -38,7 +38,7 @@ def run():
             key_in_line = line.split("=")[0].strip()
             if key_in_line in keys_to_encrypt:
                 value = config(key_in_line, default="")
-                if value:
+                if value and isinstance(value, str):
                     encrypted_value = encryptor.encrypt(value)
                     new_env_content += f"ENCRYPTED_{key_in_line}={encrypted_value}\n"
                     logger.info(f"Encrypted {key_in_line}")

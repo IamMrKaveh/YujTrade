@@ -1,7 +1,7 @@
 import getpass
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from decouple import config as decouple_config
 
@@ -22,7 +22,7 @@ class Config:
             _encryptor = None
 
     @staticmethod
-    def get_secret(key: str) -> str:
+    def get_secret(key: str) -> Optional[str]:
         encrypted_key = f"ENCRYPTED_{key}"
         value = decouple_config(encrypted_key, default=None)
         if value and Config._encryptor:
@@ -31,7 +31,10 @@ class Config:
                 logger.error(f"Failed to decrypt {key}. Please re-encrypt your keys.")
                 return None
             return decrypted
-        return decouple_config(key, default=None)
+        
+        plain_value = decouple_config(key, default=None)
+        return plain_value if isinstance(plain_value, str) else None
+
 
     TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID = get_secret("TELEGRAM_CHAT_ID")

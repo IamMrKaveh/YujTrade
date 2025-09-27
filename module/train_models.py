@@ -1,7 +1,6 @@
 import asyncio
 import warnings
 
-import optuna
 import pandas as pd
 
 from module.config import ConfigManager
@@ -23,14 +22,14 @@ class ModelTrainer:
         logger.info(f"--- Starting training for {symbol}-{timeframe} ({model_type}) ---")
         try:
             data = await self.market_data_provider.fetch_ohlcv_data(symbol, timeframe, limit=2000)
-            if data.empty or len(data) < 200:
+            if data is None or data.empty or len(data) < 200:
                 logger.warning(f"Insufficient data for {symbol}-{timeframe}. Skipping.")
                 return
 
             best_params = {'units': 64, 'lr': 0.001}
             logger.info(f"Using default params: {best_params}")
 
-            model = LSTMModel(symbol=symbol, timeframe=timeframe, **best_params)
+            model = LSTMModel(symbol=symbol, timeframe=timeframe, model_path='MLM', **best_params)
             
             X, y = model.prepare_sequences(data, for_training=True)
             if X.size == 0 or y.size == 0:
@@ -54,9 +53,10 @@ class ModelTrainer:
         timeframes = self.config.get("timeframes", TIME_FRAMES)
 
         tasks = []
-        for symbol in symbols:
-            for timeframe in timeframes:
-                tasks.append(self.train_and_optimize(symbol, timeframe, "lstm"))
+        if symbols and timeframes:
+            for symbol in symbols:
+                for timeframe in timeframes:
+                    tasks.append(self.train_and_optimize(symbol, timeframe, "lstm"))
 
         await asyncio.gather(*tasks)
         await self.market_data_provider.close()

@@ -47,27 +47,29 @@ class TaskServiceContainer:
         coindesk_fetcher = CoinDeskFetcher(api_key=Config.COINDESK_API_KEY, redis_client=self.redis_client) if Config.COINDESK_API_KEY else None
         glassnode_fetcher = GlassnodeFetcher(api_key=Config.GLASSNODE_API_KEY, redis_client=self.redis_client) if Config.GLASSNODE_API_KEY else None
         
-        self.market_data_provider = MarketDataProvider(
-            redis_client=self.redis_client,
-            coindesk_fetcher=coindesk_fetcher,
-            binance_fetcher=binance_fetcher
-        )
-        
-        self.news_fetcher = NewsFetcher(Config.CRYPTOPANIC_KEY, coindesk_fetcher=coindesk_fetcher, redis_client=self.redis_client) if Config.CRYPTOPANIC_KEY else None
-        self.market_indices_fetcher = MarketIndicesFetcher(
+        market_indices_fetcher = MarketIndicesFetcher(
             alpha_vantage_key=Config.ALPHA_VANTAGE_KEY,
             coingecko_key=Config.COINGECKO_KEY,
             glassnode_fetcher=glassnode_fetcher,
             redis_client=self.redis_client
         )
+
+        self.market_data_provider = MarketDataProvider(
+            redis_client=self.redis_client,
+            coindesk_fetcher=coindesk_fetcher,
+            binance_fetcher=binance_fetcher,
+            market_indices_fetcher=market_indices_fetcher
+        )
         
-        self.lstm_manager = LSTMModelManager(model_path='lstm-model')
+        self.news_fetcher = NewsFetcher(Config.CRYPTOPANIC_KEY, coindesk_fetcher=coindesk_fetcher, redis_client=self.redis_client) if Config.CRYPTOPANIC_KEY else None
+        
+        self.lstm_manager = LSTMModelManager(model_path='MLM')
         await self.lstm_manager.initialize_models()
         
         self.signal_generator = SignalGenerator(
             market_data_provider=self.market_data_provider,
             news_fetcher=self.news_fetcher,
-            market_indices_fetcher=self.market_indices_fetcher,
+            market_indices_fetcher=market_indices_fetcher,
             lstm_model_manager=self.lstm_manager,
             multi_tf_analyzer=None,
             config=self.config_manager.config,

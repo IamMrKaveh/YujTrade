@@ -146,10 +146,10 @@ class MarketConditionAnalyzer:
         volume_confirmation = (trend == TrendDirection.BULLISH and volume_trend == "increasing") or \
                               (trend == TrendDirection.BEARISH and volume_trend == "increasing")
 
-        rsi = talib.RSI(data["close"], timeperiod=14)
+        rsi_values = talib.RSI(data["close"].to_numpy(), timeperiod=14)
         market_condition = MarketCondition.NEUTRAL
-        if not rsi.empty and not pd.isna(rsi.iloc[-1]):
-            last_rsi = rsi.iloc[-1]
+        if rsi_values.size > 0 and not pd.isna(rsi_values[-1]):
+            last_rsi = rsi_values[-1]
             if last_rsi > 70:
                 market_condition = MarketCondition.OVERBOUGHT
             elif last_rsi < 30:
@@ -189,8 +189,8 @@ class MarketConditionAnalyzer:
     def _calculate_trend_strength(self, data: pd.DataFrame) -> TrendStrength:
         if len(data) < 28:
             return TrendStrength.WEAK
-        adx = talib.ADX(data["high"], data["low"], data["close"], timeperiod=14)
-        adx_val = adx.iloc[-1] if not pd.isna(adx.iloc[-1]) else 0
+        adx = talib.ADX(data["high"].to_numpy(), data["low"].to_numpy(), data["close"].to_numpy(), timeperiod=14)
+        adx_val = adx[-1] if adx.size > 0 and not pd.isna(adx[-1]) else 0
         if adx_val > 25:
             return TrendStrength.STRONG
         if adx_val > 20:
@@ -200,16 +200,16 @@ class MarketConditionAnalyzer:
     def _calculate_volatility(self, data: pd.DataFrame) -> float:
         if len(data) < 14:
             return 0.0
-        atr = talib.ATR(data["high"], data["low"], data["close"], timeperiod=14)
-        atr_val = atr.iloc[-1] if not pd.isna(atr.iloc[-1]) else 0
+        atr = talib.ATR(data["high"].to_numpy(), data["low"].to_numpy(), data["close"].to_numpy(), timeperiod=14)
+        atr_val = atr[-1] if atr.size > 0 and not pd.isna(atr[-1]) else 0
         price = data["close"].iloc[-1]
         return (atr_val / price) * 100 if price > 0 else 0.0
 
     def _calculate_momentum(self, data: pd.DataFrame) -> float:
         if len(data) < 10:
             return 0.0
-        mom = talib.MOM(data["close"], timeperiod=10)
-        return mom.iloc[-1] if not pd.isna(mom.iloc[-1]) else 0.0
+        mom = talib.MOM(data["close"].to_numpy(), timeperiod=10)
+        return mom[-1] if mom.size > 0 and not pd.isna(mom[-1]) else 0.0
 
     def _calculate_hurst_exponent(self, series: pd.Series, max_lag=100) -> Optional[float]:
         if len(series) < max_lag:
@@ -238,10 +238,10 @@ class MarketConditionAnalyzer:
     def _calculate_trend_acceleration(self, data: pd.DataFrame, period: int = 10) -> float:
         if len(data) < period + 1:
             return 0.0
-        mom = talib.MOM(data['close'], timeperiod=period)
-        if len(mom.dropna()) < 2:
+        mom = talib.MOM(data['close'].to_numpy(), timeperiod=period)
+        if mom.size < 2:
             return 0.0
-        accel = mom.iloc[-1] - mom.iloc[-2]
+        accel = mom[-1] - mom[-2]
         return accel if not pd.isna(accel) else 0.0
 
 

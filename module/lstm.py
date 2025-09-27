@@ -23,7 +23,7 @@ tf.get_logger().setLevel('ERROR')
 tf.config.set_visible_devices([], 'GPU')
 
 class LSTMModel:
-    def __init__(self, input_shape=(60, 17), units=64, lr=0.001, model_path='lstm-model', symbol=None, timeframe=None):
+    def __init__(self, input_shape=(60, 17), units=64, lr=0.001, model_path='MLM', symbol=None, timeframe=None):
         self.model = None
         self.input_shape = input_shape
         self.trained = False
@@ -136,9 +136,17 @@ class LSTMModel:
         df = data.copy()
         
         try:
-            df.ta.strategy("common", append=True)
+            df.ta.rsi(length=14, append=True)
+            df.ta.macd(fast=12, slow=26, signal=9, append=True)
+            df.ta.bbands(length=20, std=2, append=True)
+            df.ta.stoch(k=14, d=3, smooth_k=3, append=True)
+            df.ta.atr(length=14, append=True)
+            df.ta.sma(length=20, append=True)
+            df.ta.sma(length=50, append=True)
+            df.ta.ema(length=12, append=True)
+            df.ta.ema(length=26, append=True)
             
-            feature_cols = [col for col in df.columns if col.startswith(('RSI', 'MACD', 'BB', 'STOCH', 'ATR', 'SMA', 'EMA'))]
+            feature_cols = [col for col in df.columns if col.startswith(('RSI', 'MACD', 'BBL', 'BBM', 'BBU', 'STOCH', 'ATR', 'SMA', 'EMA'))]
             if not feature_cols:
                 return pd.DataFrame()
                 
@@ -155,10 +163,10 @@ class LSTMModel:
             self.logger.warning(f"Feature creation failed: {e}. Returning empty dataframe.")
             return pd.DataFrame()
         
-        features_df.fillna(method='ffill', inplace=True)
-        features_df.fillna(method='bfill', inplace=True)
-        features_df.fillna(0, inplace=True)
-        features_df.replace([np.inf, -np.inf], 0, inplace=True)
+        features_df = features_df.fillna(method='ffill')
+        features_df = features_df.fillna(method='bfill')
+        features_df = features_df.fillna(0)
+        features_df = features_df.replace([np.inf, -np.inf], 0)
         
         current_num_features = features_df.shape[1]
         target_num_features = self.input_shape[1]
@@ -251,8 +259,10 @@ class LSTMModel:
             
             X = last_sequence.reshape(1, self.input_shape[0], self.input_shape[1])
             
-            prediction = self.model.predict(X, verbose=0)
-            return self.scaler.inverse_transform(prediction).flatten()
+            if self.model:
+                prediction = self.model.predict(X, verbose=0)
+                return self.scaler.inverse_transform(prediction).flatten()
+            return None
         except Exception as e:
             self.logger.error(f"Error in predict: {e}")
             return None
@@ -261,7 +271,7 @@ class LSTMModel:
         return self.model is not None and self.trained and self.is_fitted
 
 class LSTMModelManager:
-    def __init__(self, model_path: str = 'lstm-model', input_shape=(60, 17), units=50, lr=0.001):
+    def __init__(self, model_path: str = 'MLM', input_shape=(60, 17), units=50, lr=0.001):
         self.model_path = Path(model_path)
         self.input_shape = input_shape
         self.units = units
@@ -300,7 +310,7 @@ class LSTMModelManager:
                         return
                 
                 self.logger.debug(f"Loading model for {key} from {model_file}...")
-                model = LSTMModel(symbol=symbol, timeframe=timeframe, model_path=self.model_path,
+                model = LSTMModel(symbol=symbol, timeframe=timeframe, model_path=str(self.model_path),
                                 input_shape=self.input_shape, units=self.units, lr=self.lr)
                 if model.is_ready():
                     with self._lock:
@@ -331,7 +341,7 @@ class LSTMModelManager:
             if key in self._cache:
                 return self._cache[key]
         
-        model = LSTMModel(symbol=symbol, timeframe=timeframe, model_path=self.model_path,
+        model = LSTMModel(symbol=symbol, timeframe=timeframe, model_path=str(self.model_path),
                         input_shape=self.input_shape, units=self.units, lr=self.lr)
         
         with self._lock:

@@ -81,7 +81,7 @@ async def main():
             redis_client=redis_client
         )
         
-        lstm_manager = LSTMModelManager(model_path='lstm-model')
+        lstm_manager = LSTMModelManager(model_path='MLM')
         await lstm_manager.initialize_models()
 
         signal_generator = SignalGenerator(

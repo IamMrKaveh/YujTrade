@@ -65,9 +65,9 @@ class KeyEncryptor:
 
 
 def hash_data(data: str, salt: str = None) -> str:
-    salt = salt or os.urandom(16).hex()
-    hashed = hashlib.pbkdf2_hmac("sha256", data.encode(), salt.encode(), 100000)
-    return f"{salt}${hashed.hex()}"
+    salt_val = salt or os.urandom(16).hex()
+    hashed = hashlib.pbkdf2_hmac("sha256", data.encode(), salt_val.encode(), 100000)
+    return f"{salt_val}${hashed.hex()}"
 
 
 def verify_hashed_data(stored_hash: str, provided_data: str) -> bool:

@@ -10,10 +10,10 @@ import tensorflow as tf
 import xgboost as xgb
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from tensorflow.keras.layers import LSTM, BatchNormalization, Dense, Dropout
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau #type: ignore
+from tensorflow.keras.layers import LSTM, BatchNormalization, Dense, Dropout #type: ignore
+from tensorflow.keras.models import Sequential #type: ignore
+from tensorflow.keras.optimizers import Adam #type: ignore
 
 from module.logger_config import logger
 
@@ -144,7 +144,9 @@ class LSTMModel(BaseModel):
         if not self.is_ready():
             return None
         try:
-            explainer = shap.DeepExplainer(self.model, data)
+            # SHAP DeepExplainer expects a background dataset. Using a sample of the data.
+            background = data[np.random.choice(data.shape[0], 100, replace=False)]
+            explainer = shap.DeepExplainer(self.model, background)
             shap_values = explainer.shap_values(data)
             return shap_values
         except Exception as e:
@@ -160,6 +162,7 @@ class XGBoostModel(BaseModel):
             "eval_metric": "rmse",
             "n_estimators": 100,
             "learning_rate": 0.05,
+            "tree_method": "hist", # Faster training
         }
         self._load_or_create_model()
 
@@ -195,6 +198,7 @@ class XGBoostModel(BaseModel):
         eval_set = [(X, y)]
         if validation_data:
             eval_set.append(validation_data)
+        
         self.model.fit(X, y, eval_set=eval_set, early_stopping_rounds=10, verbose=False)
         self.trained = True
         self.save_model()

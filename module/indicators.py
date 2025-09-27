@@ -34,18 +34,19 @@ class MovingAverageIndicator(TechnicalIndicator):
 
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
         try:
+            close_np = data['close'].to_numpy(dtype=np.float64)
             if self.ma_type == "EMA":
-                ma_series = talib.EMA(data['close'], timeperiod=self.period)
+                ma_series = talib.EMA(close_np, timeperiod=self.period)
             else:
-                ma_series = talib.SMA(data['close'], timeperiod=self.period)
+                ma_series = talib.SMA(close_np, timeperiod=self.period)
         except Exception:
-            ma_series = pd.Series(np.nan, index=data.index)
+            ma_series = np.array([])
 
-        if getattr(ma_series, "empty", False) or pd.isna(ma_series.iloc[-1]):
+        if ma_series.size == 0 or pd.isna(ma_series[-1]):
             return IndicatorResult(name=f"{self.ma_type}_{self.period}", value=0, signal_strength=0, interpretation="neutral")
 
         current_price = data['close'].iloc[-1]
-        current_ma = ma_series.iloc[-1]
+        current_ma = ma_series[-1]
 
         signal_strength = abs((current_price - current_ma) / current_ma) * 100 if current_ma != 0 else 0
         interpretation = "bullish_above_ma" if current_price > current_ma else "bearish_below_ma"
@@ -63,11 +64,11 @@ class RSIIndicator(TechnicalIndicator):
         self.period = period
 
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        rsi_series = talib.RSI(data['close'], timeperiod=self.period)
-        if getattr(rsi_series, "empty", False) or pd.isna(rsi_series.iloc[-1]):
+        rsi_series = talib.RSI(data['close'].to_numpy(dtype=np.float64), timeperiod=self.period)
+        if rsi_series.size == 0 or pd.isna(rsi_series[-1]):
             return IndicatorResult(name="RSI", value=50, signal_strength=0, interpretation="neutral")
 
-        current_rsi = rsi_series.iloc[-1]
+        current_rsi = rsi_series[-1]
 
         if current_rsi > 70:
             interpretation = "overbought"
@@ -89,13 +90,13 @@ class MACDIndicator(TechnicalIndicator):
         self.signal_period = signal
 
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        macd, macdsignal, macdhist = talib.MACD(data['close'], fastperiod=self.fast, slowperiod=self.slow, signalperiod=self.signal_period)
-        if getattr(macd, "empty", False) or pd.isna(macd.iloc[-1]):
+        macd, macdsignal, macdhist = talib.MACD(data['close'].to_numpy(dtype=np.float64), fastperiod=self.fast, slowperiod=self.slow, signalperiod=self.signal_period)
+        if macd.size == 0 or pd.isna(macd[-1]):
             return IndicatorResult(name="MACD", value=0, signal_strength=0, interpretation="neutral")
 
-        current_macd = macd.iloc[-1]
-        current_signal = macdsignal.iloc[-1]
-        current_histogram = macdhist.iloc[-1]
+        current_macd = macd[-1]
+        current_signal = macdsignal[-1]
+        current_histogram = macdhist[-1]
 
         if current_macd > current_signal and current_histogram > 0:
             interpretation = "bullish_crossover"
@@ -150,16 +151,16 @@ class StochasticIndicator(TechnicalIndicator):
         self.s_period = s_period
 
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        slowk, slowd = talib.STOCH(data['high'], data['low'], data['close'],
+        slowk, slowd = talib.STOCH(data['high'].to_numpy(dtype=np.float64), data['low'].to_numpy(dtype=np.float64), data['close'].to_numpy(dtype=np.float64),
                                    fastk_period=self.k_period,
                                    slowk_period=self.s_period,
                                    slowd_period=self.d_period)
 
-        if getattr(slowk, "empty", False) or pd.isna(slowk.iloc[-1]):
+        if slowk.size == 0 or pd.isna(slowk[-1]):
             return IndicatorResult(name="STOCH", value=50, signal_strength=0, interpretation="neutral")
 
-        current_k = slowk.iloc[-1]
-        current_d = slowd.iloc[-1]
+        current_k = slowk[-1]
+        current_d = slowd[-1]
         avg_stoch = (current_k + current_d) / 2
 
         if avg_stoch > 80:
@@ -183,12 +184,12 @@ class VolumeIndicator(TechnicalIndicator):
         if 'volume' not in data.columns or len(data) < self.period:
             return IndicatorResult(name="VOLUME", value=1, signal_strength=50, interpretation="normal_volume")
 
-        volume_ma = talib.SMA(data['volume'], timeperiod=self.period)
-        if getattr(volume_ma, "empty", False) or pd.isna(volume_ma.iloc[-1]):
+        volume_ma = talib.SMA(data['volume'].to_numpy(dtype=np.float64), timeperiod=self.period)
+        if volume_ma.size == 0 or pd.isna(volume_ma[-1]):
             return IndicatorResult(name="VOLUME", value=1, signal_strength=50, interpretation="normal_volume")
 
         current_volume = data['volume'].iloc[-1]
-        average_volume = volume_ma.iloc[-1]
+        average_volume = volume_ma[-1]
 
         volume_ratio = current_volume / average_volume if average_volume > 0 else 1
 
@@ -210,11 +211,11 @@ class ATRIndicator(TechnicalIndicator):
         self.period = period
 
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        atr_series = talib.ATR(data['high'], data['low'], data['close'], timeperiod=self.period)
-        if getattr(atr_series, "empty", False) or pd.isna(atr_series.iloc[-1]):
+        atr_series = talib.ATR(data['high'].to_numpy(dtype=np.float64), data['low'].to_numpy(dtype=np.float64), data['close'].to_numpy(dtype=np.float64), timeperiod=self.period)
+        if atr_series.size == 0 or pd.isna(atr_series[-1]):
             return IndicatorResult(name="ATR", value=0, signal_strength=0, interpretation="neutral")
 
-        current_atr = atr_series.iloc[-1]
+        current_atr = atr_series[-1]
         current_price = data['close'].iloc[-1]
 
         atr_percentage = (current_atr / current_price) * 100 if current_price > 0 else 0
@@ -259,11 +260,11 @@ class WilliamsRIndicator(TechnicalIndicator):
         self.period = period
 
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        willr_series = talib.WILLR(data['high'], data['low'], data['close'], timeperiod=self.period)
-        if getattr(willr_series, "empty", False) or pd.isna(willr_series.iloc[-1]):
+        willr_series = talib.WILLR(data['high'].to_numpy(dtype=np.float64), data['low'].to_numpy(dtype=np.float64), data['close'].to_numpy(dtype=np.float64), timeperiod=self.period)
+        if willr_series.size == 0 or pd.isna(willr_series[-1]):
             return IndicatorResult(name="Williams %R", value=-50, signal_strength=0, interpretation="neutral")
 
-        value = willr_series.iloc[-1]
+        value = willr_series[-1]
 
         if value > -20:
             interpretation = "overbought"
@@ -283,11 +284,11 @@ class CCIIndicator(TechnicalIndicator):
         self.period = period
 
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        cci_series = talib.CCI(data['high'], data['low'], data['close'], timeperiod=self.period)
-        if getattr(cci_series, "empty", False) or pd.isna(cci_series.iloc[-1]):
+        cci_series = talib.CCI(data['high'].to_numpy(dtype=np.float64), data['low'].to_numpy(dtype=np.float64), data['close'].to_numpy(dtype=np.float64), timeperiod=self.period)
+        if cci_series.size == 0 or pd.isna(cci_series[-1]):
             return IndicatorResult(name="CCI", value=0, signal_strength=0, interpretation="neutral")
 
-        cci = cci_series.iloc[-1]
+        cci = cci_series[-1]
 
         if cci > 100:
             interpretation = "overbought"
@@ -325,7 +326,7 @@ class SuperTrendIndicator(TechnicalIndicator):
             interpretation = "neutral"
             strength = 50
 
-        return IndicatorResult(name="SuperTrend", value=current_value, signal_strength=strength, interpretation=interpretation)
+        return IndicatorResult(name="SuperTrend", value=float(current_value), signal_strength=strength, interpretation=interpretation)
 
 
 class ADXIndicator(TechnicalIndicator):
@@ -333,11 +334,11 @@ class ADXIndicator(TechnicalIndicator):
         self.period = period
 
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        adx_series = talib.ADX(data['high'], data['low'], data['close'], timeperiod=self.period)
-        if getattr(adx_series, "empty", False) or pd.isna(adx_series.iloc[-1]):
+        adx_series = talib.ADX(data['high'].to_numpy(dtype=np.float64), data['low'].to_numpy(dtype=np.float64), data['close'].to_numpy(dtype=np.float64), timeperiod=self.period)
+        if adx_series.size == 0 or pd.isna(adx_series[-1]):
             return IndicatorResult(name="ADX", value=0, signal_strength=0, interpretation="weak_trend")
 
-        adx = adx_series.iloc[-1]
+        adx = adx_series[-1]
 
         if adx > 25:
             interpretation = "strong_trend"
@@ -396,11 +397,11 @@ class OBVIndicator(TechnicalIndicator):
 
 class ParabolicSARIndicator(TechnicalIndicator):
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        psar_series = talib.SAR(data['high'], data['low'])
-        if getattr(psar_series, "empty", False) or psar_series.iloc[-1] is None or np.isnan(psar_series.iloc[-1]):
+        psar_series = talib.SAR(data['high'].to_numpy(dtype=np.float64), data['low'].to_numpy(dtype=np.float64))
+        if psar_series.size == 0 or psar_series[-1] is None or np.isnan(psar_series[-1]):
             return IndicatorResult("ParabolicSAR", 0, 0, "neutral")
 
-        current_psar = psar_series.iloc[-1]
+        current_psar = psar_series[-1]
         current_close = data['close'].iloc[-1]
 
         interpretation = "neutral"
@@ -454,8 +455,8 @@ class SqueezeMomentumIndicator(TechnicalIndicator):
 
         return IndicatorResult(
             name="SqueezeMomentum",
-            value=momentum_val,
-            signal_strength=strength,
+            value=float(momentum_val),
+            signal_strength=float(strength),
             interpretation=interpretation
         )
 
@@ -693,7 +694,7 @@ class TRIXIndicator(TechnicalIndicator):
         if isinstance(trix_series, pd.DataFrame):
             if trix_series.iloc[-1].isna().any():
                 return IndicatorResult(name="TRIX", value=0, signal_strength=0, interpretation="neutral")
-            current_trix = trix_series.iloc[-1, 0]
+            current_trix = trix_series.iloc[-1, 0] 
         else:
             if pd.isna(trix_series.iloc[-1]):
                 return IndicatorResult(name="TRIX", value=0, signal_strength=0, interpretation="neutral")
@@ -735,12 +736,12 @@ class StandardDeviationIndicator(TechnicalIndicator):
         self.period = period
 
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        std_dev_series = talib.STDDEV(data['close'], timeperiod=self.period)
-        if getattr(std_dev_series, "empty", False) or pd.isna(std_dev_series.iloc[-1]):
+        std_dev_series = talib.STDDEV(data['close'].to_numpy(dtype=np.float64), timeperiod=self.period)
+        if std_dev_series.size == 0 or pd.isna(std_dev_series[-1]):
             return IndicatorResult(name="StdDev", value=0, signal_strength=0, interpretation="neutral")
 
-        current_std_dev = std_dev_series.iloc[-1]
-        avg_std_dev = std_dev_series.mean()
+        current_std_dev = std_dev_series[-1]
+        avg_std_dev = np.nanmean(std_dev_series)
 
         if current_std_dev > avg_std_dev * 1.5:
             interpretation = "high_volatility"

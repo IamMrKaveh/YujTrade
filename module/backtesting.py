@@ -119,7 +119,7 @@ class BacktestingEngine:
         initial_capital: float = 10000,
         commission_rate: float = 0.001,
     ):
-        cerebro = bt.Cerebro(stdstats=False)
+        cerebro = bt.Cerebro()
         cerebro.broker.setcash(initial_capital)
         cerebro.broker.setcommission(commission=commission_rate)
 
@@ -138,12 +138,8 @@ class BacktestingEngine:
 
         data_feed = bt.feeds.PandasData(
             dataname=self.full_data[start:end],
-            open="open",
-            high="high",
-            low="low",
-            close="close",
-            volume="volume",
-            openinterest=-1,
+            # Column names are automatically detected by convention if not specified
+            # open='open', high='high', low='low', close='close', volume='volume', openinterest=-1
         )
         cerebro.adddata(data_feed)
 

@@ -1,7 +1,7 @@
 import asyncio
 import time
 from functools import wraps
-from typing import Dict
+from typing import Dict, Tuple, Type
 
 from module.logger_config import logger
 
@@ -31,7 +31,7 @@ class RateLimiter:
             
             self.requests[endpoint].append(time.time())
 
-def async_retry(attempts=3, delay=5, exceptions=(Exception,)):
+def async_retry(attempts: int = 3, delay: int = 5, exceptions: Tuple[Type[Exception], ...] = (Exception,)):
     """
     A decorator for retrying an async function if it raises a specified exception.
     """
@@ -47,6 +47,7 @@ def async_retry(attempts=3, delay=5, exceptions=(Exception,)):
                     logger.warning(f"Attempt {attempt + 1}/{attempts} for {func.__name__} failed: {e}. Retrying in {delay}s...")
                     await asyncio.sleep(delay)
             logger.error(f"Function {func.__name__} failed after {attempts} attempts.")
-            raise last_exception
+            if last_exception:
+                raise last_exception
         return wrapper
     return decorator

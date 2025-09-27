@@ -54,6 +54,9 @@ class TradingBotService:
 
             all_signals = await self.signal_generator.generate_signals(data, symbol, timeframe)
             min_confidence = self.config.get("min_confidence_score", 0)
+            if min_confidence is None:
+                min_confidence = 0
+            
             qualified_signals = [s for s in all_signals if s.confidence_score >= min_confidence]
 
             return qualified_signals
@@ -63,6 +66,8 @@ class TradingBotService:
 
     async def find_best_signals_for_timeframe(self, timeframe: str) -> List[TradingSignal]:
         symbols = self.config.get("symbols", [])
+        if not symbols:
+            return []
         tasks = [self.analyze_symbol(symbol, timeframe) for symbol in symbols]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
@@ -78,6 +83,8 @@ class TradingBotService:
 
     async def get_comprehensive_analysis(self) -> List[TradingSignal]:
         timeframes = self.config.get("timeframes", TIME_FRAMES)
+        if not timeframes:
+            return []
         all_signals = []
         
         tasks = [self.find_best_signals_for_timeframe(tf) for tf in timeframes]
@@ -268,7 +275,10 @@ class TelegramBotHandler:
             ],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("Welcome to Yuj Bot! Please choose a command:", reply_markup=reply_markup)
+        if update.message:
+            await update.message.reply_text("Welcome to Yuj Bot! Please choose a command:", reply_markup=reply_markup)
+        elif update.callback_query and update.callback_query.message:
+             await update.callback_query.message.reply_text("Welcome to Yuj Bot! Please choose a command:", reply_markup=reply_markup)
 
     def _create_background_task(self, coro):
         loop = asyncio.get_running_loop()
@@ -278,6 +288,8 @@ class TelegramBotHandler:
 
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        if not query or not query.message:
+            return
         await query.answer()
         
         chat_id = query.message.chat_id
@@ -307,12 +319,24 @@ class TelegramBotHandler:
             await query.edit_message_text(text=escaped_config, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
         elif query.data == "config_view_symbols":
             symbols = self.config_manager.get("symbols", [])
-            symbols_text = "Configured Symbols:\n" + ", ".join(symbols)
+            symbols_text = "Configured Symbols:\n" + ", ".join(symbols or [])
             escaped_symbols = escape_markdown_v2(symbols_text)
             keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="main_menu")]]
             await query.edit_message_text(text=escaped_symbols, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
         elif query.data == "main_menu":
-            await self.help_command(query, context)
+            # Recreate the main menu. We can't call help_command directly with a query.
+            keyboard = [
+                [
+                    InlineKeyboardButton("⚡️ Quick Scan (1h)", callback_data="scan_1h"),
+                    InlineKeyboardButton("🚀 Full Scan", callback_data="full_scan"),
+                ],
+                [
+                    InlineKeyboardButton("⚙️ Configuration", callback_data="config_menu"),
+                    InlineKeyboardButton("📊 View Symbols", callback_data="config_view_symbols"),
+                ],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text("Welcome to Yuj Bot! Please choose a command:", reply_markup=reply_markup)
         elif query.data == "noop":
             await query.answer("This feature is not implemented yet.", show_alert=True)
 
@@ -326,6 +350,10 @@ class TelegramBotHandler:
             chat_id = int(chat_id_str)
         except (ValueError, TypeError):
             logger.error(f"Invalid TELEGRAM_CHAT_ID: {chat_id_str}. Must be an integer.")
+            return
+
+        if not self.application:
+            logger.error("Telegram application not available for scheduled analysis.")
             return
 
         logger.info("Starting scheduled analysis...")
