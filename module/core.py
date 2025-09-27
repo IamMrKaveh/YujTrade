@@ -44,6 +44,20 @@ class FundamentalAnalysis:
 
 
 @dataclass
+class OnChainAnalysis:
+    mvrv: Optional[float] = None
+    sopr: Optional[float] = None
+    active_addresses: Optional[int] = None
+    realized_cap: Optional[float] = None
+
+
+@dataclass
+class DerivativesAnalysis:
+    open_interest: Optional[float] = None
+    funding_rate: Optional[float] = None
+
+
+@dataclass
 class MarketAnalysis:
     trend: TrendDirection
     trend_strength: TrendStrength
@@ -88,3 +102,5 @@ class TradingSignal:
     market_context: Dict[str, Any]
     dynamic_levels: Dict[str, float]
     fundamental_analysis: Optional[FundamentalAnalysis] = None
+    on_chain_analysis: Optional[OnChainAnalysis] = None
+    derivatives_analysis: Optional[DerivativesAnalysis] = None

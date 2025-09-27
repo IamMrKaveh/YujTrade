@@ -191,6 +191,21 @@ class TradingBotService:
             message += f"  - *Trend:* {trend} ({strength})\n"
             message += f"  - *Volatility:* {volatility:.2f}%\n\n"
 
+        # Add On-Chain and Derivatives context
+        if signal.on_chain_analysis or signal.derivatives_analysis:
+            message += "*On-Chain & Derivatives:*\n"
+            if signal.on_chain_analysis and signal.on_chain_analysis.mvrv:
+                message += f"  - *MVRV:* `{signal.on_chain_analysis.mvrv:.3f}`\n"
+            if signal.on_chain_analysis and signal.on_chain_analysis.sopr:
+                message += f"  - *SOPR:* `{signal.on_chain_analysis.sopr:.3f}`\n"
+            if signal.derivatives_analysis and signal.derivatives_analysis.funding_rate:
+                fr = signal.derivatives_analysis.funding_rate * 100
+                message += f"  - *Funding Rate:* `{fr:.4f}%`\n"
+            if signal.derivatives_analysis and signal.derivatives_analysis.open_interest:
+                oi = signal.derivatives_analysis.open_interest
+                message += f"  - *Open Interest:* `${oi:,.0f}`\n"
+            message += "\n"
+
         if signal.reasons:
             message += "*Key Reasons for Score:*\n"
             for reason in signal.reasons:

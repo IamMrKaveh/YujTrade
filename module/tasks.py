@@ -5,7 +5,8 @@ import redis.asyncio as redis
 from telegram.ext import Application
 
 from module.config import Config, ConfigManager
-from module.data_sources import (BinanceFetcher, CoinDeskFetcher,
+from module.data_sources import (AmberdataFetcher, BinanceFetcher,
+                                 CoinDeskFetcher, CoinMetricsFetcher,
                                  GlassnodeFetcher, MarketIndicesFetcher,
                                  NewsFetcher)
 from module.logger_config import logger
@@ -46,6 +47,8 @@ class TaskServiceContainer:
         binance_fetcher = BinanceFetcher(redis_client=self.redis_client)
         coindesk_fetcher = CoinDeskFetcher(api_key=Config.COINDESK_API_KEY, redis_client=self.redis_client) if Config.COINDESK_API_KEY else None
         glassnode_fetcher = GlassnodeFetcher(api_key=Config.GLASSNODE_API_KEY, redis_client=self.redis_client) if Config.GLASSNODE_API_KEY else None
+        amberdata_fetcher = AmberdataFetcher(api_key=Config.AMBERDATA_KEY, redis_client=self.redis_client) if Config.AMBERDATA_KEY else None
+        coinmetrics_fetcher = CoinMetricsFetcher(api_key=Config.COINMETRICS_API_KEY, redis_client=self.redis_client)
         
         market_indices_fetcher = MarketIndicesFetcher(
             alpha_vantage_key=Config.ALPHA_VANTAGE_KEY,
@@ -73,6 +76,8 @@ class TaskServiceContainer:
             lstm_model_manager=self.lstm_manager,
             multi_tf_analyzer=None,
             config=self.config_manager.config,
+            coinmetrics_fetcher=coinmetrics_fetcher,
+            amberdata_fetcher=amberdata_fetcher
         )
         
         multi_tf_analyzer = MultiTimeframeAnalyzer(self.market_data_provider, self.signal_generator.indicators)

@@ -44,6 +44,8 @@ class Config:
     COINDESK_API_KEY = get_secret("COINDESK_API_KEY")
     GLASSNODE_API_KEY = get_secret("GLASSNODE_API_KEY")
     SENTRY_DSN = get_secret("SENTRY_DSN")
+    AMBERDATA_KEY = get_secret("AMBERDATA_KEY")
+    COINMETRICS_API_KEY = get_secret("COINMETRICS_API_KEY")
 
     TF_CPP_MIN_LOG_LEVEL = decouple_config("TF_CPP_MIN_LOG_LEVEL", default="3")
     TF_ENABLE_ONEDNN_OPTS = decouple_config("TF_ENABLE_ONEDNN_OPTS", default="0")

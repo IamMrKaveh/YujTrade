@@ -20,6 +20,8 @@ coindesk_rate_limiter = RateLimiter(max_requests=20, time_window=60)
 binance_rate_limiter = RateLimiter(max_requests=1200, time_window=60)
 glassnode_rate_limiter = RateLimiter(max_requests=30, time_window=60)
 defillama_rate_limiter = RateLimiter(max_requests=20, time_window=60)
+coinmetrics_rate_limiter = RateLimiter(max_requests=10, time_window=6)
+amberdata_rate_limiter = RateLimiter(max_requests=20, time_window=1)
 
 
 class BinanceFetcher:
@@ -506,3 +508,191 @@ class NewsFetcher:
             if any(k in title for k in ["crash", "dump", "fall", "drop", "hack"]):
                 score -= 1
         return score
+
+
+class CoinMetricsFetcher:
+    def __init__(self, api_key: Optional[str] = None, redis_client: Optional[redis.Redis] = None):
+        self.api_key = api_key
+        self.base_url = "https://api.coinmetrics.io/v4"
+        self.redis = redis_client
+        self.cache_ttl = 1800  # 30 minutes
+
+    @async_retry(attempts=3, delay=5)
+    async def _fetch(self, endpoint: str, params: Optional[Dict[str, Any]] = None):
+        final_params = params.copy() if params else {}
+        if self.api_key:
+            final_params["api_key"] = self.api_key
+        
+        url = f"{self.base_url}{endpoint}"
+        await coinmetrics_rate_limiter.wait_if_needed(endpoint)
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=final_params) as response:
+                response.raise_for_status()
+                return await response.json()
+
+    async def get_asset_metrics(self, assets: List[str], metrics: List[str]) -> Optional[Dict[str, Dict[str, float]]]:
+        asset_str = ",".join(assets).lower()
+        metric_str = ",".join(metrics)
+        cache_key = f"cache:coinmetrics:asset_metrics:{asset_str}:{metric_str}"
+        
+        if self.redis:
+            cached = await self.redis.get(cache_key)
+            if cached:
+                return json.loads(cached)
+
+        try:
+            params = {"assets": asset_str, "metrics": metric_str, "frequency": "1d", "page_size": 1}
+            data = await self._fetch("/timeseries/asset-metrics", params)
+            
+            if not data or "data" not in data:
+                return None
+
+            results = {}
+            for series in data["data"]:
+                asset = series["asset"]
+                metric = series["metric"]
+                if asset not in results:
+                    results[asset] = {}
+                if series["series"]:
+                    # Get the last value
+                    results[asset][metric] = float(series["series"][0]["values"][0])
+            
+            if self.redis and results:
+                await self.redis.set(cache_key, json.dumps(results), ex=self.cache_ttl)
+
+            return results
+        except Exception as e:
+            logger.error(f"Error fetching asset metrics from CoinMetrics: {e}")
+            return None
+
+    async def get_market_indicators(self, asset: str, indicators: List[str]) -> Optional[Dict[str, float]]:
+        """Fetches market indicators like MVRV, SOPR, etc."""
+        return await self.get_asset_metrics(assets=[asset], metrics=indicators)
+
+
+class AmberdataFetcher:
+    def __init__(self, api_key: str, redis_client: Optional[redis.Redis] = None):
+        self.api_key = api_key
+        self.base_url = "https://web3api.io/api/v2"
+        self.redis = redis_client
+        self.cache_ttl = 300  # 5 minutes
+
+    @async_retry(attempts=3, delay=2)
+    async def _fetch(self, endpoint: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, Any]] = None):
+        if not self.api_key:
+            logger.warning("Amberdata API key is not provided.")
+            return None
+        
+        final_headers = {"x-api-key": self.api_key, "Accept": "application/json"}
+        if headers:
+            final_headers.update(headers)
+            
+        url = f"{self.base_url}{endpoint}"
+        
+        await amberdata_rate_limiter.wait_if_needed(endpoint)
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, headers=final_headers) as response:
+                response.raise_for_status()
+                return await response.json()
+
+    async def get_historical_ohlc(self, symbol: str, timeframe: str = "1d") -> Optional[pd.DataFrame]:
+        pair = symbol.replace("/", "_").lower()
+        cache_key = f"cache:amberdata:ohlc:{pair}:{timeframe}"
+        if self.redis:
+            cached = await self.redis.get(cache_key)
+            if cached:
+                df = pd.read_json(cached, orient="split")
+                df.index = pd.to_datetime(df.index, unit='ms', utc=True)
+                return df
+
+        try:
+            endpoint = f"/market/ohlcv/{pair}/historical"
+            params = {"timeInterval": timeframe}
+            data = await self._fetch(endpoint, params)
+            
+            if not data or "payload" not in data or not data["payload"]["data"]:
+                return None
+
+            df = pd.DataFrame(data["payload"]["data"])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+            df.set_index('timestamp', inplace=True)
+            df = df.astype(float)
+            
+            if self.redis:
+                df_to_cache = df.copy()
+                df_to_cache.index = df_to_cache.index.astype(int) // 10**6
+                await self.redis.set(cache_key, df_to_cache.to_json(orient="split"), ex=self.cache_ttl)
+            
+            return df
+        except Exception as e:
+            logger.error(f"Error fetching OHLC from Amberdata for {symbol}: {e}")
+            return None
+
+    async def get_futures_data(self, exchange: str, instrument: str) -> Optional[Dict]:
+        """Fetches futures data like open interest and funding rates."""
+        cache_key = f"cache:amberdata:futures:{exchange}:{instrument}"
+        if self.redis:
+            cached = await self.redis.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        
+        try:
+            endpoint = f"/market/futures/tickers/{instrument}/latest"
+            params = {"exchange": exchange}
+            data = await self._fetch(endpoint, params)
+            
+            if data and "payload" in data and data["payload"]:
+                result = data["payload"][0] # Get the first result
+                if self.redis:
+                    await self.redis.set(cache_key, json.dumps(result), ex=self.cache_ttl)
+                return result
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching futures data from Amberdata for {instrument}: {e}")
+            return None
+
+    async def get_nft_collection_metrics(self, collection_address: str) -> Optional[Dict]:
+        """Fetches NFT collection metrics."""
+        cache_key = f"cache:amberdata:nft_collection:{collection_address}"
+        if self.redis:
+            cached = await self.redis.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        
+        try:
+            endpoint = f"/nft/collections/{collection_address}/metrics/latest"
+            data = await self._fetch(endpoint)
+            
+            if data and "payload" in data:
+                result = data["payload"]
+                if self.redis:
+                    await self.redis.set(cache_key, json.dumps(result), ex=3600) # Cache for 1 hour
+                return result
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching NFT collection data from Amberdata for {collection_address}: {e}")
+            return None
+
+    async def get_defi_protocol_data(self, protocol_slug: str) -> Optional[Dict]:
+        """Fetches detailed data for a specific DeFi protocol."""
+        cache_key = f"cache:amberdata:defi_protocol:{protocol_slug}"
+        if self.redis:
+            cached = await self.redis.get(cache_key)
+            if cached:
+                return json.loads(cached)
+
+        try:
+            endpoint = f"/defi/protocols/{protocol_slug}/latest"
+            data = await self._fetch(endpoint)
+            
+            if data and "payload" in data:
+                result = data["payload"]
+                if self.redis:
+                    await self.redis.set(cache_key, json.dumps(result), ex=3600) # Cache for 1 hour
+                return result
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching DeFi protocol data from Amberdata for {protocol_slug}: {e}")
+            return None

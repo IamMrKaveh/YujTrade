@@ -28,6 +28,8 @@ def run():
         "COINDESK_API_KEY",
         "GLASSNODE_API_KEY",
         "SENTRY_DSN",
+        "AMBERDATA_KEY",
+        "COINMETRICS_API_KEY",
     ]
 
     new_env_content = ""
