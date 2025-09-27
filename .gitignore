@@ -6,6 +6,8 @@ Main/
 
 .env
 
+.vscode/
+
 # TensorFlow model files
 *.h5
 *.pb
