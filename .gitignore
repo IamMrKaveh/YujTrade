@@ -4,6 +4,8 @@ lstm-model/
 
 Main/
 
+.env
+
 # TensorFlow model files
 *.h5
 *.pb

@@ -12,7 +12,8 @@ from telegram import Update
 
 from module.config import Config, ConfigManager
 from module.data_sources import (BinanceFetcher, CoinDeskFetcher,
-                                 MarketIndicesFetcher, NewsFetcher)
+                                GlassnodeFetcher, MarketIndicesFetcher,
+                                NewsFetcher)
 from module.logger_config import logger
 from module.lstm import LSTMModelManager
 from module.market import MarketDataProvider
@@ -21,6 +22,8 @@ from module.tasks import TaskServiceContainer
 from module.telegram import TelegramBotHandler, TradingBotService
 
 warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.runtime_version")
+warnings.filterwarnings("ignore", category=FutureWarning, module="yfinance")
+
 
 background_tasks: Set[asyncio.Task] = set()
 
@@ -35,8 +38,9 @@ async def main():
     task_container = None
 
     def signal_handler():
-        logger.info("Shutdown signal received")
-        stop_event.set()
+        if not stop_event.is_set():
+            logger.info("Shutdown signal received")
+            stop_event.set()
 
     loop = asyncio.get_running_loop()
     if platform.system() != "Windows":
@@ -61,6 +65,7 @@ async def main():
 
         binance_fetcher = BinanceFetcher(redis_client=redis_client)
         coindesk_fetcher = CoinDeskFetcher(api_key=Config.COINDESK_API_KEY, redis_client=redis_client) if Config.COINDESK_API_KEY else None
+        glassnode_fetcher = GlassnodeFetcher(api_key=Config.GLASSNODE_API_KEY, redis_client=redis_client) if Config.GLASSNODE_API_KEY else None
         
         market_data_provider = MarketDataProvider(
             redis_client=redis_client, 
@@ -72,6 +77,7 @@ async def main():
         market_indices_fetcher = MarketIndicesFetcher(
             alpha_vantage_key=Config.ALPHA_VANTAGE_KEY,
             coingecko_key=Config.COINGECKO_KEY,
+            glassnode_fetcher=glassnode_fetcher,
             redis_client=redis_client
         )
         
@@ -139,16 +145,16 @@ async def main():
         if application and application.updater and application.updater.running:
             await application.updater.stop()
         
+        if application:
+            await application.stop()
+            await application.shutdown()
+
         logger.info(f"Cancelling {len(background_tasks)} background tasks.")
-        for task in background_tasks:
+        for task in list(background_tasks):
             task.cancel()
         
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
-        
-        if application:
-            await application.stop()
-            await application.shutdown()
         
         if bot_instance:
             await bot_instance.cleanup()
@@ -163,7 +169,7 @@ async def main():
             task_container = await TaskServiceContainer.instance()
             if task_container:
                 await task_container.cleanup()
-        except RuntimeError:
+        except (RuntimeError, NameError):
             pass
 
         if redis_client:

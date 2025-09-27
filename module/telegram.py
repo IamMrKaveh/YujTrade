@@ -1,6 +1,7 @@
 import asyncio
 import io
 import time
+import re
 from typing import Dict, List, Optional, Set
 
 import matplotlib.pyplot as plt
@@ -17,6 +18,9 @@ from module.logger_config import logger
 from module.market import MarketDataProvider
 from module.signals import SignalGenerator, SignalRanking
 
+def escape_markdown_v2(text: str) -> str:
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
 class TradingBotService:
     def __init__(
@@ -49,7 +53,7 @@ class TradingBotService:
                 return []
 
             all_signals = await self.signal_generator.generate_signals(data, symbol, timeframe)
-            min_confidence = self.config.get("min_confidence_score", 60)
+            min_confidence = self.config.get("min_confidence_score", 0)
             qualified_signals = [s for s in all_signals if s.confidence_score >= min_confidence]
 
             return qualified_signals
@@ -70,82 +74,83 @@ class TradingBotService:
                 logger.error(f"An exception occurred during symbol analysis: {res}")
 
         ranked_signals = self.signal_ranking.rank_signals(all_signals)
-        return ranked_signals[: self.config.get("max_signals_per_timeframe", 3)]
+        return ranked_signals
 
-    async def get_comprehensive_analysis(self) -> Dict[str, List[TradingSignal]]:
+    async def get_comprehensive_analysis(self) -> List[TradingSignal]:
         timeframes = self.config.get("timeframes", TIME_FRAMES)
-        analysis_results = {}
-        for tf in timeframes:
-            analysis_results[tf] = await self.find_best_signals_for_timeframe(tf)
-        return analysis_results
+        all_signals = []
         
-    async def run_comprehensive_analysis_task(self, chat_id: int, message_id: int):
+        tasks = [self.find_best_signals_for_timeframe(tf) for tf in timeframes]
+        results_per_timeframe = await asyncio.gather(*tasks)
+
+        for result_list in results_per_timeframe:
+            all_signals.extend(result_list)
+            
+        return self.signal_ranking.rank_signals(all_signals)
+        
+    async def run_comprehensive_analysis_task(self, chat_id: int, message_id: Optional[int] = None):
         if not self.telegram_app:
             logger.error("Telegram application not set in TradingBotService.")
             return
 
-        timeframes = self.config.get("timeframes", TIME_FRAMES)
-        total_signals_found = 0
+        if message_id:
+            try:
+                await self.telegram_app.bot.edit_message_text(
+                    chat_id=chat_id, message_id=message_id, text="🚀 Starting full analysis... This may take a moment."
+                )
+            except BadRequest:
+                logger.warning("Could not edit initial message, it may have been deleted.")
 
-        try:
-            await self.telegram_app.bot.edit_message_text(
-                chat_id=chat_id, message_id=message_id, text="🚀 Starting full analysis..."
-            )
-        except BadRequest:
-            logger.warning("Could not edit initial message, it may have been deleted.")
+        all_signals = await self.get_comprehensive_analysis()
 
-        for timeframe in timeframes:
+        if all_signals:
+            best_signal = all_signals[0]
             await self.telegram_app.bot.send_message(
-                chat_id=chat_id, text=f"⏳ Analyzing {timeframe} timeframe..."
+                chat_id, "--- 👑 Top Signal Found Across All Timeframes ---"
             )
-            
-            signals = await self.find_best_signals_for_timeframe(timeframe)
-            
-            if signals:
-                total_signals_found += len(signals)
-                await self.telegram_app.bot.send_message(
-                    chat_id, f"--- Top Signals for {timeframe} ---"
-                )
-                for signal in signals:
-                    await self.send_signal_to_chat(chat_id, signal)
-            else:
-                await self.telegram_app.bot.send_message(
-                    chat_id=chat_id, text=f"✅ No strong signals found for {timeframe}."
-                )
-            await asyncio.sleep(1)
-
-        final_message = "🏁 Full analysis complete."
-        if total_signals_found == 0:
-            final_message += "\n\nNo strong signals found in the current market conditions across all timeframes."
+            await self.send_signal_to_chat(chat_id, best_signal)
+            final_message = "🏁 Full analysis complete. The best signal is shown above."
+        else:
+            final_message = "🏁 Full analysis complete. No strong signals found in the current market conditions."
         
-        await self.telegram_app.bot.send_message(chat_id=chat_id, text=final_message)
+        if message_id:
+            try:
+                await self.telegram_app.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=final_message)
+            except BadRequest:
+                await self.telegram_app.bot.send_message(chat_id=chat_id, text=final_message)
+        else:
+            await self.telegram_app.bot.send_message(chat_id=chat_id, text=final_message)
 
 
-    async def run_find_best_signals_task(self, timeframe: str, chat_id: int, message_id: int):
+    async def run_find_best_signals_task(self, timeframe: str, chat_id: int, message_id: Optional[int] = None):
         if not self.telegram_app:
             logger.error("Telegram application not set in TradingBotService.")
             return
         
-        try:
-            await self.telegram_app.bot.edit_message_text(
-                chat_id=chat_id, message_id=message_id, text=f"⏳ Running quick scan for {timeframe} timeframe..."
-            )
-        except BadRequest:
-             logger.warning(f"Could not edit message, it might have been deleted.")
+        if message_id:
+            try:
+                await self.telegram_app.bot.edit_message_text(
+                    chat_id=chat_id, message_id=message_id, text=f"⏳ Running quick scan for {timeframe} timeframe..."
+                )
+            except BadRequest:
+                 logger.warning(f"Could not edit message, it might have been deleted.")
 
         signals = await self.find_best_signals_for_timeframe(timeframe)
         
-        final_message = f"⚡ Quick scan for {timeframe} complete."
         if signals:
-            await self.telegram_app.bot.send_message(chat_id, f"--- Top Signals for {timeframe} ---")
-            for signal in signals:
-                await self.send_signal_to_chat(chat_id, signal)
+            best_signal = signals[0]
+            await self.telegram_app.bot.send_message(chat_id, f"--- 👑 Top Signal for {timeframe} ---")
+            await self.send_signal_to_chat(chat_id, best_signal)
+            final_message = f"⚡ Quick scan for {timeframe} complete. The best signal is shown above."
         else:
             final_message = f"No strong signals found on the {timeframe} timeframe right now."
-
-        try:
-            await self.telegram_app.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=final_message)
-        except BadRequest:
+        
+        if message_id:
+            try:
+                await self.telegram_app.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=final_message)
+            except BadRequest:
+                await self.telegram_app.bot.send_message(chat_id=chat_id, text=final_message)
+        else:
             await self.telegram_app.bot.send_message(chat_id=chat_id, text=final_message)
 
     async def cleanup(self):
@@ -163,6 +168,13 @@ class TradingBotService:
         message += f"📈 *Predicted Profit:* {signal.predicted_profit:.2f}%\n"
         message += f"⚖️ *Risk/Reward Ratio:* {signal.risk_reward_ratio:.2f}\n\n"
 
+        if signal.dynamic_levels:
+            dl = signal.dynamic_levels
+            message += "*Dynamic Levels:*\n"
+            message += f"  - *Entry:* `{dl.get('primary_entry', 0):.4f}`\n"
+            message += f"  - *Take Profit:* `{dl.get('primary_exit', 0):.4f}`\n"
+            message += f"  - *Stop Loss:* `{dl.get('tight_stop', 0):.4f}`\n\n"
+
         if signal.market_context:
             mc = signal.market_context
             trend = mc.get('trend', 'N/A').replace('_', ' ').title()
@@ -172,123 +184,158 @@ class TradingBotService:
             message += f"  - *Trend:* {trend} ({strength})\n"
             message += f"  - *Volatility:* {volatility:.2f}%\n\n"
 
-        if signal.dynamic_levels:
-            dl = signal.dynamic_levels
-            message += "*Dynamic Levels:*\n"
-            message += f"  - *Entry:* `{dl.get('primary_entry', 0):.4f}`\n"
-            message += f"  - *Take Profit:* `{dl.get('primary_exit', 0):.4f}`\n"
-            message += f"  - *Stop Loss:* `{dl.get('tight_stop', 0):.4f}`\n\n"
-
         if signal.reasons:
-            message += "*Key Reasons:*\n"
-            for reason in signal.reasons[:5]:
+            message += "*Key Reasons for Score:*\n"
+            for reason in signal.reasons:
                 message += f"  • _{reason}_\n"
-        
+            message += "\n"
+
         return message
 
     async def send_signal_to_chat(self, chat_id: int, signal: TradingSignal):
         if not self.telegram_app:
-            logger.error("Cannot send message, Telegram app is not available.")
+            logger.error("Telegram application not set, cannot send message.")
             return
             
         message = self.format_signal_message(signal)
+        escaped_message = escape_markdown_v2(message)
+        
         try:
-            await self.telegram_app.bot.send_message(chat_id, text=message, parse_mode=ParseMode.MARKDOWN_V2)
-        except Exception as e:
+            await self.telegram_app.bot.send_message(
+                chat_id, text=escaped_message, parse_mode=ParseMode.MARKDOWN_V2
+            )
+        except BadRequest as e:
             logger.error(f"Failed to send signal message for {signal.symbol}: {e}. Retrying without markdown.")
-            plain_message = message.replace('*', '').replace('_', '').replace('`', '').replace('.', r'\.')
             try:
-                await self.telegram_app.bot.send_message(chat_id, text=plain_message)
-            except Exception as e2:
-                logger.error(f"Failed to send plain text message for {signal.symbol}: {e2}")
+                unescaped_text = re.sub(r'\\(.)', r'\1', escaped_message)
+                await self.telegram_app.bot.send_message(chat_id, text=unescaped_text, parse_mode=None)
+            except Exception as final_e:
+                logger.error(f"Failed to send signal message even without markdown: {final_e}")
 
 
 class TelegramBotHandler:
-    def __init__(self, bot_token: str, config_manager: ConfigManager, trading_service: TradingBotService):
+    def __init__(
+        self,
+        bot_token: str,
+        config_manager: ConfigManager,
+        trading_service: TradingBotService,
+    ):
         self.bot_token = bot_token
-        self.config = config_manager
+        self.config_manager = config_manager
         self.trading_service = trading_service
-        self.application = None
+        self.application: Optional[Application] = None
+        self.background_tasks: Set[asyncio.Task] = set()
+
+    def create_application(self, background_tasks: Set[asyncio.Task]) -> Application:
+        self.background_tasks = background_tasks
+        app_builder = Application.builder().token(self.bot_token)
+        app_builder.connect_timeout(30).read_timeout(30).write_timeout(30)
+        self.application = app_builder.build()
+        self.trading_service.set_telegram_app(self.application)
+        self._register_handlers()
+        return self.application
 
     async def initialize(self):
         await self.trading_service.initialize()
 
-    def create_application(self, background_tasks: Set[asyncio.Task]):
-        app_builder = Application.builder().token(self.bot_token)
-        app_builder.connect_timeout(30).read_timeout(30).write_timeout(30)
-        app_builder.post_init(self.post_init)
-        self.application = app_builder.build()
-        self.application.add_handler(CommandHandler("start", self.start_command))
-        self.application.add_handler(CallbackQueryHandler(self.button_callback_factory(background_tasks)))
-        return self.application
-    
-    async def post_init(self, application: Application):
-        await application.bot.set_my_commands([
-            ('start', 'Start the bot and see main menu'),
-        ])
+    async def cleanup(self):
+        await self.trading_service.cleanup()
+        for task in self.background_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*self.background_tasks, return_exceptions=True)
 
-    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def _register_handlers(self):
+        if not self.application:
+            return
+        self.application.add_handler(CommandHandler("start", self.start))
+        self.application.add_handler(CommandHandler("help", self.help_command))
+        self.application.add_handler(CallbackQueryHandler(self.button_callback))
+        self.application.add_error_handler(self.error_handler)
+
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self.help_command(update, context)
+
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [
-                InlineKeyboardButton("🚀 Full Analysis", callback_data="full_analysis"),
-                InlineKeyboardButton("⚡ Quick Scan (1m)", callback_data="quick_scan"),
+                InlineKeyboardButton("⚡️ Quick Scan (1h)", callback_data="scan_1h"),
+                InlineKeyboardButton("🚀 Full Scan", callback_data="full_scan"),
+            ],
+            [
+                InlineKeyboardButton("⚙️ Configuration", callback_data="config_menu"),
+                InlineKeyboardButton("📊 View Symbols", callback_data="config_view_symbols"),
             ],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("Welcome to the Trading Bot! Choose an option:", reply_markup=reply_markup)
+        await update.message.reply_text("Welcome to Yuj Bot! Please choose a command:", reply_markup=reply_markup)
 
-    def button_callback_factory(self, background_tasks: Set[asyncio.Task]):
-        async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            from module.tasks import run_full_analysis_task, run_quick_scan_task
-            query = update.callback_query
-            await query.answer()
+    def _create_background_task(self, coro):
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(coro)
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
 
-            try:
-                task = None
-                if query.data == "full_analysis":
-                    await query.edit_message_text("✅ Full analysis request accepted. You will receive updates as each timeframe is processed.")
-                    task = asyncio.create_task(run_full_analysis_task(query.message.chat_id, query.message.message_id))
-                elif query.data == "quick_scan":
-                    await query.edit_message_text("✅ Quick scan request accepted. This will be processed shortly.")
-                    task = asyncio.create_task(run_quick_scan_task(query.message.chat_id, query.message.message_id))
-                
-                if task:
-                    background_tasks.add(task)
-                    task.add_done_callback(background_tasks.discard)
-
-            except Exception as e:
-                logger.error(f"Error in button_callback: {e}")
-                await query.message.reply_text("An error occurred while processing your request.")
-        return button_callback
+    async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        
+        chat_id = query.message.chat_id
+        message_id = query.message.message_id
+        
+        if query.data == "scan_1h":
+            await query.edit_message_text(text="Request for quick scan on 1h received. Starting soon...")
+            self._create_background_task(
+                self.trading_service.run_find_best_signals_task("1h", chat_id, message_id)
+            )
+        elif query.data == "full_scan":
+            await query.edit_message_text(text="Full analysis request received. This might take some time...")
+            self._create_background_task(
+                self.trading_service.run_comprehensive_analysis_task(chat_id, message_id)
+            )
+        elif query.data == "config_menu":
+            keyboard = [
+                [InlineKeyboardButton("View Config", callback_data="config_view")],
+                [InlineKeyboardButton("Edit Symbols (Not Implemented)", callback_data="noop")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="main_menu")],
+            ]
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+        elif query.data == "config_view":
+            config_str = "\n".join(f"{k}: {v}" for k, v in self.config_manager.config.items())
+            escaped_config = escape_markdown_v2(f"Current Config:\n{config_str}")
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="config_menu")]]
+            await query.edit_message_text(text=escaped_config, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
+        elif query.data == "config_view_symbols":
+            symbols = self.config_manager.get("symbols", [])
+            symbols_text = "Configured Symbols:\n" + ", ".join(symbols)
+            escaped_symbols = escape_markdown_v2(symbols_text)
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="main_menu")]]
+            await query.edit_message_text(text=escaped_symbols, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
+        elif query.data == "main_menu":
+            await self.help_command(query, context)
+        elif query.data == "noop":
+            await query.answer("This feature is not implemented yet.", show_alert=True)
 
     async def run_scheduled_analysis(self):
-        logger.info("Running scheduled analysis...")
-        chat_id = Config.TELEGRAM_CHAT_ID
-        if not chat_id:
-            logger.warning("TELEGRAM_CHAT_ID not set. Cannot send scheduled analysis.")
+        chat_id_str = Config.TELEGRAM_CHAT_ID
+        if not chat_id_str:
+            logger.warning("Scheduled analysis skipped: TELEGRAM_CHAT_ID not set.")
+            return
+        
+        try:
+            chat_id = int(chat_id_str)
+        except (ValueError, TypeError):
+            logger.error(f"Invalid TELEGRAM_CHAT_ID: {chat_id_str}. Must be an integer.")
             return
 
-        try:
-            results = await self.trading_service.get_comprehensive_analysis()
-            found_signals = False
-            for timeframe, signals in results.items():
-                if signals:
-                    found_signals = True
-                    await self.application.bot.send_message(chat_id, f"--- Scheduled Signals for {timeframe} ---")
-                    for signal in signals:
-                        await self.trading_service.send_signal_to_chat(chat_id, signal)
-            
-            if not found_signals:
-                await self.application.bot.send_message(chat_id, "No strong signals found in scheduled analysis.")
-            else:
-                await self.application.bot.send_message(chat_id, "Scheduled analysis complete.")
-        except Exception as e:
-            logger.error(f"Error during scheduled analysis: {e}")
-            try:
-                await self.application.bot.send_message(chat_id, f"An error occurred during scheduled analysis: {e}")
-            except Exception as bot_e:
-                logger.error(f"Failed to send error message to Telegram: {bot_e}")
+        logger.info("Starting scheduled analysis...")
+        await self.application.bot.send_message(chat_id, "Running scheduled analysis...")
+        
+        signals = await self.trading_service.get_comprehensive_analysis()
+        if signals:
+            await self.trading_service.send_signal_to_chat(chat_id, signals[0])
+        else:
+            await self.application.bot.send_message(chat_id, "Scheduled analysis complete. No new strong signals found.")
 
-    async def cleanup(self):
-        if self.trading_service:
-            await self.trading_service.cleanup()
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
+        logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)

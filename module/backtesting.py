@@ -19,7 +19,6 @@ class BacktraderStrategy(bt.Strategy):
         self.timeframe = self.p.timeframe
         self.owner_engine = self.p.owner_engine
         self.order = None
-        # Pre-calculate signals before the backtest starts
         self.signals_df = self.owner_engine.pre_calculate_signals()
 
     def log(self, txt, dt=None):
@@ -48,10 +47,8 @@ class BacktraderStrategy(bt.Strategy):
         if self.order:
             return
 
-        # Get the current timestamp from backtrader
-        current_dt = pd.to_datetime(self.datas[0].datetime.datetime(0))
+        current_dt = pd.to_datetime(self.datas[0].datetime.datetime(0)).tz_localize('UTC')
         
-        # Find the signal corresponding to the current bar
         if self.signals_df.empty or current_dt not in self.signals_df.index:
             return
             
@@ -97,16 +94,13 @@ class BacktestingEngine:
         if self.full_data is None:
             return pd.DataFrame()
 
-        # This function runs the signal generation once over the entire dataset
-        # This is a simplified example; a real implementation would be more complex
-        # to avoid lookahead bias, but it fixes the async-in-sync issue.
-        signals = self.loop.run_until_complete(
-            self.trading_service.signal_generator.generate_signals(
+        async def generate_all_signals():
+            return await self.trading_service.signal_generator.generate_signals(
                 self.full_data, self.symbol, self.timeframe
             )
-        )
+
+        signals = self.loop.run_until_complete(generate_all_signals())
         
-        # Create a DataFrame from signals to easily look up by timestamp
         if not signals:
             return pd.DataFrame()
         
@@ -129,18 +123,18 @@ class BacktestingEngine:
         cerebro.broker.setcash(initial_capital)
         cerebro.broker.setcommission(commission=commission_rate)
 
-        # Store symbol and timeframe for pre_calculate_signals
         self.symbol = symbol
         self.timeframe = timeframe
 
         self.full_data = self.loop.run_until_complete(
-            self.trading_service.exchange_manager.fetch_ohlcv_data(symbol, timeframe, limit=5000)
+            self.trading_service.market_data_provider.fetch_ohlcv_data(symbol, timeframe, limit=5000)
         )
         if self.full_data.empty:
             logger.error(f"No data for {symbol} on {timeframe}")
             return {}
         
-        self.full_data = self.full_data.set_index("timestamp")
+        if not isinstance(self.full_data.index, pd.DatetimeIndex):
+            self.full_data = self.full_data.set_index("timestamp")
 
         data_feed = bt.feeds.PandasData(
             dataname=self.full_data[start:end],

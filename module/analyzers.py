@@ -86,10 +86,10 @@ class PatternAnalyzer:
         if len(data) < 3:
             return []
         
-        op = data["open"].to_numpy()
-        hi = data["high"].to_numpy()
-        lo = data["low"].to_numpy()
-        cl = data["close"].to_numpy()
+        op = data["open"].to_numpy(dtype=np.float64)
+        hi = data["high"].to_numpy(dtype=np.float64)
+        lo = data["low"].to_numpy(dtype=np.float64)
+        cl = data["close"].to_numpy(dtype=np.float64)
 
         detected_patterns = []
         for pattern_func_name, pattern_desc in PatternAnalyzer.CANDLE_PATTERNS.items():
@@ -148,7 +148,7 @@ class MarketConditionAnalyzer:
 
         rsi = talib.RSI(data["close"], timeperiod=14)
         market_condition = MarketCondition.NEUTRAL
-        if not rsi.empty:
+        if not rsi.empty and not pd.isna(rsi.iloc[-1]):
             last_rsi = rsi.iloc[-1]
             if last_rsi > 70:
                 market_condition = MarketCondition.OVERBOUGHT
@@ -178,6 +178,8 @@ class MarketConditionAnalyzer:
             return TrendDirection.SIDEWAYS
         sma_20 = data["close"].rolling(20).mean().iloc[-1]
         sma_50 = data["close"].rolling(50).mean().iloc[-1]
+        if pd.isna(sma_20) or pd.isna(sma_50):
+            return TrendDirection.SIDEWAYS
         if sma_20 > sma_50 * 1.01:
             return TrendDirection.BULLISH
         if sma_50 > sma_20 * 1.01:
@@ -188,7 +190,7 @@ class MarketConditionAnalyzer:
         if len(data) < 28:
             return TrendStrength.WEAK
         adx = talib.ADX(data["high"], data["low"], data["close"], timeperiod=14)
-        adx_val = adx.iloc[-1] if not np.isnan(adx.iloc[-1]) else 0
+        adx_val = adx.iloc[-1] if not pd.isna(adx.iloc[-1]) else 0
         if adx_val > 25:
             return TrendStrength.STRONG
         if adx_val > 20:
@@ -199,7 +201,7 @@ class MarketConditionAnalyzer:
         if len(data) < 14:
             return 0.0
         atr = talib.ATR(data["high"], data["low"], data["close"], timeperiod=14)
-        atr_val = atr.iloc[-1] if not np.isnan(atr.iloc[-1]) else 0
+        atr_val = atr.iloc[-1] if not pd.isna(atr.iloc[-1]) else 0
         price = data["close"].iloc[-1]
         return (atr_val / price) * 100 if price > 0 else 0.0
 
@@ -207,19 +209,23 @@ class MarketConditionAnalyzer:
         if len(data) < 10:
             return 0.0
         mom = talib.MOM(data["close"], timeperiod=10)
-        return mom.iloc[-1] if not np.isnan(mom.iloc[-1]) else 0.0
+        return mom.iloc[-1] if not pd.isna(mom.iloc[-1]) else 0.0
 
     def _calculate_hurst_exponent(self, series: pd.Series, max_lag=100) -> Optional[float]:
         if len(series) < max_lag:
             return None
         series_np = series.to_numpy()
         lags = range(2, max_lag)
-        tau = [
-            np.sqrt(np.std(series_np[lag:] - series_np[:-lag]))
-            for lag in lags
-        ]
-        poly = np.polyfit(np.log(lags), np.log(tau), 1)
-        return poly[0]
+        try:
+            tau = [
+                np.sqrt(np.std(np.subtract(series_np[lag:], series_np[:-lag])))
+                for lag in lags
+            ]
+            poly = np.polyfit(np.log(lags), np.log(tau), 1)
+            return poly[0]
+        except (ValueError, np.linalg.LinAlgError):
+            return None
+
 
     def _calculate_support_resistance(self, data: pd.DataFrame, window: int = 20) -> Tuple[float, float]:
         if len(data) < window:
@@ -230,12 +236,13 @@ class MarketConditionAnalyzer:
         return support, resistance
 
     def _calculate_trend_acceleration(self, data: pd.DataFrame, period: int = 10) -> float:
-        if len(data) < period:
+        if len(data) < period + 1:
             return 0.0
         mom = talib.MOM(data['close'], timeperiod=period)
         if len(mom.dropna()) < 2:
             return 0.0
-        return mom.iloc[-1] - mom.iloc[-2]
+        accel = mom.iloc[-1] - mom.iloc[-2]
+        return accel if not pd.isna(accel) else 0.0
 
 
 class VolumeAnalyzer:
@@ -243,6 +250,8 @@ class VolumeAnalyzer:
         if len(data) < 20:
             return {}
         volume_ma_20 = data["volume"].rolling(20).mean().iloc[-1]
+        if pd.isna(volume_ma_20):
+            return {}
         current_volume = data["volume"].iloc[-1]
         ratio = current_volume / volume_ma_20 if volume_ma_20 > 0 else 1
         return {"volume_ratio": ratio}

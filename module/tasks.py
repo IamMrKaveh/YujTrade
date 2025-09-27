@@ -6,7 +6,8 @@ from telegram.ext import Application
 
 from module.config import Config, ConfigManager
 from module.data_sources import (BinanceFetcher, CoinDeskFetcher,
-                                 MarketIndicesFetcher, NewsFetcher)
+                                 GlassnodeFetcher, MarketIndicesFetcher,
+                                 NewsFetcher)
 from module.logger_config import logger
 from module.lstm import LSTMModelManager
 from module.market import MarketDataProvider
@@ -44,6 +45,7 @@ class TaskServiceContainer:
 
         binance_fetcher = BinanceFetcher(redis_client=self.redis_client)
         coindesk_fetcher = CoinDeskFetcher(api_key=Config.COINDESK_API_KEY, redis_client=self.redis_client) if Config.COINDESK_API_KEY else None
+        glassnode_fetcher = GlassnodeFetcher(api_key=Config.GLASSNODE_API_KEY, redis_client=self.redis_client) if Config.GLASSNODE_API_KEY else None
         
         self.market_data_provider = MarketDataProvider(
             redis_client=self.redis_client,
@@ -55,6 +57,7 @@ class TaskServiceContainer:
         self.market_indices_fetcher = MarketIndicesFetcher(
             alpha_vantage_key=Config.ALPHA_VANTAGE_KEY,
             coingecko_key=Config.COINGECKO_KEY,
+            glassnode_fetcher=glassnode_fetcher,
             redis_client=self.redis_client
         )
         

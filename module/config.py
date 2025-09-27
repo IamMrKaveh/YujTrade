@@ -39,6 +39,7 @@ class Config:
     ALPHA_VANTAGE_KEY = get_secret("ALPHA_VANTAGE_KEY")
     COINGECKO_KEY = get_secret("COINGECKO_KEY")
     COINDESK_API_KEY = get_secret("COINDESK_API_KEY")
+    GLASSNODE_API_KEY = get_secret("GLASSNODE_API_KEY")
     SENTRY_DSN = get_secret("SENTRY_DSN")
 
     TF_CPP_MIN_LOG_LEVEL = decouple_config("TF_CPP_MIN_LOG_LEVEL", default="3")
@@ -55,12 +56,11 @@ class ConfigManager:
     DEFAULT_CONFIG = {
         "symbols": SYMBOLS,
         "timeframes": TIME_FRAMES,
-        "min_confidence_score": 90,
-        "max_signals_per_timeframe": 2,
-        "risk_reward_threshold": 3.0,
+        "min_confidence_score": 0,
+        "max_signals_per_timeframe": 1,
         "enable_scheduled_analysis": True,
         "schedule_hour": "*/1",
-        "app_version": "2.0.0",
+        "app_version": "3.0.0",
     }
 
     def __init__(self, config_path: str = "config.json"):

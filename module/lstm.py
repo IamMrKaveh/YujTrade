@@ -290,8 +290,9 @@ class LSTMModelManager:
             parts = filename.split('_')
             if len(parts) > 1:
                 symbol_tf = parts[1]
-                symbol, timeframe = symbol_tf.split('-')
-                symbol = symbol.upper()
+                symbol_parts = symbol_tf.split('-')
+                symbol = symbol_parts[0].upper()
+                timeframe = '-'.join(symbol_parts[1:])
                 
                 key = f"{symbol}-{timeframe}"
                 with self._lock:
@@ -328,31 +329,28 @@ class LSTMModelManager:
         key = f"{symbol}-{timeframe}"
         with self._lock:
             if key in self._cache:
-                model = self._cache[key]
-                if model.is_ready():
-                    return model
-                else:
-                    self.logger.warning(f"Model for {key} is in cache but not ready.")
-                    return None
+                return self._cache[key]
         
-        self.logger.info(f"Model for {key} not in cache. It will be loaded on demand if a file exists.")
-        try:
-            model = LSTMModel(symbol=symbol, timeframe=timeframe, model_path=self.model_path,
-                            input_shape=self.input_shape, units=self.units, lr=self.lr)
-            if model.is_ready():
-                with self._lock:
-                    self._cache[key] = model
-                return model
+        model = LSTMModel(symbol=symbol, timeframe=timeframe, model_path=self.model_path,
+                        input_shape=self.input_shape, units=self.units, lr=self.lr)
+        
+        with self._lock:
+            self._cache[key] = model
+        return model
+
+    async def train_model_if_needed(self, symbol: str, timeframe: str, data: pd.DataFrame):
+        model = self.get_model(symbol, timeframe)
+        if model and not model.is_ready():
+            self.logger.info(f"Model for {symbol}-{timeframe} is not trained. Training now...")
+            success = await self._run_in_executor(model.fit, data)
+            if success:
+                self.logger.info(f"Successfully trained model for {symbol}-{timeframe}.")
             else:
-                self.logger.warning(f"On-demand model for {key} is not ready.")
-                return None
-        except Exception as e:
-            self.logger.error(f"Failed to get model for {key}: {e}")
-            return None
+                self.logger.error(f"Failed to train model for {symbol}-{timeframe}.")
 
     async def predict_async(self, symbol: str, timeframe: str, data: pd.DataFrame):
         model = self.get_model(symbol, timeframe)
-        if model:
+        if model and model.is_ready():
             return await self._run_in_executor(model.predict, data)
         return None
 

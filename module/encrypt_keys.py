@@ -26,6 +26,7 @@ def run():
         "TELEGRAM_BOT_TOKEN",
         "ALPHA_VANTAGE_KEY",
         "COINDESK_API_KEY",
+        "GLASSNODE_API_KEY",
         "SENTRY_DSN",
     ]
 

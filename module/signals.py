@@ -221,63 +221,67 @@ class SignalGenerator:
             trailing_stop=atr * 0.7
         )
 
-    def _calculate_confidence_score(self, signal_type: SignalType, indicators: Dict, market_analysis: MarketAnalysis, patterns: List, sentiment: Dict) -> Tuple[float, List[str]]:
-        score, total_weight = 0, 0
+    def _calculate_confidence_score(self, signal_type: SignalType, indicators: Dict[str, IndicatorResult], market_analysis: MarketAnalysis, patterns: List, sentiment: Dict) -> Tuple[float, List[str]]:
+        score, total_weight = 0.0, 0.0
         reasons = []
 
-        confirmations = {
-            'rsi': (lambda res: res.interpretation == "oversold"), 'stoch': (lambda res: res.interpretation == "oversold"),
-            'mfi': (lambda res: res.interpretation == "oversold"), 'cci': (lambda res: res.interpretation == "oversold"),
-            'williams_r': (lambda res: res.interpretation == "oversold"), 'macd': (lambda res: "bullish" in res.interpretation),
-            'bb': (lambda res: "lower" in res.interpretation), 'supertrend': (lambda res: "bullish" in res.interpretation),
-            'psar': (lambda res: "bullish" in res.interpretation), 'ichimoku': (lambda res: "above" in res.interpretation),
-            'cmf': (lambda res: "buy" in res.interpretation), 'obv': (lambda res: "bullish" in res.interpretation),
-        } if signal_type == SignalType.BUY else {
-            'rsi': (lambda res: res.interpretation == "overbought"), 'stoch': (lambda res: res.interpretation == "overbought"),
-            'mfi': (lambda res: res.interpretation == "overbought"), 'cci': (lambda res: res.interpretation == "overbought"),
-            'williams_r': (lambda res: res.interpretation == "overbought"), 'macd': (lambda res: "bearish" in res.interpretation),
-            'bb': (lambda res: "upper" in res.interpretation), 'supertrend': (lambda res: "bearish" in res.interpretation),
-            'psar': (lambda res: "bearish" in res.interpretation), 'ichimoku': (lambda res: "below" in res.interpretation),
-            'cmf': (lambda res: "sell" in res.interpretation), 'obv': (lambda res: "bearish" in res.interpretation),
-        }
-        
-        contradictions = {
-            'rsi': (lambda res: res.interpretation == "overbought"), 'stoch': (lambda res: res.interpretation == "overbought"),
-            'mfi': (lambda res: res.interpretation == "overbought"),
-        } if signal_type == SignalType.BUY else {
-            'rsi': (lambda res: res.interpretation == "oversold"), 'stoch': (lambda res: res.interpretation == "oversold"),
-            'mfi': (lambda res: res.interpretation == "oversold"),
-        }
+        is_buy = signal_type == SignalType.BUY
 
-        for name, check in confirmations.items():
-            res = indicators.get(name)
-            weight = self.INDICATOR_WEIGHTS.get(name, 0)
-            if res and weight > 0:
-                total_weight += weight
-                if check(res):
-                    points = (res.signal_strength / 100) * weight
-                    score += points
-                    reasons.append(f"Confirm: {res.name} ({res.interpretation}, strength: {res.signal_strength:.0f}%) -> +{points:.1f} pts")
+        def add_reason(source: str, interpretation: str, points: float, strength: float = -1):
+            strength_str = f", strength: {strength:.0f}%" if strength >= 0 else ""
+            reasons.append(f"{source} ({interpretation}{strength_str}) -> {points:+.1f} pts")
 
-        for name, check in contradictions.items():
-            res = indicators.get(name)
-            weight = self.INDICATOR_WEIGHTS.get(name, 0)
-            if res and weight > 0:
-                if check(res):
-                    penalty = (res.signal_strength / 100) * weight * 1.5
-                    score -= penalty
-                    reasons.append(f"Penalty: {res.name} ({res.interpretation}) -> -{penalty:.1f} pts")
+        for name, res in indicators.items():
+            weight = self.INDICATOR_WEIGHTS.get(name.split('_')[0].lower(), 0)
+            if weight == 0: continue
 
-        trend_weight = self.INDICATOR_WEIGHTS['trend']
+            total_weight += weight
+            points = 0
+            
+            is_bullish = any(s in res.interpretation for s in ['bullish', 'oversold', 'above', 'buy', 'up', 'accumulation', 'bull_power', 'upward'])
+            is_bearish = any(s in res.interpretation for s in ['bearish', 'overbought', 'below', 'sell', 'down', 'distribution', 'bear_power', 'downward'])
+
+            if (is_buy and is_bullish) or (not is_buy and is_bearish):
+                points = (res.signal_strength / 100) * weight
+            elif (is_buy and is_bearish) or (not is_buy and is_bullish):
+                points = - (res.signal_strength / 100) * weight * 1.2
+            
+            if points != 0:
+                score += points
+                add_reason(res.name, res.interpretation, points, res.signal_strength)
+
+        trend_weight = self.INDICATOR_WEIGHTS.get('trend', 15)
         total_weight += trend_weight
-        if (signal_type == SignalType.BUY and market_analysis.trend == TrendDirection.BULLISH) or \
-           (signal_type == SignalType.SELL and market_analysis.trend == TrendDirection.BEARISH):
-            adx_strength = indicators.get('adx', IndicatorResult('',0,0,'')).signal_strength / 100
+        trend_aligned = (is_buy and market_analysis.trend == TrendDirection.BULLISH) or \
+                        (not is_buy and market_analysis.trend == TrendDirection.BEARISH)
+        
+        if trend_aligned:
+            adx_res = indicators.get('adx')
+            adx_strength = adx_res.signal_strength / 100 if adx_res else 0
             points = trend_weight * (0.5 + 0.5 * adx_strength)
             score += points
-            reasons.append(f"Confirm: Trend Alignment ({market_analysis.trend.value}) -> +{points:.1f} pts")
+            add_reason("Trend Align", f"{market_analysis.trend.value} ({market_analysis.trend_strength.value})", points)
+        elif market_analysis.trend != TrendDirection.SIDEWAYS:
+            points = -trend_weight * 0.75
+            score += points
+            add_reason("Trend Misalign", f"{market_analysis.trend.value}", points)
+
+        pattern_weight = self.INDICATOR_WEIGHTS.get('pattern', 10)
+        for p in patterns:
+            total_weight += pattern_weight
+            points = 0
+            if is_buy and 'bullish' in p:
+                points = pattern_weight
+            elif not is_buy and 'bearish' in p:
+                points = pattern_weight
+            
+            if points > 0:
+                score += points
+                add_reason("Pattern", p, points)
+
+        if total_weight == 0: return 0.0, reasons
         
-        final_score = (score / total_weight) * 100 if total_weight > 0 else 0
+        final_score = (score / total_weight) * 100
         return min(max(final_score, 0), 100), reasons
 
     def _create_trading_signal(self, symbol, timeframe, signal_type, score, reasons, dynamic_levels, data, market_analysis):
@@ -327,7 +331,7 @@ class SignalGenerator:
         for signal_type in [SignalType.BUY, SignalType.SELL]:
             score, reasons = self._calculate_confidence_score(signal_type, indicator_results, market_analysis, patterns, sentiment_data)
             
-            if score >= self.config.get('min_confidence_score', 75):
+            if score >= self.config.get('min_confidence_score', 0):
                 dynamic_levels = self.calculate_dynamic_levels(data, market_analysis, signal_type)
                 trading_signal = self._create_trading_signal(symbol, timeframe, signal_type, score, reasons, dynamic_levels, data, market_analysis)
                 
@@ -341,6 +345,7 @@ class SignalGenerator:
                         trading_signal.reasons.append("Warning: Multi-Timeframe Misalignment")
 
                 if self.lstm_model_manager:
+                    await self.lstm_model_manager.train_model_if_needed(symbol, timeframe, data)
                     prediction = await self.lstm_model_manager.predict_async(symbol, timeframe, data)
                     if prediction is not None and len(prediction) > 0:
                         pred_price, last_close = prediction[0], data['close'].iloc[-1]

@@ -36,36 +36,35 @@ class MarketDataProvider:
                 cached = await self.redis.get(cache_key)
                 if cached:
                     df = pd.read_json(cached, orient="split")
-                    if not isinstance(df.index, pd.DatetimeIndex):
-                         df.index = pd.to_datetime(df.index, unit='ms', utc=True)
-                    else:
-                         df.index = df.index.tz_localize('UTC') if df.index.tz is None else df.index.tz_convert('UTC')
+                    if 'timestamp' in df.columns:
+                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+                        df.set_index('timestamp', inplace=True)
                     return df
             except Exception as e:
                 logger.warning(f"Redis GET failed for {cache_key}: {e}")
 
-        # Always prefer Binance for OHLCV as it's more reliable for all timeframes
+        df = pd.DataFrame()
+        
         if self.binance_fetcher:
             df = await self.binance_fetcher.get_historical_ohlc(symbol, timeframe, limit)
-            if df is not None and not df.empty:
-                if self.redis:
-                    try:
-                        await self.redis.set(cache_key, df.to_json(orient="split"), ex=60)
-                    except Exception as e:
-                        logger.warning(f"Redis SET failed for {cache_key}: {e}")
-                return df
 
-        # Fallback to CoinDesk only if Binance fails, and only for daily timeframes
-        if self.coindesk_fetcher and 'd' in timeframe:
-            logger.warning(f"Binance fetch failed for {symbol}. Falling back to CoinDesk for daily data.")
-            df = await self.coindesk_fetcher.get_historical_ohlc(symbol, timeframe, limit)
-            if df is not None and not df.empty:
-                if self.redis:
-                    try:
-                        await self.redis.set(cache_key, df.to_json(orient="split"), ex=300)
-                    except Exception as e:
-                        logger.warning(f"Redis SET failed for {cache_key}: {e}")
-                return df
+        if (df is None or len(df) < 100) and self.coindesk_fetcher:
+            timeframe_lower = timeframe.lower()
+            if 'd' in timeframe_lower or 'w' in timeframe_lower or 'm' in timeframe_lower:
+                logger.warning(f"Binance fetch returned insufficient data for {symbol}/{timeframe}. Falling back to CoinDesk.")
+                df_coindesk = await self.coindesk_fetcher.get_historical_ohlc(symbol, timeframe, limit)
+                if df_coindesk is not None and not df_coindesk.empty:
+                    df = df_coindesk
+
+        if df is not None and not df.empty:
+            if self.redis:
+                try:
+                    df_to_cache = df.reset_index()
+                    df_to_cache['timestamp'] = df_to_cache['timestamp'].astype(int) // 10**6
+                    await self.redis.set(cache_key, df_to_cache.to_json(orient="split"), ex=120)
+                except Exception as e:
+                    logger.warning(f"Redis SET failed for {cache_key}: {e}")
+            return df
 
         logger.error(f"Failed to fetch OHLCV from all available sources for {symbol} on {timeframe}.")
         return pd.DataFrame()
