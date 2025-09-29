@@ -15,9 +15,8 @@ from module.constants import (MULTI_TF_CONFIRMATION_MAP,
 from module.core import (DerivativesAnalysis, DynamicLevels, FundamentalAnalysis,
                          IndicatorResult, MarketAnalysis, OnChainAnalysis,
                          SignalType, TradingSignal, TrendDirection,
-                         TrendStrength)
-from module.data_sources import (AmberdataFetcher, CoinMetricsFetcher,
-                                 MarketIndicesFetcher, NewsFetcher)
+                         TrendStrength, BinanceFuturesData, MacroEconomicData, TrendingData, OrderBook)
+from module.data_sources import (MarketIndicesFetcher, NewsFetcher)
 from module.indicators import (ADXIndicator, ATRIndicator,
                                BollingerBandsIndicator, CCIIndicator,
                                ChaikinMoneyFlowIndicator, IchimokuIndicator,
@@ -146,14 +145,15 @@ class MultiTimeframeAnalyzer:
 class SignalGenerator:
 
     INDICATOR_WEIGHTS = {
-        'rsi': 15, 'macd': 12, 'stoch': 10, 'mfi': 12, 'cci': 8, 'williams_r': 8,
-        'bb': 8, 'supertrend': 10, 'psar': 8, 'ichimoku': 10,
-        'volume': 7, 'cmf': 7, 'obv': 5,
-        'trend': 15, 'strength': 10, 'divergence': 15, 'pattern': 10,
+        'rsi': 12, 'macd': 10, 'stoch': 8, 'mfi': 10, 'cci': 7, 'williams_r': 7,
+        'bb': 7, 'supertrend': 9, 'psar': 7, 'ichimoku': 9,
+        'volume': 6, 'cmf': 6, 'obv': 4,
+        'trend': 15, 'strength': 10, 'divergence': 12, 'pattern': 9,
         'fear_greed': 8, 'btc_dominance': 5, 'dxy': 5,
         'lstm': 15, 'multi_tf': 10,
-        # New On-Chain and Market weights
-        'mvrv': 12, 'sopr': 10, 'active_addresses': 8, 'funding_rate': 10,
+        'funding_rate': 9, 'taker_ratio': 10, 'top_trader_sentiment': 12,
+        'liquidation': 10, 'order_book': 8,
+        'fundamental': 10, 'trending': 7, 'macro': 10
     }
     
     def __init__(self, market_data_provider: MarketDataProvider, 
@@ -161,9 +161,7 @@ class SignalGenerator:
                  market_indices_fetcher: Optional[MarketIndicesFetcher] = None,
                  lstm_model_manager: Optional[LSTMModelManager] = None,
                  multi_tf_analyzer: Optional[MultiTimeframeAnalyzer] = None,
-                 config: Optional[Dict] = None,
-                 coinmetrics_fetcher: Optional[CoinMetricsFetcher] = None,
-                 amberdata_fetcher: Optional[AmberdataFetcher] = None):
+                 config: Optional[Dict] = None):
         self.market_data_provider = market_data_provider
         self.indicators = {
             'sma_20': MovingAverageIndicator(20, "sma"), 'sma_50': MovingAverageIndicator(50, "sma"),
@@ -185,8 +183,6 @@ class SignalGenerator:
         self.lstm_model_manager = lstm_model_manager
         self.multi_tf_analyzer = multi_tf_analyzer
         self.config = config or {'min_confidence_score': 75}
-        self.coinmetrics_fetcher = coinmetrics_fetcher
-        self.amberdata_fetcher = amberdata_fetcher
 
     def _safe_dataframe(self, df):
         if df is None or df.empty: return pd.DataFrame()
@@ -229,7 +225,7 @@ class SignalGenerator:
             trailing_stop=atr * 0.7
         )
 
-    def _calculate_confidence_score(self, signal_type: SignalType, indicators: Dict[str, IndicatorResult], 
+    def _calculate_confidence_score(self, symbol: str, signal_type: SignalType, indicators: Dict[str, IndicatorResult], 
                                   market_analysis: MarketAnalysis, patterns: List, context_data: Dict) -> Tuple[float, List[str]]:
         score, total_weight = 0.0, 0.0
         reasons = []
@@ -239,7 +235,6 @@ class SignalGenerator:
             strength_str = f", strength: {strength:.0f}%" if strength >= 0 else ""
             reasons.append(f"{source} ({interpretation}{strength_str}) -> {points:+.1f} pts")
 
-        # Technical Indicators
         for name, res in indicators.items():
             weight = self.INDICATOR_WEIGHTS.get(name.split('_')[0].lower(), 0)
             if weight == 0: continue
@@ -255,7 +250,6 @@ class SignalGenerator:
                 score += points
                 add_reason(res.name, res.interpretation, points, res.signal_strength)
 
-        # Market Trend
         trend_weight = self.INDICATOR_WEIGHTS.get('trend', 15)
         total_weight += trend_weight
         if (is_buy and market_analysis.trend == TrendDirection.BULLISH) or (not is_buy and market_analysis.trend == TrendDirection.BEARISH):
@@ -268,7 +262,6 @@ class SignalGenerator:
             score += points
             add_reason("Trend Misalign", f"{market_analysis.trend.value}", points)
 
-        # Candlestick Patterns
         pattern_weight = self.INDICATOR_WEIGHTS.get('pattern', 10)
         for p in patterns:
             total_weight += pattern_weight
@@ -276,50 +269,58 @@ class SignalGenerator:
                 score += pattern_weight
                 add_reason("Pattern", p, pattern_weight)
 
-        # On-Chain Data
-        on_chain = context_data.get('on_chain')
-        if on_chain:
-            # MVRV
-            if on_chain.mvrv:
-                weight = self.INDICATOR_WEIGHTS.get('mvrv', 12)
-                total_weight += weight
-                if on_chain.mvrv > 1: # Market value > Realized value
-                    points = weight * min((on_chain.mvrv - 1) / 1.5, 1.0) # Normalize score
-                    if is_buy: score += points; add_reason("MVRV", f"Bullish (>1)", points)
-                    else: score -= points * 0.5; add_reason("MVRV", f"Bullish (>1)", -points * 0.5)
-                else: # MVRV < 1, potential bottom
-                    points = weight * min((1 - on_chain.mvrv), 1.0)
-                    if is_buy: score += points * 0.7; add_reason("MVRV", f"Potential Bottom (<1)", points * 0.7)
-                    else: score -= points; add_reason("MVRV", f"Bearish (<1)", -points)
-            # SOPR
-            if on_chain.sopr:
-                weight = self.INDICATOR_WEIGHTS.get('sopr', 10)
-                total_weight += weight
-                if on_chain.sopr > 1: # Coins sold in profit
-                    points = weight * min((on_chain.sopr - 1) * 10, 1.0)
-                    if is_buy: score += points; add_reason("SOPR", f"Profit-taking (>1)", points)
-                    else: score -= points * 0.5; add_reason("SOPR", f"Profit-taking (>1)", -points * 0.5)
-                else: # Coins sold at a loss
-                    points = weight * min((1 - on_chain.sopr) * 10, 1.0)
-                    if is_buy: score += points * 0.5; add_reason("SOPR", f"Capitulation (<1)", points * 0.5)
-                    else: score -= points; add_reason("SOPR", f"Capitulation (<1)", -points)
-
-        # Derivatives Data
         derivatives = context_data.get('derivatives')
-        if derivatives and derivatives.funding_rate:
-            weight = self.INDICATOR_WEIGHTS.get('funding_rate', 10)
+        if derivatives:
+            if derivatives.funding_rate:
+                weight = self.INDICATOR_WEIGHTS.get('funding_rate', 9)
+                total_weight += weight; fr = derivatives.funding_rate
+                if fr > 0.0005: points = weight * min(fr / 0.001, 1.0); score += -points if is_buy else points; add_reason("Funding", "High Positive", score-sum(p[2] for p in reasons))
+                elif fr < -0.0005: points = weight * min(abs(fr) / 0.001, 1.0); score += points if is_buy else -points; add_reason("Funding", "High Negative", score-sum(p[2] for p in reasons))
+            
+            if derivatives.taker_long_short_ratio:
+                weight = self.INDICATOR_WEIGHTS.get('taker_ratio', 10)
+                total_weight += weight; ratio = derivatives.taker_long_short_ratio
+                if ratio > 1.1: points = weight * min((ratio - 1.0) * 2, 1.0); score += points if is_buy else -points*0.5; add_reason("Taker L/S", "Longs Dominate", score-sum(p[2] for p in reasons))
+                elif ratio < 0.9: points = weight * min((1.0 - ratio) * 2, 1.0); score += -points*0.5 if is_buy else points; add_reason("Taker L/S", "Shorts Dominate", score-sum(p[2] for p in reasons))
+
+            if derivatives.binance_futures_data:
+                bfd = derivatives.binance_futures_data
+                weight = self.INDICATOR_WEIGHTS.get('top_trader_sentiment', 12)
+                total_weight += weight
+                avg_ratio = (bfd.top_trader_long_short_ratio_accounts + bfd.top_trader_long_short_ratio_positions) / 2 if bfd.top_trader_long_short_ratio_accounts and bfd.top_trader_long_short_ratio_positions else bfd.top_trader_long_short_ratio_accounts or bfd.top_trader_long_short_ratio_positions
+                if avg_ratio:
+                    if avg_ratio > 1.2: points = weight * min((avg_ratio - 1.0) * 1.5, 1.0); score += points if is_buy else -points; add_reason("TopTraders", "Bullish", score-sum(p[2] for p in reasons))
+                    elif avg_ratio < 0.8: points = weight * min((1.0 - avg_ratio) * 1.5, 1.0); score += -points if is_buy else points; add_reason("TopTraders", "Bearish", score-sum(p[2] for p in reasons))
+                
+                if bfd.liquidation_orders:
+                    weight = self.INDICATOR_WEIGHTS.get('liquidation', 10)
+                    total_weight += weight
+                    sells = sum(float(o['origQty']) for o in bfd.liquidation_orders if o['side'] == 'SELL')
+                    buys = sum(float(o['origQty']) for o in bfd.liquidation_orders if o['side'] == 'BUY')
+                    if sells > buys * 2: points = weight * min(sells/(buys+1), 1.0); score += points if is_buy else -points; add_reason("Liqs", "Longs Liquidated", score-sum(p[2] for p in reasons))
+                    if buys > sells * 2: points = weight * min(buys/(sells+1), 1.0); score += -points if is_buy else points; add_reason("Liqs", "Shorts Liquidated", score-sum(p[2] for p in reasons))
+
+        order_book = context_data.get('order_book')
+        if order_book and order_book.total_bid_volume and order_book.total_ask_volume > 0:
+            weight = self.INDICATOR_WEIGHTS.get('order_book', 8)
             total_weight += weight
-            fr = derivatives.funding_rate
-            # High positive funding is bearish (longs over-leveraged)
-            if fr > 0.0005: 
-                points = weight * min(fr / 0.001, 1.0)
-                if is_buy: score -= points; add_reason("Funding Rate", "High Positive", -points)
-                else: score += points; add_reason("Funding Rate", "High Positive", points)
-            # High negative funding is bullish (shorts over-leveraged)
-            elif fr < -0.0005:
-                points = weight * min(abs(fr) / 0.001, 1.0)
-                if is_buy: score += points; add_reason("Funding Rate", "High Negative", points)
-                else: score -= points; add_reason("Funding Rate", "High Negative", -points)
+            imbalance = order_book.total_bid_volume / order_book.total_ask_volume
+            if imbalance > 1.5: points = weight * min((imbalance - 1.0), 1.0); score += points if is_buy else -points; add_reason("OrderBook", "Bid Wall", score-sum(p[2] for p in reasons))
+            elif imbalance < 0.66: points = weight * min((1.0/imbalance - 1.0), 1.0); score += -points if is_buy else points; add_reason("OrderBook", "Ask Wall", score-sum(p[2] for p in reasons))
+
+        fundamental = market_analysis.fundamental_analysis
+        if fundamental and fundamental.developer_score > 0:
+            weight = self.INDICATOR_WEIGHTS.get('fundamental', 10)
+            total_weight += weight
+            points = weight * min(fundamental.developer_score / 10000, 1.0)
+            if is_buy: score += points; add_reason("Dev Score", "Active", score-sum(p[2] for p in reasons))
+
+        trending = context_data.get('trending_data')
+        if trending and trending.coingecko_trending and symbol.split('/')[0] in trending.coingecko_trending[:5]:
+            weight = self.INDICATOR_WEIGHTS.get('trending', 7)
+            total_weight += weight
+            score += weight if is_buy else -weight*0.5
+            add_reason("Trending", "Top 5 on CG", weight if is_buy else -weight*0.5)
 
         if total_weight == 0: return 0.0, reasons
         final_score = (score / total_weight) * 100
@@ -333,17 +334,18 @@ class SignalGenerator:
         rr = self._calculate_risk_reward(entry, exit_price, stop_loss)
         profit = ((exit_price - entry) / entry) * 100 if signal_type == SignalType.BUY else ((entry - exit_price) / entry) * 100
 
-        market_context_dict = self._create_market_context(market_analysis)
-
         return TradingSignal(
             symbol=symbol, signal_type=signal_type, entry_price=entry, exit_price=exit_price, stop_loss=stop_loss,
             timestamp=datetime.now(), timeframe=timeframe, confidence_score=score, reasons=reasons,
             risk_reward_ratio=rr, predicted_profit=profit,
             volume_analysis=self.market_analyzer.volume_analyzer.analyze_volume_pattern(data),
-            market_context=market_context_dict, dynamic_levels=vars(dynamic_levels),
+            market_context=vars(market_analysis), dynamic_levels=vars(dynamic_levels),
             fundamental_analysis=market_analysis.fundamental_analysis,
             on_chain_analysis=context_data.get('on_chain'),
-            derivatives_analysis=context_data.get('derivatives')
+            derivatives_analysis=context_data.get('derivatives'),
+            order_book=context_data.get('order_book'),
+            macro_data=context_data.get('macro_data'),
+            trending_data=context_data.get('trending_data')
         )
 
     def _calculate_risk_reward(self, entry: float, exit_price: float, stop_loss: float) -> float:
@@ -351,13 +353,6 @@ class SignalGenerator:
         potential_profit = abs(exit_price - entry)
         potential_loss = abs(entry - stop_loss)
         return potential_profit / potential_loss if potential_loss > 0 else float('inf')
-
-    def _create_market_context(self, market_analysis: "MarketAnalysis") -> Dict[str, Any]:
-        return {
-            'trend': market_analysis.trend.value, 'trend_strength': market_analysis.trend_strength.value,
-            'volatility': market_analysis.volatility, 'momentum_score': market_analysis.momentum_score,
-            'hurst_exponent': market_analysis.hurst_exponent,
-        }
 
     async def generate_signals(self, data: pd.DataFrame, symbol: str, timeframe: str) -> List[TradingSignal]:
         data = self._safe_dataframe(data)
@@ -367,12 +362,13 @@ class SignalGenerator:
 
         indicator_results = {name: indicator.calculate(data) for name, indicator in self.indicators.items()}
         context_data = await self._gather_context_data(symbol)
-        market_analysis = self.market_analyzer.analyze_market_condition(data)
+        
+        market_analysis = self.market_analyzer.analyze_market_condition(data, fundamental_analysis=context_data.get('fundamental'))
         patterns = PatternAnalyzer.detect_patterns(data)
         
         signals = []
         for signal_type in [SignalType.BUY, SignalType.SELL]:
-            score, reasons = self._calculate_confidence_score(signal_type, indicator_results, market_analysis, patterns, context_data)
+            score, reasons = self._calculate_confidence_score(symbol, signal_type, indicator_results, market_analysis, patterns, context_data)
             
             if score >= self.config.get('min_confidence_score', 0):
                 dynamic_levels = self.calculate_dynamic_levels(data, market_analysis, signal_type)
@@ -402,50 +398,66 @@ class SignalGenerator:
 
     async def _gather_context_data(self, symbol: str) -> Dict[str, Any]:
         asset_name = symbol.split('/')[0].lower()
-        context_data = {'on_chain': OnChainAnalysis(), 'derivatives': DerivativesAnalysis()}
+        context_data = {}
         
         tasks = {}
-        # CoinMetrics
-        if self.coinmetrics_fetcher:
-            cm_metrics = ['CapRealUSD', 'MVRV', 'SOPR_Adj', 'AdrActCnt']
-            tasks['coinmetrics'] = self.coinmetrics_fetcher.get_market_indicators(asset=asset_name, indicators=cm_metrics)
         
-        # Amberdata / Binance for derivatives
-        if self.amberdata_fetcher:
-            # Assuming a common instrument format, e.g., BTC_USDT-PERP
-            instrument = f"{asset_name.upper()}_USDT-PERP"
-            tasks['amberdata_futures'] = self.amberdata_fetcher.get_futures_data(exchange="binance", instrument=instrument)
-        
-        # Fallback to Binance for Open Interest if Amberdata fails
-        if 'amberdata_futures' not in tasks and self.market_data_provider.binance_fetcher:
-             tasks['binance_oi'] = self.market_data_provider.binance_fetcher.get_open_interest(symbol)
+        if self.market_indices_fetcher:
+            coin_id = asset_name.replace('/usdt', '').lower()
+            tasks['fundamental'] = self.market_indices_fetcher.get_fundamental_data(coin_id)
+            tasks['cg_derivatives'] = self.market_indices_fetcher.get_coingecko_derivatives()
+            tasks['trending'] = self.market_indices_fetcher.get_trending_searches()
+            tasks['macro'] = self.market_indices_fetcher.get_macro_economic_data()
+
+        if self.market_data_provider.binance_fetcher:
+            bf = self.market_data_provider.binance_fetcher
+            tasks['binance_oi'] = bf.get_open_interest(symbol)
+            tasks['binance_fr'] = bf.get_funding_rate(symbol)
+            tasks['binance_ls_ratio'] = bf.get_taker_long_short_ratio(symbol)
+            tasks['binance_top_acc'] = bf.get_top_trader_long_short_ratio_accounts(symbol)
+            tasks['binance_top_pos'] = bf.get_top_trader_long_short_ratio_positions(symbol)
+            tasks['binance_liq'] = bf.get_liquidation_orders(symbol)
+            tasks['order_book'] = bf.get_order_book_depth(symbol)
+            tasks['mark_price'] = bf.get_mark_price(symbol)
 
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-        
-        # Process results
         res_map = dict(zip(tasks.keys(), results))
+        
+        # Helper to safely get result
+        def get_res(key):
+            res = res_map.get(key)
+            if isinstance(res, Exception):
+                logger.warning(f"Failed to gather context for '{key}': {res}")
+                return None
+            return res
 
-        # CoinMetrics data
-        cm_data = res_map.get('coinmetrics')
-        if cm_data and isinstance(cm_data, dict) and asset_name in cm_data:
-            asset_data = cm_data[asset_name]
-            context_data['on_chain'] = OnChainAnalysis(
-                mvrv=asset_data.get('MVRV'),
-                sopr=asset_data.get('SOPR_Adj'),
-                active_addresses=int(asset_data.get('AdrActCnt', 0)),
-                realized_cap=asset_data.get('CapRealUSD')
-            )
+        context_data['fundamental'] = get_res('fundamental')
+        context_data['order_book'] = get_res('order_book')
+        context_data['trending_data'] = TrendingData(coingecko_trending=get_res('trending') or [])
+        
+        macro_data_raw = get_res('macro') or {}
+        context_data['macro_data'] = MacroEconomicData(
+            cpi=macro_data_raw.get('CPI'),
+            fed_rate=macro_data_raw.get('FED_RATE'),
+            treasury_yield_10y=macro_data_raw.get('TREASURY_YIELD_10Y'),
+            gdp=macro_data_raw.get('GDP'),
+            unemployment=macro_data_raw.get('UNEMPLOYMENT')
+        )
 
-        # Amberdata derivatives data
-        futures_data = res_map.get('amberdata_futures')
-        if futures_data and isinstance(futures_data, dict):
-            context_data['derivatives'] = DerivativesAnalysis(
-                open_interest=float(futures_data.get('openInterest', 0)),
-                funding_rate=float(futures_data.get('fundingRate', 0))
-            )
-        # Binance OI fallback
-        elif 'binance_oi' in res_map and res_map['binance_oi']:
-             context_data['derivatives'].open_interest = res_map['binance_oi']
+        binance_futures_data = BinanceFuturesData(
+            top_trader_long_short_ratio_accounts=get_res('binance_top_acc'),
+            top_trader_long_short_ratio_positions=get_res('binance_top_pos'),
+            liquidation_orders=get_res('binance_liq') or [],
+            mark_price=get_res('mark_price')
+        )
+        
+        context_data['derivatives'] = DerivativesAnalysis(
+            open_interest=get_res('binance_oi'),
+            funding_rate=get_res('binance_fr'),
+            taker_long_short_ratio=get_res('binance_ls_ratio'),
+            coingecko_derivatives=get_res('cg_derivatives') or [],
+            binance_futures_data=binance_futures_data
+        )
 
         return context_data
 
@@ -463,13 +475,13 @@ class SignalRanking:
             elif rr >= 1.5: rr_bonus = 5
             
             trend_bonus = 0
-            mc = signal.market_context
-            if mc:
-                is_aligned = (signal.signal_type == SignalType.BUY and mc.get('trend') == TrendDirection.BULLISH.value) or \
-                             (signal.signal_type == SignalType.SELL and mc.get('trend') == TrendDirection.BEARISH.value)
+            if signal.market_context:
+                mc = signal.market_context
+                is_aligned = (signal.signal_type == SignalType.BUY and mc.get('trend') == TrendDirection.BULLISH) or \
+                             (signal.signal_type == SignalType.SELL and mc.get('trend') == TrendDirection.BEARISH)
                 if is_aligned:
                     trend_bonus = 10
-                    if mc.get('trend_strength') == TrendStrength.STRONG.value:
+                    if mc.get('trend_strength') == TrendStrength.STRONG:
                         trend_bonus += 5
             
             final_score = base_score + rr_bonus + trend_bonus

@@ -9,25 +9,24 @@ import redis.asyncio as redis
 import yfinance as yf
 
 from module.config import Config
+from module.core import FundamentalAnalysis, OrderBook
 from module.logger_config import logger
 from module.utils import RateLimiter, async_retry
 
-coingecko_rate_limiter = RateLimiter(max_requests=29, time_window=60)
+coingecko_rate_limiter = RateLimiter(max_requests=45, time_window=60)
 alpha_vantage_rate_limiter = RateLimiter(max_requests=5, time_window=60)
 cryptopanic_rate_limiter = RateLimiter(max_requests=20, time_window=60)
 alternative_me_rate_limiter = RateLimiter(max_requests=20, time_window=60)
 coindesk_rate_limiter = RateLimiter(max_requests=20, time_window=60)
 binance_rate_limiter = RateLimiter(max_requests=1200, time_window=60)
-glassnode_rate_limiter = RateLimiter(max_requests=30, time_window=60)
-defillama_rate_limiter = RateLimiter(max_requests=20, time_window=60)
-coinmetrics_rate_limiter = RateLimiter(max_requests=10, time_window=6)
-amberdata_rate_limiter = RateLimiter(max_requests=20, time_window=1)
+defillama_rate_limiter = RateLimiter(max_requests=30, time_window=60)
 
 
 class BinanceFetcher:
     def __init__(self, redis_client: Optional[redis.Redis] = None):
         self.base_url = "https://api.binance.com/api/v3"
         self.fapi_url = "https://fapi.binance.com/fapi/v1"
+        self.futures_data_url = "https://fapi.binance.com/futures/data"
         self.redis = redis_client
 
     @async_retry(attempts=3, delay=5)
@@ -36,6 +35,11 @@ class BinanceFetcher:
         await binance_rate_limiter.wait_if_needed(endpoint)
         async with aiohttp.ClientSession() as session:
             async with session.get(full_url, params=params) as response:
+                if response.status == 400:
+                    error_data = await response.json()
+                    if error_data.get("code") == -1121 or "Invalid symbol" in error_data.get("msg", ""):
+                        logger.warning(f"Invalid symbol for Binance endpoint {endpoint}: {params.get('symbol')}")
+                        return None
                 response.raise_for_status()
                 return await response.json()
 
@@ -85,7 +89,113 @@ class BinanceFetcher:
         except Exception as e:
             logger.error(f"Error fetching open interest from Binance for {symbol}: {e}")
             return None
+            
+    async def get_funding_rate(self, symbol: str) -> Optional[float]:
+        cache_key = f"cache:binance:funding_rate:{symbol}"
+        if self.redis:
+            cached = await self.redis.get(cache_key)
+            if cached: return float(cached)
 
+        try:
+            binance_symbol = symbol.replace('/', '').upper()
+            params = {"symbol": binance_symbol, "limit": 1}
+            data = await self._fetch(self.fapi_url, "fundingRate", params)
+            if data and isinstance(data, list) and data[0].get('fundingRate'):
+                funding_rate = float(data[0]['fundingRate'])
+                if self.redis:
+                    await self.redis.set(cache_key, funding_rate, ex=300)
+                return funding_rate
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching funding rate from Binance for {symbol}: {e}")
+            return None
+
+    async def get_taker_long_short_ratio(self, symbol: str) -> Optional[float]:
+        cache_key = f"cache:binance:long_short_ratio:{symbol}"
+        if self.redis:
+            cached = await self.redis.get(cache_key)
+            if cached: return float(cached)
+
+        try:
+            binance_symbol = symbol.replace('/', '').upper()
+            params = {"symbol": binance_symbol, "period": "5m", "limit": 1}
+            data = await self._fetch(self.futures_data_url, "takerlongshortRatio", params)
+            if data and isinstance(data, list) and data[0].get('buySellRatio'):
+                ratio = float(data[0]['buySellRatio'])
+                if self.redis:
+                    await self.redis.set(cache_key, ratio, ex=300)
+                return ratio
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching taker long/short ratio from Binance for {symbol}: {e}")
+            return None
+
+    async def get_top_trader_long_short_ratio_accounts(self, symbol: str) -> Optional[float]:
+        try:
+            binance_symbol = symbol.replace('/', '').upper()
+            params = {"symbol": binance_symbol, "period": "5m", "limit": 1}
+            data = await self._fetch(self.futures_data_url, "globalLongShortAccountRatio", params)
+            if data and isinstance(data, list) and data[0].get('longShortRatio'):
+                return float(data[0]['longShortRatio'])
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching top trader acc ratio from Binance for {symbol}: {e}")
+            return None
+
+    async def get_top_trader_long_short_ratio_positions(self, symbol: str) -> Optional[float]:
+        try:
+            binance_symbol = symbol.replace('/', '').upper()
+            params = {"symbol": binance_symbol, "period": "5m", "limit": 1}
+            data = await self._fetch(self.futures_data_url, "topLongShortPositionRatio", params)
+            if data and isinstance(data, list) and data[0].get('longShortRatio'):
+                return float(data[0]['longShortRatio'])
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching top trader pos ratio from Binance for {symbol}: {e}")
+            return None
+
+    async def get_liquidation_orders(self, symbol: str) -> Optional[List[Dict]]:
+        try:
+            binance_symbol = symbol.replace('/', '').upper()
+            params = {"symbol": binance_symbol, "limit": 10}
+            data = await self._fetch(self.fapi_url, "allForceOrders", params)
+            return data if data else None
+        except Exception as e:
+            logger.error(f"Error fetching liquidation orders from Binance for {symbol}: {e}")
+            return None
+
+    async def get_order_book_depth(self, symbol: str) -> Optional[OrderBook]:
+        try:
+            binance_symbol = symbol.replace('/', '').upper()
+            params = {"symbol": binance_symbol, "limit": 100}
+            data = await self._fetch(self.base_url, "depth", params)
+            if not data: return None
+
+            bids = [(float(p), float(q)) for p, q in data.get('bids', [])]
+            asks = [(float(p), float(q)) for p, q in data.get('asks', [])]
+            
+            return OrderBook(
+                bids=bids,
+                asks=asks,
+                bid_ask_spread=asks[0][0] - bids[0][0] if asks and bids else 0,
+                total_bid_volume=sum(q for _, q in bids),
+                total_ask_volume=sum(q for _, q in asks)
+            )
+        except Exception as e:
+            logger.error(f"Error fetching order book depth from Binance for {symbol}: {e}")
+            return None
+
+    async def get_mark_price(self, symbol: str) -> Optional[float]:
+        try:
+            binance_symbol = symbol.replace('/', '').upper()
+            params = {"symbol": binance_symbol}
+            data = await self._fetch(self.fapi_url, "premiumIndex", params)
+            if data and 'markPrice' in data:
+                return float(data['markPrice'])
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching mark price from Binance for {symbol}: {e}")
+            return None
 
 class CoinDeskFetcher:
     def __init__(self, api_key: str, redis_client: Optional[redis.Redis] = None):
@@ -156,82 +266,14 @@ class CoinDeskFetcher:
             return []
 
 
-class GlassnodeFetcher:
-    def __init__(self, api_key: str, redis_client: Optional[redis.Redis] = None):
-        self.api_key = api_key
-        self.base_url = "https://api.glassnode.com"
-        self.redis = redis_client
-        self.cache_ttl = 3600
-
-    @async_retry(attempts=3, delay=10)
-    async def _fetch(self, endpoint: str, asset: str = "BTC"):
-        if not self.api_key:
-            return None
-        
-        cache_key = f"cache:glassnode:{endpoint}:{asset}"
-        if self.redis:
-            try:
-                cached = await self.redis.get(cache_key)
-                if cached: return json.loads(cached)
-            except Exception as e:
-                logger.warning(f"Redis GET failed for {cache_key}: {e}")
-
-        url = f"{self.base_url}{endpoint}"
-        params = {"a": asset, "api_key": self.api_key}
-        await glassnode_rate_limiter.wait_if_needed(endpoint)
-        
-        try:
-            timeout = aiohttp.ClientTimeout(total=20)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url, params=params) as response:
-                    response.raise_for_status()
-                    data = await response.json()
-                    if self.redis and data:
-                        await self.redis.set(cache_key, json.dumps(data), ex=self.cache_ttl)
-                    return data
-        except Exception as e:
-            logger.error(f"Error fetching from Glassnode endpoint {endpoint}: {e}")
-            return None
-
-    async def _get_latest_value(self, endpoint: str, asset: str = "BTC") -> Optional[float]:
-        data = await self._fetch(endpoint, asset=asset)
-        if data and isinstance(data, list) and data:
-            latest_point = data[-1]
-            return latest_point.get('v')
-        return None
-
-    async def get_hash_rate(self, asset: str = "BTC") -> Optional[float]:
-        return await self._get_latest_value("/v1/metrics/mining/hash_rate_mean", asset=asset)
-
-    async def get_nupl(self, asset: str = "BTC") -> Optional[float]:
-        return await self._get_latest_value("/v1/metrics/market/net_unrealized_profit_loss", asset=asset)
-
-    async def get_exchange_net_position_change(self, asset: str = "BTC") -> Optional[float]:
-        return await self._get_latest_value("/v1/metrics/distribution/exchange_net_position_change", asset=asset)
-
-    async def get_stablecoin_supply(self, asset: str = "USDT") -> Optional[float]:
-         return await self._get_latest_value("/v1/metrics/stablecoins/supply", asset=asset)
-
-    async def get_defi_tvl(self) -> Optional[float]:
-        return await self._get_latest_value("/v1/metrics/defi/defi_total_value_locked")
-
-
 class MarketIndicesFetcher:
     def __init__(self, alpha_vantage_key: Optional[str] = None, coingecko_key: Optional[str] = None, 
-                 glassnode_fetcher: Optional[GlassnodeFetcher] = None, redis_client: Optional[redis.Redis] = None):
+                 redis_client: Optional[redis.Redis] = None):
         
         self.coingecko_key = coingecko_key
-        if self.coingecko_key and self.coingecko_key.startswith('CG-'):
-            self.coingecko_base_url = "https://pro-api.coingecko.com/api/v3"
-            self.is_pro_key = True
-        else:
-            self.coingecko_base_url = "https://api.coingecko.com/api/v3"
-            self.is_pro_key = False
-        
         self.defillama_url = "https://api.llama.fi"
         self.alpha_vantage_url = "https://www.alphavantage.co/query"
         self.alpha_vantage_key = alpha_vantage_key
-        self.glassnode_fetcher = glassnode_fetcher
         self.redis = redis_client
         self.cache_ttl = 600
 
@@ -243,31 +285,33 @@ class MarketIndicesFetcher:
         request_params = params.copy() if params else {}
         request_headers = headers.copy() if headers else {"accept": "application/json"}
         
+        effective_url = url
         if "coingecko.com" in url and self.coingecko_key:
-            if self.is_pro_key:
+            if self.coingecko_key.startswith('CG-'):
+                effective_url = url.replace("https://api.coingecko.com", "https://pro-api.coingecko.com")
                 request_headers['x-cg-pro-api-key'] = self.coingecko_key
-            else: # Demo key
+            else:
+                effective_url = url.replace("https://pro-api.coingecko.com", "https://api.coingecko.com")
                 request_params['x_cg_demo_api_key'] = self.coingecko_key
 
         try:
             timeout = aiohttp.ClientTimeout(total=30)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url, params=request_params, headers=request_headers) as response:
+                async with session.get(effective_url, params=request_params, headers=request_headers) as response:
                     if response.status == 200:
                         return await response.json()
-                    logger.error(f"Error fetching from {url} with params {request_params}: {response.status}, message='{await response.text()}'")
+                    logger.error(f"Error fetching from {effective_url} with params {request_params}: {response.status}, message='{await response.text()}'")
                     response.raise_for_status()
         except asyncio.TimeoutError:
-            logger.error(f"Timeout during fetch from {url}")
+            logger.error(f"Timeout during fetch from {effective_url}")
             return None
         except Exception as e:
-            logger.error(f"Exception during fetch from {url}: {e}")
+            logger.error(f"Exception during fetch from {effective_url}: {e}")
             return None
 
     async def get_historical_ohlc_coingecko(self, symbol: str, days: int = 365) -> Optional[pd.DataFrame]:
-        # symbol should be like 'bitcoin', 'ethereum'
         coin_id = symbol.lower().split('/')[0]
-        url = f"{self.coingecko_base_url}/coins/{coin_id}/ohlc"
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
         params = {'vs_currency': 'usd', 'days': str(days)}
         data = await self._fetch_json(url, params, limiter=coingecko_rate_limiter, endpoint_name=f"coins_ohlc_{coin_id}")
         
@@ -276,7 +320,6 @@ class MarketIndicesFetcher:
         df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         df.set_index('timestamp', inplace=True)
-        # CoinGecko doesn't provide volume in this endpoint, so we add a dummy column
         df['volume'] = 0.0 
         return df
 
@@ -291,12 +334,11 @@ class MarketIndicesFetcher:
                 logger.warning(f"Redis get failed for {cache_key}: {e}")
 
         tasks = {
-            "global": self._fetch_json(f"{self.coingecko_base_url}/global", limiter=coingecko_rate_limiter, endpoint_name="global"),
-            "defi_llama_tvl": self._fetch_json(f"{self.defillama_url}/tvl/chains", limiter=defillama_rate_limiter),
-            "glassnode_tvl": self.glassnode_fetcher.get_defi_tvl() if self.glassnode_fetcher else asyncio.sleep(0, result=None)
+            "global": self._fetch_json(f"https://api.coingecko.com/api/v3/global", limiter=coingecko_rate_limiter, endpoint_name="global"),
+            "defi_llama_tvl_total": self._fetch_json(f"{self.defillama_url}/tvl/chains", limiter=defillama_rate_limiter),
         }
         results = await asyncio.gather(*tasks.values())
-        global_data, defi_llama_data, glassnode_tvl = results
+        global_data, defi_llama_tvl_data = results
 
         indices = {}
         if global_data and "data" in global_data:
@@ -318,10 +360,8 @@ class MarketIndicesFetcher:
             others_dominance = 100 - sum(d for d in [indices.get("BTC.D"), indices.get("ETH.D"), indices.get("USDT.D")] if d is not None)
             indices["OTHERS.D"] = others_dominance
 
-        if glassnode_tvl:
-            indices["DEFI_TVL"] = glassnode_tvl
-        elif defi_llama_data and isinstance(defi_llama_data, list) and defi_llama_data:
-            total_tvl = sum(chain.get('tvl', 0) for chain in defi_llama_data)
+        if defi_llama_tvl_data and isinstance(defi_llama_tvl_data, list) and defi_llama_tvl_data:
+            total_tvl = sum(chain.get('tvl', 0) for chain in defi_llama_tvl_data)
             indices["DEFI_TVL"] = total_tvl
 
         if self.redis and indices:
@@ -330,6 +370,55 @@ class MarketIndicesFetcher:
             except Exception as e:
                 logger.warning(f"Redis set failed for {cache_key}: {e}")
         return indices
+        
+    async def get_fundamental_data(self, coin_id: str) -> Optional[FundamentalAnalysis]:
+        cache_key = f"cache:coingecko_fundamental:{coin_id}"
+        if self.redis:
+            cached = await self.redis.get(cache_key)
+            if cached:
+                data = json.loads(cached)
+                return FundamentalAnalysis(**data)
+
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}"
+        params = {
+            'localization': 'false', 
+            'tickers': 'false', 
+            'market_data': 'true', 
+            'community_data': 'true', 
+            'developer_data': 'true'
+        }
+        data = await self._fetch_json(url, params, limiter=coingecko_rate_limiter, endpoint_name=f"coins_{coin_id}_full")
+
+        if not data:
+            return None
+
+        market_data = data.get('market_data', {})
+        community_data = data.get('community_data', {})
+        developer_data = data.get('developer_data', {})
+
+        fundamental_data = FundamentalAnalysis(
+            market_cap=market_data.get('market_cap', {}).get('usd', 0.0),
+            total_volume=market_data.get('total_volume', {}).get('usd', 0.0),
+            developer_score=developer_data.get('pull_requests_merged', 0) * 0.4 + developer_data.get('stars', 0) * 0.6,
+            community_score=community_data.get('twitter_followers', 0)
+        )
+
+        if self.redis:
+            await self.redis.set(cache_key, json.dumps(fundamental_data.__dict__), ex=43200)
+
+        return fundamental_data
+    
+    async def get_coingecko_derivatives(self) -> Optional[List[Dict]]:
+        url = "https://api.coingecko.com/api/v3/derivatives"
+        data = await self._fetch_json(url, limiter=coingecko_rate_limiter, endpoint_name="derivatives")
+        return data
+
+    async def get_trending_searches(self) -> Optional[List[str]]:
+        url = "https://api.coingecko.com/api/v3/search/trending"
+        data = await self._fetch_json(url, limiter=coingecko_rate_limiter, endpoint_name="trending")
+        if data and 'coins' in data:
+            return [item['item']['symbol'] for item in data['coins']]
+        return None
 
     @async_retry(attempts=3, delay=5)
     async def get_traditional_indices_yf(self):
@@ -342,7 +431,10 @@ class MarketIndicesFetcher:
             except Exception as e:
                 logger.warning(f"Redis get failed for {cache_key}: {e}")
 
-        tickers = {"DXY": "DX-Y.NYB", "SPX": "^GSPC", "NDX": "^IXIC", "VIX": "^VIX"}
+        tickers = {
+            "DXY": "DX-Y.NYB", "SPX": "^GSPC", "NDX": "^IXIC", "VIX": "^VIX",
+            "GOLD": "GC=F", "OIL": "CL=F", "DJI": "^DJI", "RUT": "^RUT"
+        }
         data = yf.download(tickers=list(tickers.values()), period="5d", interval="1d", progress=False, auto_adjust=True)
         if data is None or data.empty:
             return {}
@@ -377,25 +469,21 @@ class MarketIndicesFetcher:
             return {}
 
         tasks = {
-            "cpi": self._fetch_json(
-                self.alpha_vantage_url,
-                params={"function": "CPI", "interval": "monthly", "apikey": self.alpha_vantage_key},
-                limiter=alpha_vantage_rate_limiter, endpoint_name="cpi"
-            ),
-            "fed_rate": self._fetch_json(
-                self.alpha_vantage_url,
-                params={"function": "FEDERAL_FUNDS_RATE", "interval": "monthly", "apikey": self.alpha_vantage_key},
-                limiter=alpha_vantage_rate_limiter, endpoint_name="fed_rate"
-            )
+            "cpi": self._fetch_json(self.alpha_vantage_url, params={"function": "CPI", "interval": "monthly", "apikey": self.alpha_vantage_key}, limiter=alpha_vantage_rate_limiter),
+            "fed_rate": self._fetch_json(self.alpha_vantage_url, params={"function": "FEDERAL_FUNDS_RATE", "interval": "monthly", "apikey": self.alpha_vantage_key}, limiter=alpha_vantage_rate_limiter),
+            "gdp": self._fetch_json(self.alpha_vantage_url, params={"function": "REAL_GDP", "interval": "quarterly", "apikey": self.alpha_vantage_key}, limiter=alpha_vantage_rate_limiter),
+            "unemployment": self._fetch_json(self.alpha_vantage_url, params={"function": "UNEMPLOYMENT", "apikey": self.alpha_vantage_key}, limiter=alpha_vantage_rate_limiter),
+            "treasury_yield": self._fetch_json(self.alpha_vantage_url, params={"function": "TREASURY_YIELD", "interval": "monthly", "maturity": "10year", "apikey": self.alpha_vantage_key}, limiter=alpha_vantage_rate_limiter),
         }
         results = await asyncio.gather(*tasks.values())
-        cpi_data, fed_rate_data = results
+        cpi_data, fed_rate_data, gdp_data, unemployment_data, yield_data = results
         
         macro_data = {}
-        if cpi_data and "data" in cpi_data and cpi_data["data"]:
-            macro_data["CPI"] = float(cpi_data["data"][0]["value"])
-        if fed_rate_data and "data" in fed_rate_data and fed_rate_data["data"]:
-            macro_data["FED_RATE"] = float(fed_rate_data["data"][0]["value"])
+        if cpi_data and "data" in cpi_data and cpi_data["data"]: macro_data["CPI"] = float(cpi_data["data"][0]["value"])
+        if fed_rate_data and "data" in fed_rate_data and fed_rate_data["data"]: macro_data["FED_RATE"] = float(fed_rate_data["data"][0]["value"])
+        if gdp_data and "data" in gdp_data and gdp_data["data"]: macro_data["GDP"] = float(gdp_data["data"][0]["value"])
+        if unemployment_data and "data" in unemployment_data and unemployment_data["data"]: macro_data["UNEMPLOYMENT"] = float(unemployment_data["data"][0]["value"])
+        if yield_data and "data" in yield_data and yield_data["data"]: macro_data["TREASURY_YIELD_10Y"] = float(yield_data["data"][0]["value"])
 
         if self.redis and macro_data:
             try:
@@ -423,67 +511,57 @@ class NewsFetcher:
         self.redis = redis_client
 
     @async_retry(attempts=3, delay=5)
-    async def fetch_fear_greed(self):
-        cache_key = "cache:fear_greed"
+    async def fetch_fear_greed(self, limit: int = 1):
+        cache_key = f"cache:fear_greed:{limit}"
         if self.redis:
             try:
                 cached = await self.redis.get(cache_key)
                 if cached:
-                    return int(cached)
+                    return json.loads(cached)
             except Exception as e:
                 logger.warning(f"Redis get failed for {cache_key}: {e}")
 
         await alternative_me_rate_limiter.wait_if_needed("fng")
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get("https://api.alternative.me/fng/") as response:
+            async with session.get(f"https://api.alternative.me/fng/?limit={limit}") as response:
                 response.raise_for_status()
                 j = await response.json()
                 data = j.get("data", [])
                 if data:
-                    value = data[0].get("value")
-                    if value is not None:
-                        value_int = int(value)
-                        if self.redis:
-                            try:
-                                await self.redis.set(cache_key, value_int, ex=3600)
-                            except Exception as e:
-                                logger.warning(f"Redis set failed for {cache_key}: {e}")
-                        return value_int
+                    if self.redis:
+                        await self.redis.set(cache_key, json.dumps(data), ex=3600)
+                    return data
         return None
 
     @async_retry(attempts=3, delay=5)
-    async def fetch_news(self, currencies: List[str] = ["BTC", "ETH"]):
-        key = "cache:news:" + ",".join(sorted(currencies))
+    async def fetch_news(self, currencies: List[str] = ["BTC", "ETH"], kind: Optional[str] = None):
+        key = "cache:news:" + ",".join(sorted(currencies)) + (f":{kind}" if kind else "")
         if self.redis:
             try:
                 cached = await self.redis.get(key)
-                if cached:
-                    return json.loads(cached)
+                if cached: return json.loads(cached)
             except Exception as e:
                 logger.warning(f"Redis get failed for {key}: {e}")
 
         tasks = []
         url = "https://cryptopanic.com/api/v2/posts/"
         params = {"auth_token": self.cryptopanic_key, "currencies": ",".join(currencies), "public": "true"}
+        if kind: params['kind'] = kind
         tasks.append(self._fetch_cryptopanic(url, params))
 
-        if self.coindesk_fetcher:
+        if self.coindesk_fetcher and not kind: # CoinDesk doesn't support 'kind' filter
             tasks.append(self.coindesk_fetcher.get_news(currencies))
 
         results = await asyncio.gather(*tasks)
         all_news = []
         for res in results:
-            if res:
-                all_news.extend(res)
+            if res: all_news.extend(res)
         
         unique_news = list({item.get('id') or item.get('title'): item for item in all_news}.values())
 
         if self.redis and unique_news:
-            try:
-                await self.redis.set(key, json.dumps(unique_news), ex=600)
-            except Exception as e:
-                logger.warning(f"Redis set failed for {key}: {e}")
+            await self.redis.set(key, json.dumps(unique_news), ex=600)
 
         return unique_news
 
@@ -499,200 +577,15 @@ class NewsFetcher:
 
     def score_news(self, news_items: List[Dict[str, Any]]):
         score = 0
-        if not news_items:
-            return score
+        if not news_items: return score
         for it in news_items:
+            # CryptoPanic specific sentiment
+            if 'votes' in it:
+                score += int(it['votes'].get('positive', 0))
+                score -= int(it['votes'].get('negative', 0))
+            
+            # General title sentiment
             title = (it.get("title") or "").lower()
-            if any(k in title for k in ["bull", "rally", "surge", "gain", "pump"]):
-                score += 1
-            if any(k in title for k in ["crash", "dump", "fall", "drop", "hack"]):
-                score -= 1
+            if any(k in title for k in ["bull", "rally", "surge", "gain", "pump", "partnership"]): score += 1
+            if any(k in title for k in ["crash", "dump", "fall", "drop", "hack", "scam", "exploit"]): score -= 1
         return score
-
-
-class CoinMetricsFetcher:
-    def __init__(self, api_key: Optional[str] = None, redis_client: Optional[redis.Redis] = None):
-        self.api_key = api_key
-        self.base_url = "https://api.coinmetrics.io/v4"
-        self.redis = redis_client
-        self.cache_ttl = 1800  # 30 minutes
-
-    @async_retry(attempts=3, delay=5)
-    async def _fetch(self, endpoint: str, params: Optional[Dict[str, Any]] = None):
-        final_params = params.copy() if params else {}
-        if self.api_key:
-            final_params["api_key"] = self.api_key
-        
-        url = f"{self.base_url}{endpoint}"
-        await coinmetrics_rate_limiter.wait_if_needed(endpoint)
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=final_params) as response:
-                response.raise_for_status()
-                return await response.json()
-
-    async def get_asset_metrics(self, assets: List[str], metrics: List[str]) -> Optional[Dict[str, Dict[str, float]]]:
-        asset_str = ",".join(assets).lower()
-        metric_str = ",".join(metrics)
-        cache_key = f"cache:coinmetrics:asset_metrics:{asset_str}:{metric_str}"
-        
-        if self.redis:
-            cached = await self.redis.get(cache_key)
-            if cached:
-                return json.loads(cached)
-
-        try:
-            params = {"assets": asset_str, "metrics": metric_str, "frequency": "1d", "page_size": 1}
-            data = await self._fetch("/timeseries/asset-metrics", params)
-            
-            if not data or "data" not in data:
-                return None
-
-            results = {}
-            for series in data["data"]:
-                asset = series["asset"]
-                metric = series["metric"]
-                if asset not in results:
-                    results[asset] = {}
-                if series["series"]:
-                    # Get the last value
-                    results[asset][metric] = float(series["series"][0]["values"][0])
-            
-            if self.redis and results:
-                await self.redis.set(cache_key, json.dumps(results), ex=self.cache_ttl)
-
-            return results
-        except Exception as e:
-            logger.error(f"Error fetching asset metrics from CoinMetrics: {e}")
-            return None
-
-    async def get_market_indicators(self, asset: str, indicators: List[str]) -> Optional[Dict[str, float]]:
-        """Fetches market indicators like MVRV, SOPR, etc."""
-        return await self.get_asset_metrics(assets=[asset], metrics=indicators)
-
-
-class AmberdataFetcher:
-    def __init__(self, api_key: str, redis_client: Optional[redis.Redis] = None):
-        self.api_key = api_key
-        self.base_url = "https://web3api.io/api/v2"
-        self.redis = redis_client
-        self.cache_ttl = 300  # 5 minutes
-
-    @async_retry(attempts=3, delay=2)
-    async def _fetch(self, endpoint: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, Any]] = None):
-        if not self.api_key:
-            logger.warning("Amberdata API key is not provided.")
-            return None
-        
-        final_headers = {"x-api-key": self.api_key, "Accept": "application/json"}
-        if headers:
-            final_headers.update(headers)
-            
-        url = f"{self.base_url}{endpoint}"
-        
-        await amberdata_rate_limiter.wait_if_needed(endpoint)
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, headers=final_headers) as response:
-                response.raise_for_status()
-                return await response.json()
-
-    async def get_historical_ohlc(self, symbol: str, timeframe: str = "1d") -> Optional[pd.DataFrame]:
-        pair = symbol.replace("/", "_").lower()
-        cache_key = f"cache:amberdata:ohlc:{pair}:{timeframe}"
-        if self.redis:
-            cached = await self.redis.get(cache_key)
-            if cached:
-                df = pd.read_json(cached, orient="split")
-                df.index = pd.to_datetime(df.index, unit='ms', utc=True)
-                return df
-
-        try:
-            endpoint = f"/market/ohlcv/{pair}/historical"
-            params = {"timeInterval": timeframe}
-            data = await self._fetch(endpoint, params)
-            
-            if not data or "payload" not in data or not data["payload"]["data"]:
-                return None
-
-            df = pd.DataFrame(data["payload"]["data"])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-            df.set_index('timestamp', inplace=True)
-            df = df.astype(float)
-            
-            if self.redis:
-                df_to_cache = df.copy()
-                df_to_cache.index = df_to_cache.index.astype(int) // 10**6
-                await self.redis.set(cache_key, df_to_cache.to_json(orient="split"), ex=self.cache_ttl)
-            
-            return df
-        except Exception as e:
-            logger.error(f"Error fetching OHLC from Amberdata for {symbol}: {e}")
-            return None
-
-    async def get_futures_data(self, exchange: str, instrument: str) -> Optional[Dict]:
-        """Fetches futures data like open interest and funding rates."""
-        cache_key = f"cache:amberdata:futures:{exchange}:{instrument}"
-        if self.redis:
-            cached = await self.redis.get(cache_key)
-            if cached:
-                return json.loads(cached)
-        
-        try:
-            endpoint = f"/market/futures/tickers/{instrument}/latest"
-            params = {"exchange": exchange}
-            data = await self._fetch(endpoint, params)
-            
-            if data and "payload" in data and data["payload"]:
-                result = data["payload"][0] # Get the first result
-                if self.redis:
-                    await self.redis.set(cache_key, json.dumps(result), ex=self.cache_ttl)
-                return result
-            return None
-        except Exception as e:
-            logger.error(f"Error fetching futures data from Amberdata for {instrument}: {e}")
-            return None
-
-    async def get_nft_collection_metrics(self, collection_address: str) -> Optional[Dict]:
-        """Fetches NFT collection metrics."""
-        cache_key = f"cache:amberdata:nft_collection:{collection_address}"
-        if self.redis:
-            cached = await self.redis.get(cache_key)
-            if cached:
-                return json.loads(cached)
-        
-        try:
-            endpoint = f"/nft/collections/{collection_address}/metrics/latest"
-            data = await self._fetch(endpoint)
-            
-            if data and "payload" in data:
-                result = data["payload"]
-                if self.redis:
-                    await self.redis.set(cache_key, json.dumps(result), ex=3600) # Cache for 1 hour
-                return result
-            return None
-        except Exception as e:
-            logger.error(f"Error fetching NFT collection data from Amberdata for {collection_address}: {e}")
-            return None
-
-    async def get_defi_protocol_data(self, protocol_slug: str) -> Optional[Dict]:
-        """Fetches detailed data for a specific DeFi protocol."""
-        cache_key = f"cache:amberdata:defi_protocol:{protocol_slug}"
-        if self.redis:
-            cached = await self.redis.get(cache_key)
-            if cached:
-                return json.loads(cached)
-
-        try:
-            endpoint = f"/defi/protocols/{protocol_slug}/latest"
-            data = await self._fetch(endpoint)
-            
-            if data and "payload" in data:
-                result = data["payload"]
-                if self.redis:
-                    await self.redis.set(cache_key, json.dumps(result), ex=3600) # Cache for 1 hour
-                return result
-            return None
-        except Exception as e:
-            logger.error(f"Error fetching DeFi protocol data from Amberdata for {protocol_slug}: {e}")
-            return None

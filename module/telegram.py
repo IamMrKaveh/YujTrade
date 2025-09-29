@@ -177,38 +177,64 @@ class TradingBotService:
 
         if signal.dynamic_levels:
             dl = signal.dynamic_levels
-            message += "*Dynamic Levels:*\n"
-            message += f"  - *Entry:* `{dl.get('primary_entry', 0):.4f}`\n"
-            message += f"  - *Take Profit:* `{dl.get('primary_exit', 0):.4f}`\n"
-            message += f"  - *Stop Loss:* `{dl.get('tight_stop', 0):.4f}`\n\n"
+            message += "🎯 *Dynamic Levels:*\n"
+            message += f"  - Entry: `{dl.get('primary_entry', 0):.4f}`\n"
+            message += f"  - Take Profit: `{dl.get('primary_exit', 0):.4f}`\n"
+            message += f"  - Stop Loss: `{dl.get('tight_stop', 0):.4f}`\n\n"
 
         if signal.market_context:
             mc = signal.market_context
-            trend = mc.get('trend', 'N/A').replace('_', ' ').title()
-            strength = mc.get('trend_strength', 'N/A').title()
+            trend = mc.get('trend', 'N/A').value.replace('_', ' ').title()
+            strength = mc.get('trend_strength', 'N/A').value.title()
             volatility = mc.get('volatility', 0)
-            message += "*Market Context:*\n"
-            message += f"  - *Trend:* {trend} ({strength})\n"
-            message += f"  - *Volatility:* {volatility:.2f}%\n\n"
+            message += "📊 *Market Context:*\n"
+            message += f"  - Trend: {trend} ({strength})\n"
+            message += f"  - Volatility: {volatility:.2f}%\n\n"
+        
+        if signal.fundamental_analysis:
+            fa = signal.fundamental_analysis
+            message += "🏢 *Fundamental Analysis:*\n"
+            message += f"  - Market Cap: `${fa.market_cap:,.0f}`\n"
+            message += f"  - Dev Score: `{fa.developer_score:.1f}`\n"
+            if signal.trending_data and signal.symbol.split('/')[0] in signal.trending_data.coingecko_trending:
+                message += "  - Trending on CoinGecko 🔥\n"
+            message += "\n"
 
-        # Add On-Chain and Derivatives context
-        if signal.on_chain_analysis or signal.derivatives_analysis:
-            message += "*On-Chain & Derivatives:*\n"
-            if signal.on_chain_analysis and signal.on_chain_analysis.mvrv:
-                message += f"  - *MVRV:* `{signal.on_chain_analysis.mvrv:.3f}`\n"
-            if signal.on_chain_analysis and signal.on_chain_analysis.sopr:
-                message += f"  - *SOPR:* `{signal.on_chain_analysis.sopr:.3f}`\n"
-            if signal.derivatives_analysis and signal.derivatives_analysis.funding_rate:
-                fr = signal.derivatives_analysis.funding_rate * 100
-                message += f"  - *Funding Rate:* `{fr:.4f}%`\n"
-            if signal.derivatives_analysis and signal.derivatives_analysis.open_interest:
-                oi = signal.derivatives_analysis.open_interest
-                message += f"  - *Open Interest:* `${oi:,.0f}`\n"
+        if signal.derivatives_analysis:
+            da = signal.derivatives_analysis
+            message += "📈 *Derivatives Analysis:*\n"
+            if da.funding_rate is not None: message += f"  - Funding Rate: `{da.funding_rate * 100:.4f}%`\n"
+            if da.open_interest is not None: message += f"  - Open Interest: `${da.open_interest:,.0f}`\n"
+            if da.taker_long_short_ratio is not None: message += f"  - Taker L/S Ratio: `{da.taker_long_short_ratio:.3f}`\n"
+            
+            if da.binance_futures_data:
+                bfd = da.binance_futures_data
+                if bfd.top_trader_long_short_ratio_accounts: message += f"  - Top Trader Acc L/S: `{bfd.top_trader_long_short_ratio_accounts:.3f}`\n"
+                if bfd.top_trader_long_short_ratio_positions: message += f"  - Top Trader Pos L/S: `{bfd.top_trader_long_short_ratio_positions:.3f}`\n"
+                
+                liq_sells = sum(float(o['origQty']) for o in bfd.liquidation_orders if o['side'] == 'SELL')
+                liq_buys = sum(float(o['origQty']) for o in bfd.liquidation_orders if o['side'] == 'BUY')
+                if liq_sells > 0 or liq_buys > 0: message += f"  - Liquidations (S/B): `{liq_sells:,.0f}` / `{liq_buys:,.0f}`\n"
+            message += "\n"
+
+        if signal.order_book:
+            ob = signal.order_book
+            imbalance = ob.total_bid_volume / ob.total_ask_volume if ob.total_ask_volume > 0 else 1
+            message += "📚 *Order Book (Top 100):*\n"
+            message += f"  - Bid/Ask Spread: `{ob.bid_ask_spread:.4f}`\n"
+            message += f"  - Volume Imbalance (Bid/Ask): `{imbalance:.2f}`\n\n"
+
+        if signal.macro_data:
+            md = signal.macro_data
+            message += "🌍 *Macro Data:*\n"
+            if md.cpi: message += f"  - CPI: `{md.cpi:.2f}`\n"
+            if md.fed_rate: message += f"  - Fed Rate: `{md.fed_rate:.2f}%`\n"
+            if md.treasury_yield_10y: message += f"  - 10Y Yield: `{md.treasury_yield_10y:.2f}%`\n"
             message += "\n"
 
         if signal.reasons:
-            message += "*Key Reasons for Score:*\n"
-            for reason in signal.reasons:
+            message += "🧠 *Key Reasons for Score:*\n"
+            for reason in signal.reasons[:5]: # Limit to top 5 reasons
                 message += f"  • _{reason}_\n"
             message += "\n"
 
@@ -339,7 +365,6 @@ class TelegramBotHandler:
             keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="main_menu")]]
             await query.edit_message_text(text=escaped_symbols, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
         elif query.data == "main_menu":
-            # Recreate the main menu. We can't call help_command directly with a query.
             keyboard = [
                 [
                     InlineKeyboardButton("⚡️ Quick Scan (1h)", callback_data="scan_1h"),

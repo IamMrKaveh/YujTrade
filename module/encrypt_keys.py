@@ -26,10 +26,9 @@ def run():
         "TELEGRAM_BOT_TOKEN",
         "ALPHA_VANTAGE_KEY",
         "COINDESK_API_KEY",
-        "GLASSNODE_API_KEY",
+        "COINGECKO_KEY",
+        "MESSARI_API_KEY",
         "SENTRY_DSN",
-        "AMBERDATA_KEY",
-        "COINMETRICS_API_KEY",
     ]
 
     new_env_content = ""
