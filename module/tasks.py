@@ -1,5 +1,5 @@
 import asyncio
-from typing import Optional
+from typing import Set
 
 import redis.asyncio as redis
 from telegram.ext import Application
@@ -23,17 +23,21 @@ class TaskServiceContainer:
 
     @classmethod
     async def instance(cls):
-        if cls._instance is None:
-            async with cls._lock:
-                if cls._instance is None:
-                    cls._instance = cls.__new__(cls)
-                    await cls._instance._initialize()
+        async with cls._lock:
+            if cls._instance is None:
+                cls._instance = cls.__new__(cls)
+                await cls._instance._initialize()
         return cls._instance
 
     async def _initialize(self):
         logger.info("Initializing TaskServiceContainer...")
         self.config_manager = ConfigManager()
+        self.bot_token = Config.TELEGRAM_BOT_TOKEN
+        self.background_tasks: Set[asyncio.Task] = set()
         
+        if not self.bot_token:
+            raise ValueError("TELEGRAM_BOT_TOKEN is not configured.")
+
         try:
             self.redis_client = redis.Redis.from_url(f"rediss://default:{Config.REDIS_TOKEN}@{Config.REDIS_HOST}:{Config.REDIS_PORT}", decode_responses=True)
             await self.redis_client.ping()
@@ -63,7 +67,7 @@ class TaskServiceContainer:
         self.lstm_manager = LSTMModelManager(model_path='MLM')
         await self.lstm_manager.initialize_models()
         
-        self.signal_generator = SignalGenerator(
+        signal_generator = SignalGenerator(
             market_data_provider=self.market_data_provider,
             news_fetcher=self.news_fetcher,
             market_indices_fetcher=market_indices_fetcher,
@@ -72,31 +76,40 @@ class TaskServiceContainer:
             config=self.config_manager.config
         )
         
-        multi_tf_analyzer = MultiTimeframeAnalyzer(self.market_data_provider, self.signal_generator.indicators)
-        self.signal_generator.multi_tf_analyzer = multi_tf_analyzer
+        multi_tf_analyzer = MultiTimeframeAnalyzer(self.market_data_provider, signal_generator.indicators)
+        signal_generator.multi_tf_analyzer = multi_tf_analyzer
         
         self.trading_service = TradingBotService(
             config=self.config_manager,
             market_data_provider=self.market_data_provider,
-            signal_generator=self.signal_generator,
+            signal_generator=signal_generator,
             signal_ranking=SignalRanking(),
         )
         
-        app_builder = Application.builder().token(Config.TELEGRAM_BOT_TOKEN)
+        app_builder = Application.builder().token(self.bot_token)
         app_builder.connect_timeout(30).read_timeout(30).write_timeout(30)
-        self.telegram_app = app_builder.build()
-        self.trading_service.set_telegram_app(self.telegram_app)
+        telegram_app = app_builder.build()
+        self.trading_service.set_telegram_app(telegram_app)
         
         logger.info("TaskServiceContainer initialized.")
 
     async def cleanup(self):
         logger.info("Cleaning up TaskServiceContainer...")
+        
+        logger.info(f"Cancelling {len(self.background_tasks)} background tasks.")
+        for task in list(self.background_tasks):
+            if not task.done():
+                task.cancel()
+        if self.background_tasks:
+            await asyncio.gather(*self.background_tasks, return_exceptions=True)
+
         if self.lstm_manager:
             self.lstm_manager.cleanup()
         if self.redis_client:
             await self.redis_client.aclose()
         if self.market_data_provider:
             await self.market_data_provider.close()
+        
         logger.info("TaskServiceContainer cleaned up.")
 
 
@@ -114,7 +127,8 @@ async def run_quick_scan_task(chat_id: int, message_id: int):
     try:
         logger.info(f"Task 'run_quick_scan_task' started for chat_id: {chat_id}")
         container = await TaskServiceContainer.instance()
-        await container.trading_service.run_find_best_signals_task("1m", chat_id, message_id)
+        # The timeframe is now hardcoded as this task is specific to a quick scan
+        await container.trading_service.run_find_best_signals_task("1h", chat_id, message_id)
         logger.info(f"Task 'run_quick_scan_task' finished for chat_id: {chat_id}")
     except Exception as e:
         logger.error(f"Error in run_quick_scan_task: {e}", exc_info=True)

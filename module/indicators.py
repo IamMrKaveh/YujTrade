@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 import pandas as pd
@@ -112,7 +112,7 @@ class MACDIndicator(TechnicalIndicator):
 
 
 class BollingerBandsIndicator(TechnicalIndicator):
-    def __init__(self, period: int = 20, std_dev: float = 2):
+    def __init__(self, period: int = 20, std_dev: float = 2.0):
         self.period = period
         self.std_dev = std_dev
 
@@ -121,15 +121,15 @@ class BollingerBandsIndicator(TechnicalIndicator):
         if bb_df is None or bb_df.empty or bb_df.dropna().empty:
             return IndicatorResult(name="BB", value=0.5, signal_strength=0, interpretation="neutral")
 
-        upper_band = bb_df.iloc[-1, 2]
+        upper_band = bb_df.iloc[-1, 2] 
         lower_band = bb_df.iloc[-1, 0]
         current_price = data['close'].iloc[-1]
 
-        band_width = upper_band - lower_band
+        band_width = float(upper_band) - float(lower_band)
         if band_width == 0:
             return IndicatorResult(name="BB", value=0.5, signal_strength=0, interpretation="neutral")
 
-        bb_position = (current_price - lower_band) / band_width
+        bb_position = (current_price - float(lower_band)) / band_width
 
         if bb_position > 0.8:
             interpretation = "near_upper_band"
@@ -362,15 +362,15 @@ class ChaikinMoneyFlowIndicator(TechnicalIndicator):
 
         if current_value > 0:
             interpretation = "buy_pressure"
-            strength = min(abs(current_value) * 200, 100)
+            strength = min(abs(float(current_value)) * 200, 100)
         elif current_value < 0:
             interpretation = "sell_pressure"
-            strength = min(abs(current_value) * 200, 100)
+            strength = min(abs(float(current_value)) * 200, 100)
         else:
             interpretation = "neutral"
             strength = 50
 
-        return IndicatorResult(name="CMF", value=current_value, signal_strength=strength, interpretation=interpretation)
+        return IndicatorResult(name="CMF", value=float(current_value), signal_strength=strength, interpretation=interpretation)
 
 
 class OBVIndicator(TechnicalIndicator):
@@ -423,7 +423,7 @@ class ParabolicSARIndicator(TechnicalIndicator):
 
 
 class SqueezeMomentumIndicator(TechnicalIndicator):
-    def __init__(self, length=20, mult=2, length_kc=20, mult_kc=1.5):
+    def __init__(self, length=20, mult=2.0, length_kc=20, mult_kc=1.5):
         self.length = length
         self.mult = mult
         self.length_kc = length_kc
@@ -446,12 +446,12 @@ class SqueezeMomentumIndicator(TechnicalIndicator):
             interpretation = "squeeze_on"
             strength = 50
         else:
-            if momentum_val > 0:
+            if float(momentum_val) > 0:
                 interpretation = "bullish_momentum"
-                strength = min(abs(momentum_val) * 100, 100)
+                strength = min(abs(float(momentum_val)) * 100, 100)
             else:
                 interpretation = "bearish_momentum"
-                strength = min(abs(momentum_val) * 100, 100)
+                strength = min(abs(float(momentum_val)) * 100, 100)
 
         return IndicatorResult(
             name="SqueezeMomentum",
@@ -469,7 +469,7 @@ class VWAPIndicator(TechnicalIndicator):
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 df.set_index('timestamp', inplace=True)
             else:
-                 return IndicatorResult(name="VWAP", value=0, signal_strength=0, interpretation="neutral_no_datetime")
+                return IndicatorResult(name="VWAP", value=0, signal_strength=0, interpretation="neutral_no_datetime")
         
         current_vwap = ta.vwap(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'])
         if current_vwap is None or (hasattr(current_vwap, "empty") and current_vwap.empty) or pd.isna(current_vwap.iloc[-1]):
@@ -521,15 +521,15 @@ class AroonIndicator(TechnicalIndicator):
 
         if aroon_up > 70 and aroon_down < 30:
             interpretation = "strong_uptrend"
-            strength = aroon_up
+            strength = float(aroon_up)
         elif aroon_down > 70 and aroon_up < 30:
             interpretation = "strong_downtrend"
-            strength = aroon_down
+            strength = float(aroon_down)
         else:
             interpretation = "ranging"
-            strength = 50
+            strength = 50.0
 
-        return IndicatorResult(name="Aroon", value=aroon_up - aroon_down, signal_strength=strength, interpretation=interpretation)
+        return IndicatorResult(name="Aroon", value=float(aroon_up) - float(aroon_down), signal_strength=strength, interpretation=interpretation)
 
 
 class UltimateOscillatorIndicator(TechnicalIndicator):
@@ -700,14 +700,14 @@ class TRIXIndicator(TechnicalIndicator):
                 return IndicatorResult(name="TRIX", value=0, signal_strength=0, interpretation="neutral")
             current_trix = trix_series.iloc[-1]
 
-        if current_trix > 0:
+        if float(current_trix) > 0:
             interpretation = "bullish"
         else:
             interpretation = "bearish"
 
-        strength = min(abs(current_trix) * 100, 100)
+        strength = min(abs(float(current_trix)) * 100, 100)
 
-        return IndicatorResult(name="TRIX", value=current_trix, signal_strength=strength, interpretation=interpretation)
+        return IndicatorResult(name="TRIX", value=float(current_trix), signal_strength=strength, interpretation=interpretation)
 
 
 class EaseOfMovementIndicator(TechnicalIndicator):

@@ -19,6 +19,9 @@ from module.market import MarketDataProvider
 from module.signals import SignalGenerator, SignalRanking
 
 def escape_markdown_v2(text: str) -> str:
+    # Ensure text is a string
+    if not isinstance(text, str):
+        text = str(text)
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
@@ -184,8 +187,10 @@ class TradingBotService:
 
         if signal.market_context:
             mc = signal.market_context
-            trend = mc.get('trend', 'N/A').value.replace('_', ' ').title()
-            strength = mc.get('trend_strength', 'N/A').value.title()
+            trend_val = mc.get('trend')
+            trend = trend_val.value.replace('_', ' ').title() if hasattr(trend_val, 'value') else str(trend_val)
+            strength_val = mc.get('trend_strength')
+            strength = strength_val.value.title() if hasattr(strength_val, 'value') else str(strength_val)
             volatility = mc.get('volatility', 0)
             message += "📊 *Market Context:*\n"
             message += f"  - Trend: {trend} ({strength})\n"
@@ -212,16 +217,16 @@ class TradingBotService:
                 if bfd.top_trader_long_short_ratio_accounts: message += f"  - Top Trader Acc L/S: `{bfd.top_trader_long_short_ratio_accounts:.3f}`\n"
                 if bfd.top_trader_long_short_ratio_positions: message += f"  - Top Trader Pos L/S: `{bfd.top_trader_long_short_ratio_positions:.3f}`\n"
                 
-                liq_sells = sum(float(o['origQty']) for o in bfd.liquidation_orders if o['side'] == 'SELL')
-                liq_buys = sum(float(o['origQty']) for o in bfd.liquidation_orders if o['side'] == 'BUY')
+                liq_sells = sum(float(o['origQty']) for o in (bfd.liquidation_orders or []) if o['side'] == 'SELL')
+                liq_buys = sum(float(o['origQty']) for o in (bfd.liquidation_orders or []) if o['side'] == 'BUY')
                 if liq_sells > 0 or liq_buys > 0: message += f"  - Liquidations (S/B): `{liq_sells:,.0f}` / `{liq_buys:,.0f}`\n"
             message += "\n"
 
         if signal.order_book:
             ob = signal.order_book
-            imbalance = ob.total_bid_volume / ob.total_ask_volume if ob.total_ask_volume > 0 else 1
+            imbalance = ob.total_bid_volume / ob.total_ask_volume if ob.total_ask_volume and ob.total_ask_volume > 0 else 1
             message += "📚 *Order Book (Top 100):*\n"
-            message += f"  - Bid/Ask Spread: `{ob.bid_ask_spread:.4f}`\n"
+            if ob.bid_ask_spread is not None: message += f"  - Bid/Ask Spread: `{ob.bid_ask_spread:.4f}`\n"
             message += f"  - Volume Imbalance (Bid/Ask): `{imbalance:.2f}`\n\n"
 
         if signal.macro_data:
@@ -253,10 +258,11 @@ class TradingBotService:
                 chat_id, text=escaped_message, parse_mode=ParseMode.MARKDOWN_V2
             )
         except BadRequest as e:
-            logger.error(f"Failed to send signal message for {signal.symbol}: {e}. Retrying without markdown.")
+            logger.error(f"Failed to send signal message for {signal.symbol} with MarkdownV2: {e}. Retrying without markdown.")
             try:
-                unescaped_text = re.sub(r'\\(.)', r'\1', escaped_message)
-                await self.telegram_app.bot.send_message(chat_id, text=unescaped_text, parse_mode=None)
+                # Fallback to plain text by removing markdown characters
+                plain_text = re.sub(r'([*_`\[\]\(\)~>#\+\-=\|{}\.!])', '', message)
+                await self.telegram_app.bot.send_message(chat_id, text=plain_text, parse_mode=None)
             except Exception as final_e:
                 logger.error(f"Failed to send signal message even without markdown: {final_e}")
 
@@ -267,31 +273,13 @@ class TelegramBotHandler:
         bot_token: str,
         config_manager: ConfigManager,
         trading_service: TradingBotService,
+        background_tasks: Set[asyncio.Task]
     ):
         self.bot_token = bot_token
         self.config_manager = config_manager
         self.trading_service = trading_service
-        self.application: Optional[Application] = None
-        self.background_tasks: Set[asyncio.Task] = set()
-
-    def create_application(self, background_tasks: Set[asyncio.Task]) -> Application:
+        self.application = self.trading_service.telegram_app
         self.background_tasks = background_tasks
-        app_builder = Application.builder().token(self.bot_token)
-        app_builder.connect_timeout(30).read_timeout(30).write_timeout(30)
-        self.application = app_builder.build()
-        self.trading_service.set_telegram_app(self.application)
-        self._register_handlers()
-        return self.application
-
-    async def initialize(self):
-        await self.trading_service.initialize()
-
-    async def cleanup(self):
-        await self.trading_service.cleanup()
-        for task in self.background_tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*self.background_tasks, return_exceptions=True)
 
     def _register_handlers(self):
         if not self.application:

@@ -10,10 +10,11 @@ import tensorflow as tf
 import xgboost as xgb
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau #type: ignore
-from tensorflow.keras.layers import LSTM, BatchNormalization, Dense, Dropout #type: ignore
-from tensorflow.keras.models import Sequential #type: ignore
-from tensorflow.keras.optimizers import Adam #type: ignore
+# Corrected imports for TensorFlow
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.layers import LSTM, BatchNormalization, Dense, Dropout
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.optimizers import Adam
 
 from module.logger_config import logger
 

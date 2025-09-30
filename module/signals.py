@@ -245,7 +245,8 @@ class SignalGenerator:
             if (is_buy and is_bullish) or (not is_buy and is_bearish):
                 points = (res.signal_strength / 100) * weight
             elif (is_buy and is_bearish) or (not is_buy and is_bullish):
-                points = - (res.signal_strength / 100) * weight * 1.2
+                # Reduced penalty for misaligned signals
+                points = - (res.signal_strength / 100) * weight * 1.0 
             if points != 0:
                 score += points
                 add_reason(res.name, res.interpretation, points, res.signal_strength)
@@ -274,14 +275,14 @@ class SignalGenerator:
             if derivatives.funding_rate:
                 weight = self.INDICATOR_WEIGHTS.get('funding_rate', 9)
                 total_weight += weight; fr = derivatives.funding_rate
-                if fr > 0.0005: points = weight * min(fr / 0.001, 1.0); score += -points if is_buy else points; add_reason("Funding", "High Positive", score-sum(p[2] for p in reasons))
-                elif fr < -0.0005: points = weight * min(abs(fr) / 0.001, 1.0); score += points if is_buy else -points; add_reason("Funding", "High Negative", score-sum(p[2] for p in reasons))
+                if fr > 0.0005: points = weight * min(fr / 0.001, 1.0); score += -points if is_buy else points; add_reason("Funding", "High Positive", -points if is_buy else points)
+                elif fr < -0.0005: points = weight * min(abs(fr) / 0.001, 1.0); score += points if is_buy else -points; add_reason("Funding", "High Negative", points if is_buy else -points)
             
             if derivatives.taker_long_short_ratio:
                 weight = self.INDICATOR_WEIGHTS.get('taker_ratio', 10)
                 total_weight += weight; ratio = derivatives.taker_long_short_ratio
-                if ratio > 1.1: points = weight * min((ratio - 1.0) * 2, 1.0); score += points if is_buy else -points*0.5; add_reason("Taker L/S", "Longs Dominate", score-sum(p[2] for p in reasons))
-                elif ratio < 0.9: points = weight * min((1.0 - ratio) * 2, 1.0); score += -points*0.5 if is_buy else points; add_reason("Taker L/S", "Shorts Dominate", score-sum(p[2] for p in reasons))
+                if ratio > 1.1: points = weight * min((ratio - 1.0) * 2, 1.0); score += points if is_buy else -points*0.5; add_reason("Taker L/S", "Longs Dominate", points if is_buy else -points*0.5)
+                elif ratio < 0.9: points = weight * min((1.0 - ratio) * 2, 1.0); score += -points*0.5 if is_buy else points; add_reason("Taker L/S", "Shorts Dominate", -points*0.5 if is_buy else points)
 
             if derivatives.binance_futures_data:
                 bfd = derivatives.binance_futures_data
@@ -289,31 +290,31 @@ class SignalGenerator:
                 total_weight += weight
                 avg_ratio = (bfd.top_trader_long_short_ratio_accounts + bfd.top_trader_long_short_ratio_positions) / 2 if bfd.top_trader_long_short_ratio_accounts and bfd.top_trader_long_short_ratio_positions else bfd.top_trader_long_short_ratio_accounts or bfd.top_trader_long_short_ratio_positions
                 if avg_ratio:
-                    if avg_ratio > 1.2: points = weight * min((avg_ratio - 1.0) * 1.5, 1.0); score += points if is_buy else -points; add_reason("TopTraders", "Bullish", score-sum(p[2] for p in reasons))
-                    elif avg_ratio < 0.8: points = weight * min((1.0 - avg_ratio) * 1.5, 1.0); score += -points if is_buy else points; add_reason("TopTraders", "Bearish", score-sum(p[2] for p in reasons))
+                    if avg_ratio > 1.2: points = weight * min((avg_ratio - 1.0) * 1.5, 1.0); score += points if is_buy else -points; add_reason("TopTraders", "Bullish", points if is_buy else -points)
+                    elif avg_ratio < 0.8: points = weight * min((1.0 - avg_ratio) * 1.5, 1.0); score += -points if is_buy else points; add_reason("TopTraders", "Bearish", -points if is_buy else points)
                 
                 if bfd.liquidation_orders:
                     weight = self.INDICATOR_WEIGHTS.get('liquidation', 10)
                     total_weight += weight
                     sells = sum(float(o['origQty']) for o in bfd.liquidation_orders if o['side'] == 'SELL')
                     buys = sum(float(o['origQty']) for o in bfd.liquidation_orders if o['side'] == 'BUY')
-                    if sells > buys * 2: points = weight * min(sells/(buys+1), 1.0); score += points if is_buy else -points; add_reason("Liqs", "Longs Liquidated", score-sum(p[2] for p in reasons))
-                    if buys > sells * 2: points = weight * min(buys/(sells+1), 1.0); score += -points if is_buy else points; add_reason("Liqs", "Shorts Liquidated", score-sum(p[2] for p in reasons))
+                    if sells > buys * 2: points = weight * min(sells/(buys+1), 1.0); score += points if is_buy else -points; add_reason("Liqs", "Longs Liquidated", points if is_buy else -points)
+                    if buys > sells * 2: points = weight * min(buys/(sells+1), 1.0); score += -points if is_buy else points; add_reason("Liqs", "Shorts Liquidated", -points if is_buy else points)
 
         order_book = context_data.get('order_book')
         if order_book and order_book.total_bid_volume and order_book.total_ask_volume > 0:
             weight = self.INDICATOR_WEIGHTS.get('order_book', 8)
             total_weight += weight
             imbalance = order_book.total_bid_volume / order_book.total_ask_volume
-            if imbalance > 1.5: points = weight * min((imbalance - 1.0), 1.0); score += points if is_buy else -points; add_reason("OrderBook", "Bid Wall", score-sum(p[2] for p in reasons))
-            elif imbalance < 0.66: points = weight * min((1.0/imbalance - 1.0), 1.0); score += -points if is_buy else points; add_reason("OrderBook", "Ask Wall", score-sum(p[2] for p in reasons))
+            if imbalance > 1.5: points = weight * min((imbalance - 1.0), 1.0); score += points if is_buy else -points; add_reason("OrderBook", "Bid Wall", points if is_buy else -points)
+            elif imbalance < 0.66: points = weight * min((1.0/imbalance - 1.0), 1.0); score += -points if is_buy else points; add_reason("OrderBook", "Ask Wall", -points if is_buy else points)
 
         fundamental = market_analysis.fundamental_analysis
         if fundamental and fundamental.developer_score > 0:
             weight = self.INDICATOR_WEIGHTS.get('fundamental', 10)
             total_weight += weight
             points = weight * min(fundamental.developer_score / 10000, 1.0)
-            if is_buy: score += points; add_reason("Dev Score", "Active", score-sum(p[2] for p in reasons))
+            if is_buy: score += points; add_reason("Dev Score", "Active", points)
 
         trending = context_data.get('trending_data')
         if trending and trending.coingecko_trending and symbol.split('/')[0] in trending.coingecko_trending[:5]:
@@ -397,14 +398,30 @@ class SignalGenerator:
         return signals
 
     async def _gather_context_data(self, symbol: str) -> Dict[str, Any]:
-        asset_name = symbol.split('/')[0].lower()
-        context_data = {}
         
+        COINGECKO_ID_MAP = {
+            'BTC': 'bitcoin', 'ETH': 'ethereum', 'SOL': 'solana', 'BNB': 'binancecoin',
+            'XRP': 'ripple', 'DOGE': 'dogecoin', 'AVAX': 'avalanche-2', 'ADA': 'cardano',
+            'TRX': 'tron', 'SHIB': 'shiba-inu', 'LTC': 'litecoin', 'LINK': 'chainlink',
+            'DOT': 'polkadot', 'SUI': 'sui', 'ASTR': 'astar', 'TON': 'the-open-network',
+            'PEPE': 'pepe', 'SEI': 'sei-network', 'ARB': 'arbitrum', 'FLOKI': 'floki',
+            'GRT': 'the-graph', 'GMX': 'gmx', 'AAVE': 'aave', 'XLM': 'stellar',
+            'CRV': 'curve-dao-token', 'INJ': 'injective-protocol', 'UNI': 'uniswap',
+            'ATOM': 'cosmos', 'ONDO': 'ondo-finance', 'ALGO': 'algorand'
+        }
+
+        asset_symbol = symbol.split('/')[0].upper()
+        coin_id = COINGECKO_ID_MAP.get(asset_symbol)
+
+        context_data = {}
         tasks = {}
         
         if self.market_indices_fetcher:
-            coin_id = asset_name.replace('/usdt', '').lower()
-            tasks['fundamental'] = self.market_indices_fetcher.get_fundamental_data(coin_id)
+            if coin_id:
+                tasks['fundamental'] = self.market_indices_fetcher.get_fundamental_data(coin_id)
+            else:
+                logger.warning(f"No CoinGecko ID found for symbol {asset_symbol}")
+
             tasks['cg_derivatives'] = self.market_indices_fetcher.get_coingecko_derivatives()
             tasks['trending'] = self.market_indices_fetcher.get_trending_searches()
             tasks['macro'] = self.market_indices_fetcher.get_macro_economic_data()
@@ -478,7 +495,7 @@ class SignalRanking:
             if signal.market_context:
                 mc = signal.market_context
                 is_aligned = (signal.signal_type == SignalType.BUY and mc.get('trend') == TrendDirection.BULLISH) or \
-                             (signal.signal_type == SignalType.SELL and mc.get('trend') == TrendDirection.BEARISH)
+                            (signal.signal_type == SignalType.SELL and mc.get('trend') == TrendDirection.BEARISH)
                 if is_aligned:
                     trend_bonus = 10
                     if mc.get('trend_strength') == TrendStrength.STRONG:

@@ -23,6 +23,8 @@ defillama_rate_limiter = RateLimiter(max_requests=30, time_window=60)
 
 
 class BinanceFetcher:
+    FUTURES_BLACKLIST = {'SHIBUSDT', 'PEPEUSDT', 'FLOKIUSDT', 'ASTRUSDT', 'ONDOUSDT'}
+
     def __init__(self, redis_client: Optional[redis.Redis] = None):
         self.base_url = "https://api.binance.com/api/v3"
         self.fapi_url = "https://fapi.binance.com/fapi/v1"
@@ -36,10 +38,14 @@ class BinanceFetcher:
         async with aiohttp.ClientSession() as session:
             async with session.get(full_url, params=params) as response:
                 if response.status == 400:
-                    error_data = await response.json()
-                    if error_data.get("code") == -1121 or "Invalid symbol" in error_data.get("msg", ""):
-                        logger.warning(f"Invalid symbol for Binance endpoint {endpoint}: {params.get('symbol')}")
-                        return None
+                    try:
+                        error_data = await response.json()
+                        if error_data.get("code") == -1121 or "Invalid symbol" in error_data.get("msg", ""):
+                            logger.warning(f"Invalid symbol for Binance endpoint {endpoint}: {params.get('symbol') if params else 'N/A'}")
+                            return None
+                    except (aiohttp.ContentTypeError, json.JSONDecodeError):
+                         logger.warning(f"Received status 400 with non-JSON body from {full_url}: {await response.text()}")
+
                 response.raise_for_status()
                 return await response.json()
 
@@ -71,13 +77,15 @@ class BinanceFetcher:
             return None
 
     async def get_open_interest(self, symbol: str) -> Optional[float]:
+        binance_symbol = symbol.replace('/', '').upper()
+        if binance_symbol in self.FUTURES_BLACKLIST: return None
+        
         cache_key = f"cache:binance:open_interest:{symbol}"
         if self.redis:
             cached = await self.redis.get(cache_key)
             if cached: return float(cached)
         
         try:
-            binance_symbol = symbol.replace('/', '').upper()
             params = {"symbol": binance_symbol}
             data = await self._fetch(self.fapi_url, "openInterest", params)
             if data and 'openInterest' in data:
@@ -91,16 +99,18 @@ class BinanceFetcher:
             return None
             
     async def get_funding_rate(self, symbol: str) -> Optional[float]:
+        binance_symbol = symbol.replace('/', '').upper()
+        if binance_symbol in self.FUTURES_BLACKLIST: return None
+        
         cache_key = f"cache:binance:funding_rate:{symbol}"
         if self.redis:
             cached = await self.redis.get(cache_key)
             if cached: return float(cached)
 
         try:
-            binance_symbol = symbol.replace('/', '').upper()
             params = {"symbol": binance_symbol, "limit": 1}
             data = await self._fetch(self.fapi_url, "fundingRate", params)
-            if data and isinstance(data, list) and data[0].get('fundingRate'):
+            if data and isinstance(data, list) and data and data[0].get('fundingRate'):
                 funding_rate = float(data[0]['fundingRate'])
                 if self.redis:
                     await self.redis.set(cache_key, funding_rate, ex=300)
@@ -111,16 +121,18 @@ class BinanceFetcher:
             return None
 
     async def get_taker_long_short_ratio(self, symbol: str) -> Optional[float]:
+        binance_symbol = symbol.replace('/', '').upper()
+        if binance_symbol in self.FUTURES_BLACKLIST: return None
+        
         cache_key = f"cache:binance:long_short_ratio:{symbol}"
         if self.redis:
             cached = await self.redis.get(cache_key)
             if cached: return float(cached)
 
         try:
-            binance_symbol = symbol.replace('/', '').upper()
             params = {"symbol": binance_symbol, "period": "5m", "limit": 1}
             data = await self._fetch(self.futures_data_url, "takerlongshortRatio", params)
-            if data and isinstance(data, list) and data[0].get('buySellRatio'):
+            if data and isinstance(data, list) and data and data[0].get('buySellRatio'):
                 ratio = float(data[0]['buySellRatio'])
                 if self.redis:
                     await self.redis.set(cache_key, ratio, ex=300)
@@ -131,11 +143,12 @@ class BinanceFetcher:
             return None
 
     async def get_top_trader_long_short_ratio_accounts(self, symbol: str) -> Optional[float]:
+        binance_symbol = symbol.replace('/', '').upper()
+        if binance_symbol in self.FUTURES_BLACKLIST: return None
         try:
-            binance_symbol = symbol.replace('/', '').upper()
             params = {"symbol": binance_symbol, "period": "5m", "limit": 1}
             data = await self._fetch(self.futures_data_url, "globalLongShortAccountRatio", params)
-            if data and isinstance(data, list) and data[0].get('longShortRatio'):
+            if data and isinstance(data, list) and data and data[0].get('longShortRatio'):
                 return float(data[0]['longShortRatio'])
             return None
         except Exception as e:
@@ -143,11 +156,12 @@ class BinanceFetcher:
             return None
 
     async def get_top_trader_long_short_ratio_positions(self, symbol: str) -> Optional[float]:
+        binance_symbol = symbol.replace('/', '').upper()
+        if binance_symbol in self.FUTURES_BLACKLIST: return None
         try:
-            binance_symbol = symbol.replace('/', '').upper()
             params = {"symbol": binance_symbol, "period": "5m", "limit": 1}
             data = await self._fetch(self.futures_data_url, "topLongShortPositionRatio", params)
-            if data and isinstance(data, list) and data[0].get('longShortRatio'):
+            if data and isinstance(data, list) and data and data[0].get('longShortRatio'):
                 return float(data[0]['longShortRatio'])
             return None
         except Exception as e:
@@ -155,14 +169,9 @@ class BinanceFetcher:
             return None
 
     async def get_liquidation_orders(self, symbol: str) -> Optional[List[Dict]]:
-        try:
-            binance_symbol = symbol.replace('/', '').upper()
-            params = {"symbol": binance_symbol, "limit": 10}
-            data = await self._fetch(self.fapi_url, "allForceOrders", params)
-            return data if data else None
-        except Exception as e:
-            logger.error(f"Error fetching liquidation orders from Binance for {symbol}: {e}")
-            return None
+        # This endpoint seems to be deprecated or unavailable, returning None to avoid errors.
+        logger.debug(f"Skipping get_liquidation_orders for {symbol} as the endpoint is likely deprecated.")
+        return None
 
     async def get_order_book_depth(self, symbol: str) -> Optional[OrderBook]:
         try:
@@ -186,8 +195,9 @@ class BinanceFetcher:
             return None
 
     async def get_mark_price(self, symbol: str) -> Optional[float]:
+        binance_symbol = symbol.replace('/', '').upper()
+        if binance_symbol in self.FUTURES_BLACKLIST: return None
         try:
-            binance_symbol = symbol.replace('/', '').upper()
             params = {"symbol": binance_symbol}
             data = await self._fetch(self.fapi_url, "premiumIndex", params)
             if data and 'markPrice' in data:
@@ -287,10 +297,14 @@ class MarketIndicesFetcher:
         
         effective_url = url
         if "coingecko.com" in url and self.coingecko_key:
-            if self.coingecko_key.startswith('CG-'):
+            # This logic is inverted: we assume a key is for the Pro API unless it starts with 'CG-',
+            # which is now the prefix for free/demo keys.
+            if not self.coingecko_key.startswith('CG-'):
                 effective_url = url.replace("https://api.coingecko.com", "https://pro-api.coingecko.com")
                 request_headers['x-cg-pro-api-key'] = self.coingecko_key
             else:
+                # This key is a free/demo key, so we ensure the public URL is used
+                # and pass the key as a parameter.
                 effective_url = url.replace("https://pro-api.coingecko.com", "https://api.coingecko.com")
                 request_params['x_cg_demo_api_key'] = self.coingecko_key
 
@@ -372,6 +386,8 @@ class MarketIndicesFetcher:
         return indices
         
     async def get_fundamental_data(self, coin_id: str) -> Optional[FundamentalAnalysis]:
+        if not coin_id:
+            return None
         cache_key = f"cache:coingecko_fundamental:{coin_id}"
         if self.redis:
             cached = await self.redis.get(cache_key)
