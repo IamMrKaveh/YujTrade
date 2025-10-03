@@ -78,8 +78,9 @@ class BacktestingEngine:
     def __init__(self, trading_service):
         self.trading_service = trading_service
         self.full_data = None
-        self.loop = asyncio.get_event_loop()
-        if self.loop.is_closed():
+        try:
+            self.loop = asyncio.get_running_loop()
+        except RuntimeError:
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
 
@@ -173,3 +174,4 @@ class BacktestingEngine:
             if trade_analysis.total.total > 0
             else 0,
         }
+        

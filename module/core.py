@@ -135,3 +135,4 @@ class TradingSignal:
     order_book: Optional[OrderBook] = None
     macro_data: Optional[MacroEconomicData] = None
     trending_data: Optional[TrendingData] = None
+    

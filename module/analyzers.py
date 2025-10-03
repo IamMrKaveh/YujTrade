@@ -2,18 +2,15 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
 import talib
 from scipy.signal import find_peaks
 
 from module.core import (
     MarketAnalysis,
     MarketCondition,
-    SignalType,
     TrendDirection,
     TrendStrength,
 )
-from module.indicators import RSIIndicator
 
 
 class PatternAnalyzer:
@@ -255,3 +252,4 @@ class VolumeAnalyzer:
         current_volume = data["volume"].iloc[-1]
         ratio = current_volume / volume_ma_20 if volume_ma_20 > 0 else 1
         return {"volume_ratio": ratio}
+    

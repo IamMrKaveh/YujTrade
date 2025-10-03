@@ -86,3 +86,4 @@ class HyperparameterOptimizer:
             logger.info(f"    {key}: {value}")
 
         return trial.params, trial.value
+    

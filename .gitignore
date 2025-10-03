@@ -8,6 +8,8 @@ Main/
 
 .vscode/
 
+MLM/*
+
 # TensorFlow model files
 *.h5
 *.pb

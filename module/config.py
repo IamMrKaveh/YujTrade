@@ -1,28 +1,27 @@
-import getpass
 import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from decouple import config as decouple_config
 
-from module.constants import SYMBOLS, TIME_FRAMES
+from module.constants import DEFAULT_INDICATOR_WEIGHTS, SYMBOLS, TIME_FRAMES
 from module.logger_config import logger
-from module.security import KeyEncryptor
+from module.security import KeyEncryptor, get_password_from_key_manager
 
 
 class Config:
-    ENCRYPTION_PASSWORD = decouple_config("ENCRYPTION_PASSWORD", default=None)
+    ENCRYPTION_PASSWORD = get_password_from_key_manager() or decouple_config("ENCRYPTION_PASSWORD", default=None)
 
     _encryptor = None
     if ENCRYPTION_PASSWORD:
         try:
             _encryptor = KeyEncryptor(ENCRYPTION_PASSWORD)
         except Exception:
-            logger.critical("Failed to create encryptor. Check your ENCRYPTION_PASSWORD.")
+            logger.critical("Failed to create encryptor. Check your ENCRYPTION_PASSWORD or key manager.")
             _encryptor = None
 
     @staticmethod
-    def get_secret(key: str) -> Optional[str]:
+    def get_secret(key: str, cast: type = str) -> Optional[Any]:
         encrypted_key = f"ENCRYPTED_{key}"
         value = decouple_config(encrypted_key, default=None)
         if value and Config._encryptor:
@@ -30,14 +29,17 @@ class Config:
             if not decrypted:
                 logger.error(f"Failed to decrypt {key}. Please re-encrypt your keys.")
                 return None
-            return decrypted
+            try:
+                return cast(decrypted)
+            except (ValueError, TypeError):
+                logger.error(f"Failed to cast decrypted key {key} to {cast}.")
+                return None
         
-        plain_value = decouple_config(key, default=None)
-        return plain_value if isinstance(plain_value, str) else None
+        return decouple_config(key, default=None, cast=cast)
 
 
     TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN")
-    TELEGRAM_CHAT_ID = get_secret("TELEGRAM_CHAT_ID")
+    ADMIN_CHAT_ID = get_secret("ADMIN_CHAT_ID")
     CRYPTOPANIC_KEY = get_secret("CRYPTOPANIC_KEY")
     ALPHA_VANTAGE_KEY = get_secret("ALPHA_VANTAGE_KEY")
     COINGECKO_KEY = get_secret("COINGECKO_KEY")
@@ -64,6 +66,8 @@ class ConfigManager:
         "enable_scheduled_analysis": True,
         "schedule_hour": "*/1",
         "app_version": "3.0.0",
+        "indicator_weights": DEFAULT_INDICATOR_WEIGHTS,
+        "timeframe_based_weights": True
     }
 
     def __init__(self, config_path: str = "config.json"):
@@ -71,13 +75,23 @@ class ConfigManager:
         self.config = self._load_config()
 
     def _load_config(self) -> Dict[str, Any]:
+        loaded_config = {}
         if self.config_path.exists():
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
-                    return {**self.DEFAULT_CONFIG, **json.load(f)}
+                    loaded_config = json.load(f)
             except Exception as e:
                 logger.warning(f"Error loading config: {e}. Using defaults.")
-        return self.DEFAULT_CONFIG.copy()
+        
+        final_config = {**self.DEFAULT_CONFIG, **loaded_config}
+        
+        if 'indicator_weights' in loaded_config:
+            final_config['indicator_weights'] = {
+                **self.DEFAULT_CONFIG['indicator_weights'], 
+                **loaded_config['indicator_weights']
+            }
+        
+        return final_config
 
     def save_config(self):
         try:
@@ -92,3 +106,10 @@ class ConfigManager:
     def set(self, key: str, value):
         self.config[key] = value
         self.save_config()
+        
+    def get_indicator_weights(self, timeframe: str) -> Dict[str, float]:
+        if self.config.get("timeframe_based_weights", False):
+            from module.constants import TIMEFRAME_BASED_INDICATOR_WEIGHTS
+            return TIMEFRAME_BASED_INDICATOR_WEIGHTS.get(timeframe, DEFAULT_INDICATOR_WEIGHTS)
+        return self.config.get("indicator_weights", DEFAULT_INDICATOR_WEIGHTS)
+

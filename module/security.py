@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import os
+from typing import Optional
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
@@ -59,7 +60,7 @@ class KeyEncryptor:
             return ""
         try:
             return self.fernet.decrypt(encrypted_data.encode()).decode()
-        except Exception as e:
+        except Exception:
             logger.error(f"Decryption failed for data. It might be invalid or corrupted.")
             return ""
 
@@ -76,3 +77,11 @@ def verify_hashed_data(stored_hash: str, provided_data: str) -> bool:
         return h == hashlib.pbkdf2_hmac("sha256", provided_data.encode(), salt.encode(), 100000).hex()
     except (ValueError, TypeError):
         return False
+
+def get_password_from_key_manager() -> Optional[str]:
+    password = os.environ.get("SECRET_ENCRYPTION_PASSWORD")
+    if password:
+        logger.info("Loaded encryption password from secure key manager (placeholder).")
+        return password
+    return None
+

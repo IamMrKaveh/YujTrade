@@ -2,16 +2,12 @@ import asyncio
 from typing import Set
 
 import redis.asyncio as redis
-from telegram.ext import Application
 
+from module.background_tasks import BackgroundTaskManager
 from module.config import Config, ConfigManager
-from module.data_sources import (BinanceFetcher, CoinDeskFetcher,
-                                 MarketIndicesFetcher, NewsFetcher)
 from module.logger_config import logger
-from module.lstm import LSTMModelManager
 from module.market import MarketDataProvider
-from module.signals import MultiTimeframeAnalyzer, SignalGenerator, SignalRanking
-from module.telegram import TradingBotService
+from module.trading_service import TradingService
 
 
 class TaskServiceContainer:
@@ -33,92 +29,85 @@ class TaskServiceContainer:
         logger.info("Initializing TaskServiceContainer...")
         self.config_manager = ConfigManager()
         self.bot_token = Config.TELEGRAM_BOT_TOKEN
-        self.background_tasks: Set[asyncio.Task] = set()
+        self.background_tasks = BackgroundTaskManager()
         
         if not self.bot_token:
             raise ValueError("TELEGRAM_BOT_TOKEN is not configured.")
 
         try:
-            self.redis_client = redis.Redis.from_url(f"rediss://default:{Config.REDIS_TOKEN}@{Config.REDIS_HOST}:{Config.REDIS_PORT}", decode_responses=True)
+            redis_pool = redis.ConnectionPool.from_url(
+                f"rediss://default:{Config.REDIS_TOKEN}@{Config.REDIS_HOST}:{Config.REDIS_PORT}",
+                decode_responses=True,
+                max_connections=20
+            )
+            self.redis_client = redis.Redis(connection_pool=redis_pool)
             await self.redis_client.ping()
-            logger.info("Task Service: Redis connection successful.")
+            logger.info("Task Service: Redis connection pool created successfully.")
         except Exception as e:
             logger.error(f"Task Service: Redis connection failed: {e}. Caching will be disabled.")
             self.redis_client = None
 
-        binance_fetcher = BinanceFetcher(redis_client=self.redis_client)
-        coindesk_fetcher = CoinDeskFetcher(api_key=Config.COINDESK_API_KEY, redis_client=self.redis_client) if Config.COINDESK_API_KEY else None
+        shared_session = None
 
+        from module.data_sources import BinanceFetcher
+        binance_fetcher = BinanceFetcher(
+            redis_client=self.redis_client,
+            session=shared_session
+        )
+
+        from module.data_sources import MarketIndicesFetcher
         market_indices_fetcher = MarketIndicesFetcher(
-            alpha_vantage_key=Config.ALPHA_VANTAGE_KEY,
-            coingecko_key=Config.COINGECKO_KEY,
-            redis_client=self.redis_client
+            redis_client=self.redis_client,
+            session=shared_session
         )
 
         self.market_data_provider = MarketDataProvider(
             redis_client=self.redis_client,
-            coindesk_fetcher=coindesk_fetcher,
             binance_fetcher=binance_fetcher,
-            market_indices_fetcher=market_indices_fetcher
-        )
-        
-        self.news_fetcher = NewsFetcher(Config.CRYPTOPANIC_KEY, coindesk_fetcher=coindesk_fetcher, redis_client=self.redis_client) if Config.CRYPTOPANIC_KEY else None
-        
-        self.lstm_manager = LSTMModelManager(model_path='MLM')
-        await self.lstm_manager.initialize_models()
-        
-        signal_generator = SignalGenerator(
-            market_data_provider=self.market_data_provider,
-            news_fetcher=self.news_fetcher,
             market_indices_fetcher=market_indices_fetcher,
-            lstm_model_manager=self.lstm_manager,
-            multi_tf_analyzer=None,
-            config=self.config_manager.config
+            session=shared_session
         )
         
-        multi_tf_analyzer = MultiTimeframeAnalyzer(self.market_data_provider, signal_generator.indicators)
-        signal_generator.multi_tf_analyzer = multi_tf_analyzer
-        
-        self.trading_service = TradingBotService(
-            config=self.config_manager,
+        self.trading_service = TradingService(
             market_data_provider=self.market_data_provider,
-            signal_generator=signal_generator,
-            signal_ranking=SignalRanking(),
+            config_manager=self.config_manager
         )
         
-        app_builder = Application.builder().token(self.bot_token)
-        app_builder.connect_timeout(30).read_timeout(30).write_timeout(30)
-        telegram_app = app_builder.build()
-        self.trading_service.set_telegram_app(telegram_app)
-        
-        logger.info("TaskServiceContainer initialized.")
-
+        logger.info("TaskServiceContainer initialized successfully.")
+    
     async def cleanup(self):
         logger.info("Cleaning up TaskServiceContainer...")
         
-        logger.info(f"Cancelling {len(self.background_tasks)} background tasks.")
-        for task in list(self.background_tasks):
-            if not task.done():
-                task.cancel()
         if self.background_tasks:
-            await asyncio.gather(*self.background_tasks, return_exceptions=True)
+            await self.background_tasks.cancel_all()
 
-        if self.lstm_manager:
-            self.lstm_manager.cleanup()
-        if self.redis_client:
-            await self.redis_client.aclose()
-        if self.market_data_provider:
-            await self.market_data_provider.close()
+        cleanup_tasks = []
         
-        logger.info("TaskServiceContainer cleaned up.")
+        if hasattr(self, 'trading_service') and self.trading_service:
+            cleanup_tasks.append(self.trading_service.cleanup())
+        
+        if hasattr(self, 'redis_client') and self.redis_client:
+            async def close_redis():
+                try:
+                    await self.redis_client.aclose()
+                    if hasattr(self.redis_client, 'connection_pool'):
+                        await self.redis_client.connection_pool.disconnect()
+                except Exception as e:
+                    logger.warning(f"Error closing Redis: {e}")
+            
+            cleanup_tasks.append(close_redis())
+        
+        await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+        
+        logger.info("TaskServiceContainer cleaned up successfully.")
 
 
 async def run_full_analysis_task(chat_id: int, message_id: int):
     try:
         logger.info(f"Task 'run_full_analysis_task' started for chat_id: {chat_id}")
         container = await TaskServiceContainer.instance()
-        await container.trading_service.run_comprehensive_analysis_task(chat_id, message_id)
-        logger.info(f"Task 'run_full_analysis_task' finished for chat_id: {chat_id}")
+        signals = await container.trading_service.run_analysis_for_all_symbols()
+        logger.info(f"Task 'run_full_analysis_task' finished for chat_id: {chat_id}. Generated {len(signals)} signals.")
     except Exception as e:
         logger.error(f"Error in run_full_analysis_task: {e}", exc_info=True)
 
@@ -127,8 +116,8 @@ async def run_quick_scan_task(chat_id: int, message_id: int):
     try:
         logger.info(f"Task 'run_quick_scan_task' started for chat_id: {chat_id}")
         container = await TaskServiceContainer.instance()
-        # The timeframe is now hardcoded as this task is specific to a quick scan
-        await container.trading_service.run_find_best_signals_task("1h", chat_id, message_id)
-        logger.info(f"Task 'run_quick_scan_task' finished for chat_id: {chat_id}")
+        signals = await container.trading_service.run_analysis_for_all_symbols()
+        logger.info(f"Task 'run_quick_scan_task' finished for chat_id: {chat_id}. Generated {len(signals)} signals.")
     except Exception as e:
         logger.error(f"Error in run_quick_scan_task: {e}", exc_info=True)
+
