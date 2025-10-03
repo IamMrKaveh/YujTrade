@@ -1,5 +1,6 @@
 import asyncio
 import os
+from collections import defaultdict
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -76,10 +77,10 @@ class TelegramBotHandler:
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         welcome_text = (
-            "Welcome to the Long-term Trading Signal Bot!\n\n"
+            "Welcome to the Long-term Trading Signal Bot! 🤖\n\n"
             "Choose your analysis type:\n"
-            "• *Quick Analyze*: Only 1h timeframe\n"
-            "• *Full Analyze*: All long-term timeframes (1h, 4h, 1d, 1w, 1M)"
+            "• *Quick Analyze*: Only 1h timeframe ⚡\n"
+            "• *Full Analyze*: All long-term timeframes (1h, 4h, 1d, 1w, 1M) 📊"
         )
         await update.message.reply_text(
             escape_markdown_v2(welcome_text),
@@ -99,7 +100,7 @@ class TelegramBotHandler:
 
     async def quick_analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
-        text = "Starting Quick Analyze (1h timeframe)..."
+        text = "Starting Quick Analyze (1h timeframe)... ⏳"
         await query.edit_message_text(escape_markdown_v2(text), parse_mode=ParseMode.MARKDOWN_V2)
 
         async def analysis_task():
@@ -115,15 +116,15 @@ class TelegramBotHandler:
             await self.send_signals_to_telegram(
                 signals,
                 str(query.message.chat_id),
-                "Quick Analyze completed.",
-                "No signals found on 1h timeframe.",
+                "✅ Quick Analyze completed.",
+                "🤷 No signals found on 1h timeframe.",
             )
 
         self.background_tasks.create_task(analysis_task())
 
     async def full_analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
-        text = "Starting Full Analyze (all timeframes)..."
+        text = "Starting Full Analyze (all timeframes)... ⏳"
         await query.edit_message_text(escape_markdown_v2(text), parse_mode=ParseMode.MARKDOWN_V2)
 
         async def analysis_task():
@@ -131,20 +132,20 @@ class TelegramBotHandler:
             await self.send_signals_to_telegram(
                 signals,
                 str(query.message.chat_id),
-                "Full Analyze completed.",
-                "No signals found across all timeframes.",
+                "✅ Full Analyze completed.",
+                "🤷 No signals found across all timeframes.",
             )
 
         self.background_tasks.create_task(analysis_task())
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if self._is_admin(update.effective_chat.id):
-            text = "Bot is operational."
+            text = "Bot is operational. ✅"
             await update.message.reply_text(escape_markdown_v2(text), parse_mode=ParseMode.MARKDOWN_V2)
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if self._is_admin(update.effective_chat.id):
-            text = "Please use /start to choose analysis type."
+            text = "Please use /start to choose analysis type. 🤖"
             await update.message.reply_text(escape_markdown_v2(text), parse_mode=ParseMode.MARKDOWN_V2)
 
     def _is_admin(self, chat_id: int) -> bool:
@@ -164,8 +165,8 @@ class TelegramBotHandler:
         await self.send_signals_to_telegram(
             signals,
             self.admin_chat_id,
-            "Scheduled analysis completed.",
-            "No new signals found from scheduled analysis.",
+            "Scheduled analysis completed. ⏰",
+            "No new signals found from scheduled analysis. 🤷",
         )
 
     async def send_signals_to_telegram(
@@ -178,14 +179,31 @@ class TelegramBotHandler:
         if not chat_id:
             logger.warning("Telegram chat ID not configured.")
             return
-        if signals:
-            summary = f"{summary_text} Found {len(signals)} signal(s)."
+
+        min_confidence = self.config_manager.get("min_confidence_score", 0)
+        max_signals_per_tf = self.config_manager.get("max_signals_per_timeframe", 1)
+
+        confident_signals = [s for s in signals if s.confidence_score >= min_confidence]
+
+        signals_by_timeframe = defaultdict(list)
+        for signal in confident_signals:
+            signals_by_timeframe[signal.timeframe].append(signal)
+
+        filtered_signals = []
+        for tf, tf_signals in signals_by_timeframe.items():
+            sorted_signals = sorted(tf_signals, key=lambda s: s.confidence_score, reverse=True)
+            filtered_signals.extend(sorted_signals[:max_signals_per_tf])
+        
+        filtered_signals.sort(key=lambda s: s.confidence_score, reverse=True)
+
+        if filtered_signals:
+            summary = f"{summary_text} Found {len(filtered_signals)} signal(s). 🎯"
             await self.application.bot.send_message(
                 chat_id,
                 escape_markdown_v2(summary),
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
-            for signal in signals:
+            for signal in filtered_signals:
                 message = self.format_signal_message(signal)
                 try:
                     await self.application.bot.send_message(chat_id, message, parse_mode=ParseMode.MARKDOWN_V2)
@@ -200,35 +218,43 @@ class TelegramBotHandler:
             )
 
     def format_signal_message(self, signal: TradingSignal) -> str:
-        signal_type = escape_markdown_v2(signal.signal_type.value.upper())
+        signal_type_str = signal.signal_type.value.upper()
+        signal_emoji = "📈" if signal_type_str == "BUY" else "📉"
+        signal_type = escape_markdown_v2(f"{signal_emoji} {signal_type_str}")
         symbol = escape_markdown_v2(signal.symbol)
         timeframe = escape_markdown_v2(signal.timeframe)
         header = f"*{signal_type} Signal for {symbol} on {timeframe}*"
+
         confidence_score_str = escape_markdown_v2(f"{signal.confidence_score:.2f}%")
         entry_price_str = escape_markdown_v2(f"{signal.entry_price:.4f}")
         exit_price_str = escape_markdown_v2(f"{signal.exit_price:.4f}")
         stop_loss_str = escape_markdown_v2(f"{signal.stop_loss:.4f}")
         risk_reward_ratio_str = escape_markdown_v2(f"{signal.risk_reward_ratio:.2f}")
+
         main_info = (
-            f"Confidence: `{confidence_score_str}`\n"
-            f"Entry: `{entry_price_str}`\n"
-            f"Take Profit: `{exit_price_str}`\n"
-            f"Stop Loss: `{stop_loss_str}`\n"
-            f"Risk/Reward Ratio: `{risk_reward_ratio_str}`"
+            f"🎯 Confidence: `{confidence_score_str}`\n"
+            f"➡️ Entry: `{entry_price_str}`\n"
+            f"✅ Take Profit: `{exit_price_str}`\n"
+            f"🛑 Stop Loss: `{stop_loss_str}`\n"
+            f"⚖️ Risk/Reward Ratio: `{risk_reward_ratio_str}`"
         )
+
         ctx = signal.market_context
         trend = escape_markdown_v2(str(ctx.get("trend", "N/A")))
         condition = escape_markdown_v2(str(ctx.get("market_condition", "N/A")))
         vol_trend = escape_markdown_v2(str(ctx.get("volume_trend", "N/A")))
         volatility_str = escape_markdown_v2(f"{ctx.get('volatility', 0):.2f}%")
+
         market_info = (
-            f"\n*Market Context:*\n"
+            f"\n*Market Context: 🌐*\n"
             f"Trend: `{trend}`\n"
             f"Condition: `{condition}`\n"
             f"Volatility: `{volatility_str}`\n"
             f"Volume Trend: `{vol_trend}`"
         )
+
         reasons_list = [f"• {escape_markdown_v2(r)}" for r in signal.reasons]
-        reasons = "\n*Analysis Reasons:*\n" + "\n".join(reasons_list)
+        reasons = "\n*Analysis Reasons: 🧠*\n" + "\n".join(reasons_list)
+
         return f"{header}\n\n{main_info}{market_info}{reasons}"
 
