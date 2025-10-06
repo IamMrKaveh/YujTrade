@@ -63,7 +63,7 @@ class ConfigManager:
         "timeframes": TIME_FRAMES,
         "min_confidence_score": 0,
         "max_signals_per_timeframe": 1,
-        "enable_scheduled_analysis": True,
+        "enable_scheduled_analysis": False,
         "schedule_hour": "*/1",
         "app_version": "3.0.0",
         "indicator_weights": DEFAULT_INDICATOR_WEIGHTS,

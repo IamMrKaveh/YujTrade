@@ -2348,10 +2348,18 @@ class PVIIndicator(TechnicalIndicator):
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
         try:
             pvi_series = ta.pvi(close=data['close'], volume=data['volume'])
-            if pvi_series is None or pvi_series.empty or pvi_series.isna().all() or len(pvi_series.dropna()) < 2:
+            if pvi_series is None or (isinstance(pvi_series, pd.Series) and pvi_series.empty):
+                return IndicatorResult(name="PVI", value=np.nan, signal_strength=np.nan, interpretation="insufficient_data")
+            
+            if isinstance(pvi_series, pd.DataFrame):
+                if pvi_series.empty:
+                    return IndicatorResult(name="PVI", value=np.nan, signal_strength=np.nan, interpretation="insufficient_data")
+                pvi_series = pvi_series.iloc[:, 0]
+            
+            valid_pvi = pvi_series.dropna()
+            if len(valid_pvi) < 2:
                 return IndicatorResult(name="PVI", value=np.nan, signal_strength=np.nan, interpretation="insufficient_data")
 
-            valid_pvi = pvi_series.dropna()
             current_value = float(valid_pvi.iloc[-1])
             previous_value = float(valid_pvi.iloc[-2])
 

@@ -225,11 +225,11 @@ class TelegramBotHandler:
         timeframe = escape_markdown_v2(signal.timeframe)
         header = f"*{signal_type} Signal for {symbol} on {timeframe}*"
 
-        confidence_score_str = escape_markdown_v2(f"{signal.confidence_score:.2f}%")
-        entry_price_str = escape_markdown_v2(f"{signal.entry_price:.4f}")
-        exit_price_str = escape_markdown_v2(f"{signal.exit_price:.4f}")
-        stop_loss_str = escape_markdown_v2(f"{signal.stop_loss:.4f}")
-        risk_reward_ratio_str = escape_markdown_v2(f"{signal.risk_reward_ratio:.2f}")
+        confidence_score_str = escape_markdown_v2(f"{signal.confidence_score:.4f}%")
+        entry_price_str = escape_markdown_v2(f"{signal.entry_price:.10f}")
+        exit_price_str = escape_markdown_v2(f"{signal.exit_price:.10f}")
+        stop_loss_str = escape_markdown_v2(f"{signal.stop_loss:.10f}")
+        risk_reward_ratio_str = escape_markdown_v2(f"{signal.risk_reward_ratio:.4f}")
 
         main_info = (
             f"🎯 Confidence: `{confidence_score_str}`\n"
@@ -257,4 +257,3 @@ class TelegramBotHandler:
         reasons = "\n*Analysis Reasons: 🧠*\n" + "\n".join(reasons_list)
 
         return f"{header}\n\n{main_info}{market_info}{reasons}"
-

@@ -13,7 +13,7 @@ from module.exceptions import APIRateLimitError, InvalidSymbolError, NetworkErro
 from module.logger_config import logger
 from module.utils import RateLimiter, async_retry
 
-coingecko_rate_limiter = RateLimiter(max_requests=45, time_window=60)
+coingecko_rate_limiter = RateLimiter(max_requests=30, time_window=60)
 alpha_vantage_rate_limiter = RateLimiter(max_requests=5, time_window=60)
 cryptopanic_rate_limiter = RateLimiter(max_requests=20, time_window=60)
 alternative_me_rate_limiter = RateLimiter(max_requests=20, time_window=60)
@@ -1245,7 +1245,27 @@ class CoinGeckoFetcher(BaseFetcher):
         'AVAX': 'avalanche-2',
         'ADA': 'cardano',
         'TRX': 'tron',
-        'SHIB': 'shiba-inu'
+        'SHIB': 'shiba-inu',
+        'LTC': 'litecoin',
+        'LINK': 'chainlink',
+        'DOT': 'polkadot',
+        'SUI': 'sui',
+        'ASTR': 'astar',
+        'TON': 'the-open-network',
+        'PEPE': 'pepe',
+        'SEI': 'sei-network',
+        'ARB': 'arbitrum',
+        'FLOKI': 'floki',
+        'GRT': 'the-graph',
+        'GMX': 'gmx',
+        'AAVE': 'aave',
+        'XLM': 'stellar',
+        'CRV': 'curve-dao-token',
+        'INJ': 'injective-protocol',
+        'UNI': 'uniswap',
+        'ATOM': 'cosmos',
+        'ONDO': 'ondo-finance',
+        'ALGO': 'algorand'
     }
 
     def __init__(self, api_key: Optional[str] = None, **kwargs):
@@ -1312,43 +1332,54 @@ class CoinGeckoFetcher(BaseFetcher):
             return None
         cache_key = f"cache:coingecko_fundamental:{coin_id}"
         if self.redis:
-            cached = await self.redis.get(cache_key)
-            if cached:
-                data = json.loads(cached)
-                return FundamentalAnalysis(**data)
+            try:
+                cached = await self.redis.get(cache_key)
+                if cached:
+                    data = json.loads(cached)
+                    return FundamentalAnalysis(**data)
+            except Exception as e:
+                logger.warning(f"Redis GET failed for {cache_key}: {e}")
 
-        url = f"{self.base_url}/coins/{coin_id}"
-        params = {
-            'localization': 'false', 
-            'tickers': 'false', 
-            'market_data': 'true', 
-            'community_data': 'true', 
-            'developer_data': 'true'
-        }
-        data = await self._fetch_json(url, params, limiter=coingecko_rate_limiter, endpoint_name=f"coins_{coin_id}_full")
+        try:
+            url = f"{self.base_url}/coins/{coin_id}"
+            params = {
+                'localization': 'false', 
+                'tickers': 'false', 
+                'market_data': 'true', 
+                'community_data': 'true', 
+                'developer_data': 'true'
+            }
+            data = await self._fetch_json(url, params, limiter=coingecko_rate_limiter, endpoint_name=f"coins_{coin_id}_full")
 
-        if not data:
+            if not data:
+                return None
+
+            market_data = data.get('market_data', {})
+            community_data = data.get('community_data', {})
+            developer_data = data.get('developer_data', {})
+
+            fundamental_data = FundamentalAnalysis(
+                market_cap=market_data.get('market_cap', {}).get('usd', 0.0),
+                total_volume=market_data.get('total_volume', {}).get('usd', 0.0),
+                developer_score=developer_data.get('pull_requests_merged', 0) * 0.4 + developer_data.get('stars', 0) * 0.6,
+                community_score=community_data.get('twitter_followers', 0)
+            )
+
+            if self.redis:
+                await self.redis.set(cache_key, json.dumps(fundamental_data.__dict__), ex=43200)
+
+            return fundamental_data
+        except Exception as e:
+            logger.warning(f"Could not fetch fundamental data for {coin_id}: {e}")
             return None
-
-        market_data = data.get('market_data', {})
-        community_data = data.get('community_data', {})
-        developer_data = data.get('developer_data', {})
-
-        fundamental_data = FundamentalAnalysis(
-            market_cap=market_data.get('market_cap', {}).get('usd', 0.0),
-            total_volume=market_data.get('total_volume', {}).get('usd', 0.0),
-            developer_score=developer_data.get('pull_requests_merged', 0) * 0.4 + developer_data.get('stars', 0) * 0.6,
-            community_score=community_data.get('twitter_followers', 0)
-        )
-
-        if self.redis:
-            await self.redis.set(cache_key, json.dumps(fundamental_data.__dict__), ex=43200)
-
-        return fundamental_data
     
     async def get_derivatives(self) -> Optional[list]:
-        url = f"{self.base_url}/derivatives"
-        return await self._fetch_json(url, limiter=coingecko_rate_limiter, endpoint_name="derivatives")
+        try:
+            url = f"{self.base_url}/derivatives"
+            return await self._fetch_json(url, limiter=coingecko_rate_limiter, endpoint_name="derivatives")
+        except Exception as e:
+            logger.warning(f"Could not fetch derivatives: {e}")
+            return None
 
     async def get_trending_searches(self) -> Optional[list]:
         url = f"{self.base_url}/search/trending"

@@ -81,7 +81,7 @@ class BaseModel:
         self.symbol = symbol
         self.timeframe = timeframe
         self.model_path = Path(model_path)
-        self.model_path.mkdir(exist_ok=True)
+        self.model_path.mkdir(parents=True, exist_ok=True)
         self.logger = logger
         self.feature_engineer = FeatureEngineer(get_all_indicators())
         self._is_closed = False
@@ -99,8 +99,10 @@ class BaseModel:
     def save_scaler(self, model_name: str):
         self._check_if_closed()
         _, scaler_file = self._get_model_paths(model_name, "")
+        scaler_file.parent.mkdir(parents=True, exist_ok=True)
         with open(scaler_file, 'wb') as f:
             pickle.dump(self.feature_engineer.scaler, f)
+        logger.debug(f"Scaler saved to {scaler_file}")
 
     def load_scaler(self, model_name: str) -> bool:
         self._check_if_closed()
@@ -108,6 +110,7 @@ class BaseModel:
         if scaler_file.exists():
             with open(scaler_file, 'rb') as f:
                 self.feature_engineer.scaler = pickle.load(f)
+            logger.debug(f"Scaler loaded from {scaler_file}")
             return True
         return False
 
@@ -261,8 +264,11 @@ class LSTMModel(BaseModel):
             raise ModelError("Cannot save a non-existent model.")
         try:
             model_file, _ = self._get_model_paths("lstm", "keras")
+            model_file.parent.mkdir(parents=True, exist_ok=True)
+            
             with managed_tf_session():
                 self.model.save(str(model_file))
+            
             self.save_scaler("lstm")
             self.logger.info(f"LSTM model for {self.symbol}-{self.timeframe} saved to {model_file}")
         except Exception as e:
@@ -355,7 +361,10 @@ class XGBoostModel(BaseModel):
         self._check_if_closed()
         try:
             model_file, _ = self._get_model_paths("xgboost", "json")
-            self.model.save_model(model_file)
+            model_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            self.model.save_model(str(model_file))
+            self.logger.info(f"XGBoost model for {self.symbol}-{self.timeframe} saved to {model_file}")
         except Exception as e:
             self.logger.error(f"Error saving XGBoost model: {e}")
             raise
@@ -364,8 +373,12 @@ class XGBoostModel(BaseModel):
         self._check_if_closed()
         try:
             model_file, _ = self._get_model_paths("xgboost", "json")
-            self.model.load_model(model_file)
+            if not model_file.exists():
+                raise ModelError(f"Model file not found at {model_file}")
+            
+            self.model.load_model(str(model_file))
             self.is_trained = True
+            self.logger.info(f"XGBoost model for {self.symbol}-{self.timeframe} loaded from {model_file}")
         except Exception as e:
             self.logger.error(f"Error loading XGBoost model: {e}")
             raise
@@ -374,7 +387,7 @@ class XGBoostModel(BaseModel):
 class ModelManager:
     def __init__(self, model_path: str = 'models', redis_client: Optional[redis.Redis] = None):
         self.model_path = Path(model_path)
-        self.model_path.mkdir(exist_ok=True)
+        self.model_path.mkdir(parents=True, exist_ok=True)
         self.redis_client = redis_client
         self._cache: Dict[str, 'BaseModel'] = {}
         self._lock = asyncio.Lock()
@@ -533,4 +546,3 @@ class ModelManager:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.shutdown()
         return False
-
