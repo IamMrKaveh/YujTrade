@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 import os
 from collections import defaultdict
 
@@ -117,7 +118,7 @@ class TelegramBotHandler:
                 signals,
                 str(query.message.chat_id),
                 "✅ Quick Analyze completed.",
-                "🤷 No signals found on 1h timeframe.",
+                "❌ No signals found on 1h timeframe.",
             )
 
         self.background_tasks.create_task(analysis_task())
@@ -133,7 +134,7 @@ class TelegramBotHandler:
                 signals,
                 str(query.message.chat_id),
                 "✅ Full Analyze completed.",
-                "🤷 No signals found across all timeframes.",
+                "❌ No signals found across all timeframes.",
             )
 
         self.background_tasks.create_task(analysis_task())
@@ -232,6 +233,7 @@ class TelegramBotHandler:
         risk_reward_ratio_str = escape_markdown_v2(f"{signal.risk_reward_ratio:.4f}")
 
         main_info = (
+            f" Date Created: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n"
             f"🎯 Confidence: `{confidence_score_str}`\n"
             f"➡️ Entry: `{entry_price_str}`\n"
             f"✅ Take Profit: `{exit_price_str}`\n"
