@@ -1,6 +1,7 @@
 # market.py
 
 import asyncio
+import io
 from typing import Optional, List, Union, Tuple
 
 import pandas as pd
@@ -109,7 +110,7 @@ class MarketDataProvider:
             try:
                 cached = await self.redis.get(cache_key)
                 if cached:
-                    df = pd.read_json(cached, orient="split")
+                    df = pd.read_json(io.StringIO(cached.decode('utf-8') if isinstance(cached, bytes) else cached), orient="split")
                     if 'timestamp' in df.columns:
                         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
                         df.set_index('timestamp', inplace=True)
