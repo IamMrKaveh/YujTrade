@@ -88,7 +88,7 @@ class FeatureEngineer:
             return None
         
         features_clean = features.replace([np.inf, -np.inf], np.nan)
-        features_clean = features_clean.fillna(method='ffill').fillna(method='bfill')
+        features_clean = features_clean.ffill().bfill()
         
         if features_clean.isnull().any().any():
             logger.warning("Features still contain NaN after cleaning")
@@ -105,9 +105,15 @@ class FeatureEngineer:
                     
                     if missing_cols or extra_cols:
                         logger.warning(f"Feature mismatch - Missing: {missing_cols}, Extra: {extra_cols}")
+                        # Add missing columns with zero values
                         for col in missing_cols:
                             features_clean[col] = 0
+                        # Reorder columns to match training feature order
                         features_clean = features_clean[self.feature_columns]
+                else:
+                    # If feature_columns is None, we cannot transform
+                    logger.error("Cannot scale features: scaler not fitted (feature_columns is None)")
+                    return None
                 
                 scaled = self.scaler.transform(features_clean)
             
@@ -299,10 +305,14 @@ class LSTMModel(BaseModel):
 
             final_val_loss = history.history.get('val_loss', [float('inf')])[-1]
             
+            # Dynamic convergence threshold based on price standard deviation
             price_std = data['close'].std()
-            loss_threshold = 0.1 * (price_std ** 2) if price_std > 0 else 0.5
+            # Use scaled threshold that's more lenient for high-volatility assets
+            # The threshold is based on normalized loss (as features are scaled 0-1)
+            # We use a factor of the variance to allow for reasonable error margins
+            dynamic_threshold = max(0.01, min(0.5, price_std / data['close'].mean())) if price_std > 0 else 0.1
 
-            if final_val_loss < loss_threshold * 10:
+            if final_val_loss < dynamic_threshold:
                 self.is_trained = True
                 self.last_training_date = pd.Timestamp.now(tz='UTC')
                 try:
@@ -719,11 +729,25 @@ class ModelManager:
         
         try:
             prediction_result = await self._run_in_executor(model.predict, data, executor_type='prediction')
-            if prediction_result is None or len(prediction_result) != 2:
+            
+            # Validate prediction_result structure
+            if prediction_result is None:
+                self.logger.debug(f"Prediction returned None for {model_type} on {symbol}-{timeframe}")
+                return None
+            
+            if not isinstance(prediction_result, tuple) or len(prediction_result) != 2:
+                self.logger.warning(f"Invalid prediction result format for {model_type} on {symbol}-{timeframe}: expected tuple of length 2, got {type(prediction_result)}")
                 return None
             
             prediction, uncertainty = prediction_result
-            if prediction is None or len(prediction) == 0:
+            
+            # Validate prediction array
+            if prediction is None:
+                self.logger.debug(f"Prediction array is None for {model_type} on {symbol}-{timeframe}")
+                return None
+                
+            if not hasattr(prediction, '__len__') or len(prediction) == 0:
+                self.logger.warning(f"Prediction array is empty for {model_type} on {symbol}-{timeframe}")
                 return None
             
             raw_confidence = 50.0
