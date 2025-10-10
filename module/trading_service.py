@@ -57,7 +57,7 @@ class TradingService:
                 redis_client=redis_client
             )
 
-        multi_tf_analyzer = MultiTimeframeAnalyzer(
+        self.multi_tf_analyzer = MultiTimeframeAnalyzer(
             market_data_provider=market_data_provider,
             indicators=indicators,
             redis_client=redis_client,
@@ -68,7 +68,7 @@ class TradingService:
             news_fetcher=news_fetcher,
             market_indices_fetcher=getattr(market_data_provider, 'market_indices_fetcher', None),
             model_manager=self.model_manager,
-            multi_tf_analyzer=multi_tf_analyzer,
+            multi_tf_analyzer=self.multi_tf_analyzer,
             config=config_manager.config,
             binance_fetcher=getattr(market_data_provider, 'binance_fetcher', None),
             messari_fetcher=None,
@@ -88,7 +88,15 @@ class TradingService:
             ohlcv_data = await self.market_data_provider.fetch_ohlcv_data(symbol, timeframe, limit=limit)
             
             signal = await self.analysis_engine.run_full_analysis(symbol, timeframe, ohlcv_data)
+
             if signal:
+                multi_tf_score, _, direction_conflict = await self.multi_tf_analyzer.get_confirmation_score(
+                    symbol, timeframe, signal.signal_type, ohlcv_data
+                )
+                if multi_tf_score < 0.3 or direction_conflict:
+                    logger.info(f"Signal for {symbol}-{timeframe} rejected due to multi-timeframe conflict.")
+                    return None
+
                 logger.info(f"Generated signal for {symbol} on {timeframe}: {signal.signal_type.value} with confidence {signal.confidence_score:.2f}")
                 return signal
 
@@ -96,6 +104,12 @@ class TradingService:
         except InvalidSymbolError:
             logger.warning(f"Symbol {symbol} is invalid. Adding to ignore list.")
             self.invalid_symbols.add(symbol)
+            return None
+        except KeyError as e:
+            logger.error(f"KeyError encountered while analyzing {symbol} on {timeframe}: {e}", exc_info=True)
+            return None
+        except ValueError as e:
+            logger.error(f"ValueError encountered while analyzing {symbol} on {timeframe}: {e}")
             return None
         except Exception as e:
             logger.error(f"Error analyzing {symbol} on {timeframe}: {e}", exc_info=True)

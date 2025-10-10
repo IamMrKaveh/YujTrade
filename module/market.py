@@ -1,3 +1,5 @@
+# market.py
+
 import asyncio
 from typing import Optional, List, Union, Tuple
 
@@ -78,9 +80,12 @@ class MarketDataProvider:
 
         score = 100.0
         
-        has_gaps, _ = self.data_quality_checker.detect_data_gaps(df)
-        if not has_gaps:
-            score -= 30.0
+        try:
+            no_gaps, _ = self.data_quality_checker.detect_data_gaps(df)
+            if no_gaps is False:
+                 score -= 30.0
+        except ValueError:
+            return 0.0
 
         if not self.data_quality_checker.check_sufficient_volume(df):
             score -= 20.0
@@ -108,7 +113,11 @@ class MarketDataProvider:
                     if 'timestamp' in df.columns:
                         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
                         df.set_index('timestamp', inplace=True)
-                    return df
+                    is_valid, _ = self.data_quality_checker.validate_data_quality(df, timeframe)
+                    if not is_valid:
+                        logger.debug(f"Cached data for {symbol}-{timeframe} is invalid, refetching")
+                    else:
+                        return df
             except Exception as e:
                 logger.warning(f"Redis GET failed for {cache_key}: {e}")
 
@@ -130,6 +139,16 @@ class MarketDataProvider:
             if isinstance(res_df, Exception) or res_df is None or res_df.empty:
                 logger.warning(f"Source {source_name} failed for {symbol}/{timeframe}: {res_df}")
                 continue
+
+            if isinstance(res_df.index, pd.DatetimeIndex):
+                res_df.index = res_df.index.tz_convert('UTC') if res_df.index.tz is not None else res_df.index.tz_localize('UTC')
+            else:
+                if 'timestamp' in res_df.columns:
+                    res_df['timestamp'] = pd.to_datetime(res_df['timestamp'], unit='ms', utc=True)
+                    res_df.set_index('timestamp', inplace=True)
+                else:
+                    logger.warning(f"No timestamp column in data from {source_name}, skipping")
+                    continue
 
             score = self._get_data_quality_score(res_df, timeframe)
             logger.debug(f"Data quality score for {symbol}/{timeframe} from {source_name}: {score:.2f}")

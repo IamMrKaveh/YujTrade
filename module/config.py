@@ -1,10 +1,12 @@
+# config.py
+
 import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from decouple import config as decouple_config
 
-from .constants import DEFAULT_INDICATOR_WEIGHTS, SYMBOLS, TIME_FRAMES
+from .constants import DEFAULT_INDICATOR_WEIGHTS, SYMBOLS, TIME_FRAMES, TIMEFRAME_BASED_INDICATOR_WEIGHTS
 from .logger_config import logger
 from .security import KeyEncryptor, get_password_from_key_manager
 
@@ -63,9 +65,14 @@ class ConfigManager:
         "max_signals_per_timeframe": 1,
         "enable_scheduled_analysis": False,
         "schedule_hour": "*/1",
-        "app_version": "4.0.0",
+        "app_version": "4.1.0",
         "indicator_weights": DEFAULT_INDICATOR_WEIGHTS,
-        "timeframe_based_weights": True
+        "timeframe_based_weights": True,
+        "soft_group_weights": {
+            'momentum': 25, 'trend': 25, 'volatility': 25, 'volume': 25
+        },
+        "unanimity_threshold": 0.9,
+        "current_timeframe": "1d"
     }
 
     def __init__(self, config_path: str = "config.json"):
@@ -106,8 +113,6 @@ class ConfigManager:
         self.save_config()
         
     def get_indicator_weights(self, timeframe: str) -> Dict[str, float]:
-        if self.config.get("timeframe_based_weights", False):
-            from module.constants import TIMEFRAME_BASED_INDICATOR_WEIGHTS
+        if self.get("timeframe_based_weights", True):
             return TIMEFRAME_BASED_INDICATOR_WEIGHTS.get(timeframe, DEFAULT_INDICATOR_WEIGHTS)
-        return self.config.get("indicator_weights", DEFAULT_INDICATOR_WEIGHTS)
-
+        return self.get("indicator_weights", DEFAULT_INDICATOR_WEIGHTS)

@@ -216,7 +216,7 @@ class TRIXIndicator(TechnicalIndicator):
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
         trix_series = trix(close=data['close'], length=self.period)
         if trix_series is None or trix_series.empty:
-            return IndicatorResult(name="TRIX", value=np.nan, signal_strength=npnan, interpretation="insufficient_data")
+            return IndicatorResult(name="TRIX", value=np.nan, signal_strength=np.nan, interpretation="insufficient_data")
         
         if isinstance(trix_series, pd.DataFrame):
             if trix_series.iloc[-1].isna().any():
@@ -253,12 +253,12 @@ class StochRSIIndicator(TechnicalIndicator):
         current_d = float(stochrsi_df.iloc[-1, 1])
         avg_stochrsi = (current_k + current_d) / 2
 
-        if avg_stochrsi > 0.8:
+        if avg_stochrsi > 80:
             interpretation = "overbought"
-            signal_strength = min((avg_stochrsi - 0.8) / 0.2 * 100, 100)
-        elif avg_stochrsi < 0.2:
+            signal_strength = min((avg_stochrsi - 80) / 20 * 100, 100)
+        elif avg_stochrsi < 20:
             interpretation = "oversold"
-            signal_strength = min((0.2 - avg_stochrsi) / 0.2 * 100, 100)
+            signal_strength = min((20 - avg_stochrsi) / 20 * 100, 100)
         else:
             interpretation = "neutral"
             signal_strength = 50.0
@@ -490,44 +490,29 @@ class QQEIndicator(TechnicalIndicator):
         self.wilders_period = wilders_period
 
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        if len(data) < max(self.rsi_period, self.wilders_period):
-            return IndicatorResult(name="QQE", value=np.nan, signal_strength=np.nan, interpretation="insufficient_data")
-        
-        rsi_series = talib.RSI(data['close'].to_numpy(dtype=np.float64), timeperiod=self.rsi_period)
-        if rsi_series.size == 0 or pd.isna(rsi_series[-1]):
-            return IndicatorResult(name="QQE", value=np.nan, signal_strength=np.nan, interpretation="insufficient_data")
+        try:
+            qqe_df = ta.qqe(close=data['close'], length=self.rsi_period, smooth=self.sf, factor=self.wilders_period)
+            if qqe_df is None or qqe_df.empty or qqe_df.iloc[-1].isna().any():
+                return IndicatorResult(name="QQE", value=np.nan, signal_strength=np.nan, interpretation="insufficient_data")
 
-        rsi_ma = talib.EMA(rsi_series, timeperiod=self.sf)
-        
-        if rsi_ma.size < 2:
-            return IndicatorResult(name="QQE", value=np.nan, signal_strength=np.nan, interpretation="insufficient_data")
-        
-        atr_rsi = np.abs(np.diff(rsi_series))
-        ma_atr_rsi = talib.EMA(np.concatenate([[0], atr_rsi]), timeperiod=self.wilders_period)
-        
-        if ma_atr_rsi.size == 0 or pd.isna(ma_atr_rsi[-1]):
-            return IndicatorResult(name="QQE", value=np.nan, signal_strength=np.nan, interpretation="insufficient_data")
-        
-        dar = ma_atr_rsi * 4.236
-        
-        current_rsi = float(rsi_series[-1])
-        current_rsi_ma = float(rsi_ma[-1])
-        current_dar = float(dar[-1])
-        
-        upper_band = current_rsi_ma + current_dar
-        lower_band = current_rsi_ma - current_dar
-        
-        if current_rsi > upper_band:
-            interpretation = "overbought"
-            strength = min((current_rsi - 50) * 2, 100.0)
-        elif current_rsi < lower_band:
-            interpretation = "oversold"
-            strength = min((50 - current_rsi) * 2, 100.0)
-        else:
-            interpretation = "neutral"
-            strength = 50.0
+            qqe_line = float(qqe_df.iloc[-1, 0])
+            rsi_ma = float(qqe_df.iloc[-1, 1])
+            
+            if qqe_line > rsi_ma:
+                interpretation = "bullish"
+                strength = min((qqe_line - 50) * 2, 100.0) if qqe_line > 50 else 50.0
+            elif qqe_line < rsi_ma:
+                interpretation = "bearish"
+                strength = min((50 - qqe_line) * 2, 100.0) if qqe_line < 50 else 50.0
+            else:
+                interpretation = "neutral"
+                strength = 50.0
 
-        return IndicatorResult(name="QQE", value=current_rsi, signal_strength=float(strength), interpretation=interpretation)
+            return IndicatorResult(name="QQE", value=qqe_line, signal_strength=strength, interpretation=interpretation)
+        except Exception as e:
+            from ..logger_config import logger
+            logger.warning(f"Error calculating QQE: {e}")
+            return IndicatorResult(name="QQE", value=np.nan, signal_strength=np.nan, interpretation="insufficient_data")
 
 
 class ConnorsRSIIndicator(TechnicalIndicator):

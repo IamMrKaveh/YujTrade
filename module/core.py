@@ -51,6 +51,7 @@ class OnChainAnalysis:
     active_addresses: Optional[int] = None
     realized_cap: Optional[float] = None
 
+
 @dataclass
 class OrderBook:
     bids: List[Tuple[float, float]] = field(default_factory=list)
@@ -59,12 +60,14 @@ class OrderBook:
     total_bid_volume: Optional[float] = None
     total_ask_volume: Optional[float] = None
 
+
 @dataclass
 class BinanceFuturesData:
     top_trader_long_short_ratio_accounts: Optional[float] = None
     top_trader_long_short_ratio_positions: Optional[float] = None
     liquidation_orders: List[Dict[str, Any]] = field(default_factory=list)
     mark_price: Optional[float] = None
+
 
 @dataclass
 class DerivativesAnalysis:
@@ -73,6 +76,8 @@ class DerivativesAnalysis:
     taker_long_short_ratio: Optional[float] = None
     coingecko_derivatives: List[Dict[str, Any]] = field(default_factory=list)
     binance_futures_data: Optional[BinanceFuturesData] = None
+    cumulative_funding_rate: Optional[float] = None
+
 
 @dataclass
 class MacroEconomicData:
@@ -82,9 +87,11 @@ class MacroEconomicData:
     gdp: Optional[float] = None
     unemployment: Optional[float] = None
 
+
 @dataclass
 class TrendingData:
     coingecko_trending: List[str] = field(default_factory=list)
+
 
 @dataclass
 class MarketAnalysis:
@@ -99,6 +106,9 @@ class MarketAnalysis:
     trend_acceleration: float
     volume_confirmation: bool
     hurst_exponent: Optional[float] = None
+    volume_trend_score: Optional[float] = None
+    adx: Optional[float] = None
+
 
 @dataclass
 class DynamicLevels:
@@ -134,3 +144,7 @@ class TradingSignal:
     order_book: Optional[OrderBook] = None
     macro_data: Optional[MacroEconomicData] = None
     trending_data: Optional[TrendingData] = None
+    expiry_time: Optional[datetime] = None
+    position_size: Optional[float] = None
+    data_collection_timestamp: Optional[datetime] = None
+    analysis_timestamp: Optional[datetime] = None

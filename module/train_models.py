@@ -41,10 +41,10 @@ class ModelTrainer:
 
             logger.info(f"Training {model_type} model for {symbol}-{timeframe}...")
             
-            is_trained = await self.model_manager._run_in_executor(model.fit, data)
+            is_trained = await self.model_manager._run_in_executor(model.fit, data, executor_type='training')
 
             if is_trained:
-                await self.model_manager._run_in_executor(model.save)
+                # The save logic is now inside the fit method of each model
                 logger.info(f"✅ Successfully trained and saved {model_type} model for {symbol}-{timeframe}")
             else:
                 logger.error(f"❌ Failed to train model for {symbol}-{timeframe} ({model_type}).")

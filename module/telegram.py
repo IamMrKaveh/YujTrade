@@ -121,7 +121,7 @@ class TelegramBotHandler:
                 "❌ No signals found on 1h timeframe.",
             )
 
-        self.background_tasks.create_task(analysis_task())
+        self.background_tasks.create_task(analysis_task(), name=f"QuickAnalyze-{query.message.chat_id}")
 
     async def full_analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -137,7 +137,7 @@ class TelegramBotHandler:
                 "❌ No signals found across all timeframes.",
             )
 
-        self.background_tasks.create_task(analysis_task())
+        self.background_tasks.create_task(analysis_task(), name=f"FullAnalyze-{query.message.chat_id}")
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if self._is_admin(update.effective_chat.id):
@@ -257,8 +257,8 @@ class TelegramBotHandler:
         trend_strength = escape_markdown_v2(str(ctx.get("trend_strength", "N/A")))
         condition = escape_markdown_v2(str(ctx.get("market_condition", "N/A")))
         volatility_str = escape_markdown_v2(f"{ctx.get('volatility', 0):.2f}")
-        support_str = escape_markdown_v2(f"{ctx.get('support', 0):.8f}")
-        resistance_str = escape_markdown_v2(f"{ctx.get('resistance', 0):.8f}")
+        support_str = escape_markdown_v2(f"{ctx.get('support_levels', [0])[0]:.8f}" if ctx.get('support_levels') else 'N/A')
+        resistance_str = escape_markdown_v2(f"{ctx.get('resistance_levels', [0])[0]:.8f}" if ctx.get('resistance_levels') else 'N/A')
 
         market_info = (
             f"*📊 MARKET CONTEXT*\n"
@@ -401,20 +401,20 @@ class TelegramBotHandler:
         reasons_list = []
         for r in top_reasons:
             try:
-                parts = r.split('->')
-                if len(parts) == 2:
-                    indicator_part = parts[0].strip()
-                    points_part = parts[1].strip()
-                    points_value = float(points_part.replace('pts', '').strip())
+                parts = r.split('(Score:')
+                reason_text = parts[0].strip()
+                if len(parts) > 1:
+                    score_part = parts[1].replace(')', '').strip()
+                    score_value = float(score_part)
                     
-                    if points_value > 0:
+                    if score_value > 0:
                         emoji = "✅"
-                    elif points_value < 0:
+                    elif score_value < 0:
                         emoji = "❌"
                     else:
                         emoji = "➖"
                     
-                    escaped_reason = escape_markdown_v2(r)
+                    escaped_reason = escape_markdown_v2(f"{reason_text} (Score: {score_value:.2f})")
                     reasons_list.append(f"{emoji} {escaped_reason}")
                 else:
                     reasons_list.append(f"• {escape_markdown_v2(r)}")

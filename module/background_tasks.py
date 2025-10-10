@@ -1,5 +1,5 @@
 import asyncio
-from typing import Set
+from typing import Set, Coroutine
 
 from .logger_config import logger
 
@@ -13,17 +13,19 @@ class BackgroundTaskManager:
         try:
             task.result()
         except asyncio.CancelledError:
+            # Log cancellation at a lower level to avoid cluttering the main log
             logger.debug(f"Task {task.get_name()} was cancelled.")
         except Exception as e:
             logger.error(f"Task {task.get_name()} failed with an exception:", exc_info=e)
         else:
             logger.info(f"Task {task.get_name()} completed successfully. {len(self._tasks)} tasks remaining.")
 
-    def create_task(self, coro):
-        task = asyncio.create_task(coro)
+    def create_task(self, coro: Coroutine, name: str = None) -> asyncio.Task:
+        """Creates a background task with an optional name for better logging."""
+        task = asyncio.create_task(coro, name=name)
         self._tasks.add(task)
         task.add_done_callback(self._log_task_completion)
-        logger.info(f"Task {task.get_name()} started. {len(self._tasks)} tasks running.")
+        logger.info(f"Task '{task.get_name()}' started. {len(self._tasks)} tasks running.")
         return task
 
     async def cancel_all(self):

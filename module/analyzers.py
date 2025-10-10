@@ -1,3 +1,5 @@
+# analyzers.py
+
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -89,17 +91,77 @@ class PatternAnalyzer:
         cl = data["close"].to_numpy(dtype=np.float64)
 
         detected_patterns = []
+        pattern_scores = {}
+        
         for pattern_func_name, pattern_desc in PatternAnalyzer.CANDLE_PATTERNS.items():
             try:
                 pattern_func = getattr(talib, pattern_func_name)
                 result = pattern_func(op, hi, lo, cl)
                 if result[-1] != 0:
                     direction = "bullish" if result[-1] > 0 else "bearish"
-                    detected_patterns.append(f"{pattern_desc} ({direction})")
+                    pattern_name = f"{pattern_desc} ({direction})"
+                    
+                    context_score = PatternAnalyzer._analyze_pattern_context(data, direction, pattern_desc)
+                    
+                    pattern_scores[pattern_name] = context_score
+                    
             except Exception:
                 continue
         
+        sorted_patterns = sorted(pattern_scores.items(), key=lambda x: x[1], reverse=True)
+        detected_patterns = [pattern for pattern, score in sorted_patterns if score > 0.5]
+        
         return detected_patterns
+
+    @staticmethod
+    def _analyze_pattern_context(data: pd.DataFrame, direction: str, pattern_name: str) -> float:
+        score = 1.0
+        
+        if len(data) < 20:
+            return score
+        
+        sma_20 = data['close'].rolling(20).mean()
+        current_trend = "bullish" if data['close'].iloc[-1] > sma_20.iloc[-1] else "bearish"
+        
+        reversal_patterns = ['Hammer', 'Hanging Man', 'Inverted Hammer', 'Shooting Star', 
+                            'Morning Star', 'Evening Star', 'Engulfing Pattern']
+        is_reversal = any(rev in pattern_name for rev in reversal_patterns)
+        
+        if is_reversal:
+            if (direction == "bullish" and current_trend == "bearish") or \
+               (direction == "bearish" and current_trend == "bullish"):
+                score *= 1.5
+            else:
+                score *= 0.7
+        else:
+            if direction == current_trend:
+                score *= 1.3
+            else:
+                score *= 0.8
+        
+        if 'volume' in data.columns and len(data) >= 20:
+            avg_volume = data['volume'].iloc[-20:-1].mean()
+            current_volume = data['volume'].iloc[-1]
+            if current_volume > avg_volume * 1.5:
+                score *= 1.2
+            elif current_volume < avg_volume * 0.7:
+                score *= 0.8
+        
+        recent_high = data['high'].iloc[-20:].max()
+        recent_low = data['low'].iloc[-20:].min()
+        current_price = data['close'].iloc[-1]
+        
+        price_range = recent_high - recent_low
+        if price_range > 0:
+            distance_from_high = (recent_high - current_price) / price_range
+            distance_from_low = (current_price - recent_low) / price_range
+            
+            if direction == "bullish" and distance_from_low < 0.2:
+                score *= 1.3
+            elif direction == "bearish" and distance_from_high < 0.2:
+                score *= 1.3
+        
+        return score
 
     @staticmethod
     def detect_divergence(data: pd.DataFrame, indicator: pd.Series, window=14) -> List[str]:
@@ -115,17 +177,42 @@ class PatternAnalyzer:
         if len(price_low_peaks) >= 2:
             last_peak_idx = price_low_peaks[-1]
             prev_peak_idx = price_low_peaks[-2]
+            
             if lows[last_peak_idx] > lows[prev_peak_idx] and indicator_vals[last_peak_idx] < indicator_vals[prev_peak_idx]:
-                patterns.append("bullish_divergence")
+                strength = abs(lows[last_peak_idx] - lows[prev_peak_idx]) / lows[prev_peak_idx]
+                if strength > 0.02:
+                    patterns.append("bullish_divergence_A")
+                else:
+                    patterns.append("bullish_divergence_B")
 
         price_high_peaks, _ = find_peaks(highs, distance=window//2)
         if len(price_high_peaks) >= 2:
             last_peak_idx = price_high_peaks[-1]
             prev_peak_idx = price_high_peaks[-2]
+            
             if highs[last_peak_idx] < highs[prev_peak_idx] and indicator_vals[last_peak_idx] > indicator_vals[prev_peak_idx]:
-                patterns.append("bearish_divergence")
+                strength = abs(highs[last_peak_idx] - highs[prev_peak_idx]) / highs[prev_peak_idx]
+                if strength > 0.02:
+                    patterns.append("bearish_divergence_A")
+                else:
+                    patterns.append("bearish_divergence_B")
+        
+        if len(price_low_peaks) >= 2:
+            last_peak_idx = price_low_peaks[-1]
+            prev_peak_idx = price_low_peaks[-2]
+            
+            if lows[last_peak_idx] < lows[prev_peak_idx] and indicator_vals[last_peak_idx] < indicator_vals[prev_peak_idx]:
+                patterns.append("hidden_bullish_divergence")
+
+        if len(price_high_peaks) >= 2:
+            last_peak_idx = price_high_peaks[-1]
+            prev_peak_idx = price_high_peaks[-2]
+            
+            if highs[last_peak_idx] > highs[prev_peak_idx] and indicator_vals[last_peak_idx] > indicator_vals[prev_peak_idx]:
+                patterns.append("hidden_bearish_divergence")
                 
         return patterns
+
 
 class MarketConditionAnalyzer:
     def __init__(self):
@@ -139,9 +226,20 @@ class MarketConditionAnalyzer:
         hurst = self._calculate_hurst_exponent(data["close"])
 
         volume_analysis = self.volume_analyzer.analyze_volume_pattern(data)
-        volume_trend = "increasing" if volume_analysis.get("volume_ratio", 1) > 1.1 else "decreasing"
+        volume_ratio = volume_analysis.get("volume_ratio", 1.0)
+        volume_trend = "increasing" if volume_ratio > 1.1 else "decreasing"
         volume_confirmation = (trend == TrendDirection.BULLISH and volume_trend == "increasing") or \
                               (trend == TrendDirection.BEARISH and volume_trend == "increasing")
+
+        volume_trend_score = None
+        if volume_ratio > 1.5:
+            volume_trend_score = 0.5 if trend == TrendDirection.BULLISH else -0.3
+        elif volume_ratio > 1.2:
+            volume_trend_score = 0.3 if trend == TrendDirection.BULLISH else -0.2
+        elif volume_ratio < 0.8:
+            volume_trend_score = -0.2 if trend == TrendDirection.BULLISH else 0.2
+        else:
+            volume_trend_score = 0.0
 
         rsi_values = talib.RSI(data["close"].to_numpy(), timeperiod=14)
         market_condition = MarketCondition.NEUTRAL
@@ -167,6 +265,8 @@ class MarketConditionAnalyzer:
             market_condition=market_condition,
             trend_acceleration=trend_acceleration,
             volume_confirmation=volume_confirmation,
+            volume_trend_score=volume_trend_score,
+            adx=self._calculate_adx(data),
             **kwargs,
         )
 
@@ -223,7 +323,6 @@ class MarketConditionAnalyzer:
         except (ValueError, np.linalg.LinAlgError):
             return None
 
-
     def _calculate_support_resistance(self, data: pd.DataFrame, window: int = 50, prominence_factor: float = 0.02) -> Tuple[Optional[float], Optional[float]]:
         if len(data) < window:
             return (None, None)
@@ -231,11 +330,29 @@ class MarketConditionAnalyzer:
         recent_data = data.tail(window)
         required_prominence = (recent_data['high'].max() - recent_data['low'].min()) * prominence_factor
 
-        low_peaks, _ = find_peaks(-recent_data['low'], prominence=required_prominence)
-        high_peaks, _ = find_peaks(recent_data['high'], prominence=required_prominence)
+        low_peaks, _ = find_peaks(-recent_data['low'].to_numpy(), prominence=required_prominence)
+        high_peaks, _ = find_peaks(recent_data['high'].to_numpy(), prominence=required_prominence)
 
-        support = recent_data['low'].iloc[low_peaks].mean() if len(low_peaks) > 0 else None
-        resistance = recent_data['high'].iloc[high_peaks].mean() if len(high_peaks) > 0 else None
+        support = None
+        resistance = None
+
+        if len(low_peaks) > 0:
+            support_prices = recent_data['low'].iloc[low_peaks]
+            recent_close = data['close'].iloc[-1]
+            support_candidates = support_prices[support_prices < recent_close]
+            if not support_candidates.empty:
+                support = support_candidates.max()
+            else:
+                support = support_prices.mean()
+
+        if len(high_peaks) > 0:
+            resistance_prices = recent_data['high'].iloc[high_peaks]
+            recent_close = data['close'].iloc[-1]
+            resistance_candidates = resistance_prices[resistance_prices > recent_close]
+            if not resistance_candidates.empty:
+                resistance = resistance_candidates.min()
+            else:
+                resistance = resistance_prices.mean()
         
         return support, resistance
 
@@ -247,6 +364,13 @@ class MarketConditionAnalyzer:
             return 0.0
         accel = mom[-1] - mom[-2]
         return accel if not pd.isna(accel) else 0.0
+
+    def _calculate_adx(self, data: pd.DataFrame) -> float:
+        if len(data) < 28:
+            return 25.0
+        adx = talib.ADX(data["high"].to_numpy(), data["low"].to_numpy(), data["close"].to_numpy(), timeperiod=14)
+        adx_val = adx[-1] if adx.size > 0 and not pd.isna(adx[-1]) else 25.0
+        return adx_val
 
 
 class VolumeAnalyzer:

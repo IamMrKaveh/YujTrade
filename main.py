@@ -78,11 +78,17 @@ def initialize_scheduler(config_manager: ConfigManager, bot_handler: TelegramBot
 async def main():
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+    
+    # Capture the main task to cancel it gracefully
+    main_task = asyncio.current_task()
 
     def signal_handler():
+        logger.info("Shutdown signal received")
         if not stop_event.is_set():
-            logger.info("Shutdown signal received")
             stop_event.set()
+            # Gently cancel the main task to allow the finally block to run
+            if main_task:
+                main_task.cancel()
 
     if platform.system() != "Windows":
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -104,13 +110,13 @@ async def main():
         logger.info("Bot is ready and waiting for commands...")
         await stop_event.wait()
 
-    except (KeyboardInterrupt, SystemExit, RuntimeError) as e:
-        if isinstance(e, RuntimeError):
-            logger.error(str(e))
-        else:
-            logger.info("Bot stopped by user or system.")
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped by user or system.")
+    except RuntimeError as e:
+        logger.error(str(e))
     except asyncio.CancelledError:
-        logger.info("Main task cancelled, shutting down.")
+        # This is expected on shutdown, so we log it as info.
+        logger.info("Main task cancelled, initiating shutdown.")
     except Exception as e:
         logger.critical(f"Bot crashed with unhandled error: {e}\n{traceback.format_exc()}")
     finally:
@@ -151,5 +157,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Application terminated.")
-
+        logger.info("Application terminated by user.")

@@ -42,6 +42,14 @@ class BacktraderStrategy(bt.Strategy):
         if not trade.isclosed:
             return
         self.log(f"OPERATION PROFIT, GROSS {trade.pnl:.2f}, NET {trade.pnlcomm:.2f}")
+        if self.owner_engine and hasattr(self.owner_engine, 'signal_tracker'):
+            # This part is conceptual. We need signal_id and a way to map trade to signal.
+            # For simplicity, let's assume we can get it from the trade or a shared context.
+            # signal_id = trade.signal_id 
+            # outcome = trade.pnl > 0
+            # self.owner_engine.signal_tracker.record(signal_id, outcome)
+            pass
+
 
     def next(self):
         if self.order:
@@ -139,8 +147,6 @@ class BacktestingEngine:
 
         data_feed = bt.feeds.PandasData(
             dataname=self.full_data[start:end],
-            # Column names are automatically detected by convention if not specified
-            # open='open', high='high', low='low', close='close', volume='volume', openinterest=-1
         )
         cerebro.adddata(data_feed)
 
@@ -174,4 +180,3 @@ class BacktestingEngine:
             if trade_analysis.total.total > 0
             else 0,
         }
-        

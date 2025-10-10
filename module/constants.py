@@ -1,3 +1,5 @@
+# constants.py
+
 import os
 from .logger_config import logger
 
@@ -19,11 +21,11 @@ LONG_TERM_CONFIG = {
         '1M': 65
     },
     'timeframe_priority_weights': {
-        '1M': 1.0,
-        '1w': 0.95,
-        '1d': 0.85,
-        '4h': 0.65,
-        '1h': 0.45
+        '1M': 2.0,
+        '1w': 1.6,
+        '1d': 1.2,
+        '4h': 0.8,
+        '1h': 0.5
     },
     'require_higher_tf_confirmation': True,
     'min_trend_strength': 'MODERATE',
@@ -196,6 +198,19 @@ TIMEFRAME_BASED_INDICATOR_WEIGHTS = {
 
 DEFAULT_INDICATOR_WEIGHTS = TIMEFRAME_BASED_INDICATOR_WEIGHTS["1d"]
 
+SIGNAL_EXPIRY_BY_TIMEFRAME = {
+    '1h': 12, '4h': 24, '1d': 72, '1w': 168, '1M': 720
+}
+
+DECAY_HALF_LIFE_BY_TIMEFRAME = {
+    '1h': 24, '4h': 48, '1d': 168, '1w': 720, '1M': 2160
+}
+
+THRESHOLD_BOUNDS = {
+    'volatility_factor_min': 0.8,
+    'volatility_factor_max': 1.5,
+    'floor_threshold': 40
+}
 
 def load_symbols():
     try:

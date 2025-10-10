@@ -11,7 +11,7 @@ from module.utils import RateLimiter, async_retry
 from module.data.base import BaseFetcher
 
 
-coingecko_rate_limiter = RateLimiter(max_requests=30, time_window=60)
+coingecko_rate_limiter = RateLimiter(max_requests=8, time_window=60)
 
 
 class CoinGeckoFetcher(BaseFetcher):
@@ -38,7 +38,7 @@ class CoinGeckoFetcher(BaseFetcher):
         return base_symbol.lower()
     
     def _get_cache_key(self, *args) -> str:
-        key_parts = [self.class_name] + [str(arg) for arg in args]
+        key_parts = [self.__class__.__name__] + [str(arg) for arg in args]
         return "cache:" + ":".join(key_parts)
 
     @async_retry(attempts=3, delay=5, exceptions=(NetworkError, APIRateLimitError))
@@ -52,10 +52,15 @@ class CoinGeckoFetcher(BaseFetcher):
         
         effective_url = url
         if self.api_key:
-            if 'pro-api' in url:
+            effective_url = effective_url.replace(self.base_url, self.pro_base_url)
+            if 'pro-api' in effective_url:
                 request_headers['x-cg-pro-api-key'] = self.api_key
             else:
                 request_params['x_cg_demo_api_key'] = self.api_key
+        else:
+            if 'pro-api' in url: # Should not happen if no key, but as a safeguard
+                effective_url = url.replace(self.pro_base_url, self.base_url)
+
 
         async def _do_fetch():
             session = await self._get_session()
