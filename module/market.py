@@ -1,23 +1,26 @@
 import asyncio
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Tuple
 
 import pandas as pd
 import redis.asyncio as redis
 import aiohttp
 
-from module.data_sources import BinanceFetcher, CoinDeskFetcher, MarketIndicesFetcher
-from module.exceptions import InsufficientDataError, NetworkError, DataError
-from module.logger_config import logger
-from module.utils import async_retry
+from .data.binance import BinanceFetcher
+from .data.coindesk import CoinDeskFetcher
+from .data.marketindices import MarketIndicesFetcher
+from .exceptions import InsufficientDataError, NetworkError, DataError
+from .logger_config import logger
+from .utils import async_retry
+from .data_validator import DataQualityChecker
 
 
 class MarketDataProvider:
     def __init__(self, 
-                 redis_client: Optional[redis.Redis] = None, 
-                 coindesk_fetcher: Optional[CoinDeskFetcher] = None,
-                 binance_fetcher: Optional[BinanceFetcher] = None,
-                 market_indices_fetcher: Optional[MarketIndicesFetcher] = None,
-                 session: Optional[aiohttp.ClientSession] = None):
+                redis_client: Optional[redis.Redis] = None, 
+                coindesk_fetcher: Optional[CoinDeskFetcher] = None,
+                binance_fetcher: Optional[BinanceFetcher] = None,
+                market_indices_fetcher: Optional[MarketIndicesFetcher] = None,
+                session: Optional[aiohttp.ClientSession] = None):
         
         self._is_closed = False
         self.redis = redis_client
@@ -41,6 +44,8 @@ class MarketDataProvider:
             f for f in [self.binance_fetcher, self.coindesk_fetcher, self.market_indices_fetcher] 
             if f is not None
         ]
+        
+        self.data_quality_checker = DataQualityChecker()
 
     async def close(self):
         if self._is_closed:
@@ -63,17 +68,34 @@ class MarketDataProvider:
         await asyncio.gather(*close_tasks, return_exceptions=True)
         logger.info("MarketDataProvider and all associated fetcher sessions closed.")
 
+    def _get_data_quality_score(self, df: pd.DataFrame, timeframe: str) -> float:
+        if df is None or df.empty:
+            return 0.0
+        
+        is_valid, _ = self.data_quality_checker.validate_data_quality(df, timeframe)
+        if not is_valid:
+            return 0.0
+
+        score = 100.0
+        
+        has_gaps, _ = self.data_quality_checker.detect_data_gaps(df)
+        if not has_gaps:
+            score -= 30.0
+
+        if not self.data_quality_checker.check_sufficient_volume(df):
+            score -= 20.0
+            
+        score -= df.isnull().sum().sum() * 0.1
+
+        return score
+
     @async_retry(attempts=3, delay=5, exceptions=(NetworkError, DataError))
     async def fetch_ohlcv_data(self, symbol: str, timeframe: str, limit: int = 1000) -> pd.DataFrame:
         if self._is_closed:
             raise NetworkError("MarketDataProvider is closed")
         
         cache_ttl_map = {
-            "1h": 120,
-            "4h": 300,
-            "1d": 600,
-            "1w": 1800,
-            "1M": 3600
+            "1h": 120, "4h": 300, "1d": 600, "1w": 1800, "1M": 3600
         }
         cache_ttl = cache_ttl_map.get(timeframe, 120)
         
@@ -90,37 +112,42 @@ class MarketDataProvider:
             except Exception as e:
                 logger.warning(f"Redis GET failed for {cache_key}: {e}")
 
-        df = pd.DataFrame()
-        
         fetch_sources = [
             (self.binance_fetcher.get_historical_ohlc, "binance") if self.binance_fetcher else None,
             (self.coindesk_fetcher.get_historical_ohlc, "coindesk") if self.coindesk_fetcher else None,
         ]
         
         fetch_sources = [s for s in fetch_sources if s is not None]
+        
+        tasks = [fetch_func(symbol, timeframe, limit) for fetch_func, _ in fetch_sources]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for fetch_func, source_name in fetch_sources:
-            try:
-                df = await fetch_func(symbol, timeframe, limit)
-                if df is not None and not df.empty and len(df) >= 100:
-                    logger.debug(f"Fetched {len(df)} rows from {source_name} for {symbol}/{timeframe}")
-                    break
-            except (NetworkError, DataError) as e:
-                logger.warning(f"Source {source_name} failed for {symbol}/{timeframe}: {e}")
-            except Exception as e:
-                logger.error(f"Unexpected error from {source_name} for {symbol}/{timeframe}: {e}")
+        best_df = None
+        best_score = -1.0
+        
+        for i, res_df in enumerate(results):
+            source_name = fetch_sources[i][1]
+            if isinstance(res_df, Exception) or res_df is None or res_df.empty:
+                logger.warning(f"Source {source_name} failed for {symbol}/{timeframe}: {res_df}")
+                continue
 
-        if df is not None and not df.empty:
+            score = self._get_data_quality_score(res_df, timeframe)
+            logger.debug(f"Data quality score for {symbol}/{timeframe} from {source_name}: {score:.2f}")
+
+            if score > best_score:
+                best_score = score
+                best_df = res_df
+        
+        if best_df is not None and not best_df.empty:
             if self.redis:
                 try:
-                    df_to_cache = df.reset_index()
+                    df_to_cache = best_df.reset_index()
                     df_to_cache['timestamp'] = df_to_cache['timestamp'].astype(int) // 10**6
                     await self.redis.set(cache_key, df_to_cache.to_json(orient="split"), ex=cache_ttl)
                 except Exception as e:
                     logger.warning(f"Redis SET failed for {cache_key}: {e}")
-            return df
+            return best_df
 
         raise InsufficientDataError(
             f"Failed to fetch sufficient OHLCV for {symbol} on {timeframe} from all sources."
         )
-

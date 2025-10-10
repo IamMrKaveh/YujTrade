@@ -1,14 +1,8 @@
 import asyncio
 
-# These imports are commented out as they are not used and cause errors if the libraries are not installed.
-# You can uncomment them if you install optuna.
-# import optuna
-# from optuna.integration import TFKerasPruningCallback
-# from optuna.trial import TrialState
-
-from module.backtesting import BacktestingEngine
-from module.logger_config import logger
-from module.lstm import LSTMModel
+from .backtesting import BacktestingEngine
+from .logger_config import logger
+from .models import LSTMModel
 
 
 class HyperparameterOptimizer:

@@ -98,7 +98,6 @@ class MarketAnalysis:
     market_condition: MarketCondition
     trend_acceleration: float
     volume_confirmation: bool
-    fundamental_analysis: Optional[FundamentalAnalysis] = None
     hurst_exponent: Optional[float] = None
 
 @dataclass
@@ -135,4 +134,3 @@ class TradingSignal:
     order_book: Optional[OrderBook] = None
     macro_data: Optional[MacroEconomicData] = None
     trending_data: Optional[TrendingData] = None
-    

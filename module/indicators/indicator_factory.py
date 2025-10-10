@@ -1,7 +1,8 @@
-from typing import Dict, Optional
+from typing import Optional
 
-from .indicators import TechnicalIndicator, get_all_indicators, IndicatorResult
-from .logger_config import logger
+from .indicators import get_all_indicators
+from .base import TechnicalIndicator
+from ..logger_config import logger
 
 
 class IndicatorFactory:

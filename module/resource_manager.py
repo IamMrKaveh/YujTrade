@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from typing import Optional, AsyncGenerator, Any
 
 import tensorflow as tf
-from module.logger_config import logger
+from .logger_config import logger
 
 
 @asynccontextmanager

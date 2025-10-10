@@ -162,8 +162,8 @@ class MarketConditionAnalyzer:
             momentum_score=momentum,
             hurst_exponent=hurst,
             volume_trend=volume_trend,
-            support_levels=[support],
-            resistance_levels=[resistance],
+            support_levels=[support] if support else [],
+            resistance_levels=[resistance] if resistance else [],
             market_condition=market_condition,
             trend_acceleration=trend_acceleration,
             volume_confirmation=volume_confirmation,
@@ -198,7 +198,7 @@ class MarketConditionAnalyzer:
         if len(data) < 14:
             return 0.0
         atr = talib.ATR(data["high"].to_numpy(), data["low"].to_numpy(), data["close"].to_numpy(), timeperiod=14)
-        atr_val = atr[-1] if atr.size > 0 and not pd.isna(atr[-1]) else 0
+        atr_val = atr[-1] if atr.size > 0 and not pd.isna(atr[-1]) else 0.0
         price = data["close"].iloc[-1]
         return (atr_val / price) * 100 if price > 0 else 0.0
 
@@ -224,19 +224,26 @@ class MarketConditionAnalyzer:
             return None
 
 
-    def _calculate_support_resistance(self, data: pd.DataFrame, window: int = 20) -> Tuple[float, float]:
+    def _calculate_support_resistance(self, data: pd.DataFrame, window: int = 50, prominence_factor: float = 0.02) -> Tuple[Optional[float], Optional[float]]:
         if len(data) < window:
-            return (data['low'].min(), data['high'].max())
+            return (None, None)
+        
         recent_data = data.tail(window)
-        support = recent_data['low'].min()
-        resistance = recent_data['high'].max()
+        required_prominence = (recent_data['high'].max() - recent_data['low'].min()) * prominence_factor
+
+        low_peaks, _ = find_peaks(-recent_data['low'], prominence=required_prominence)
+        high_peaks, _ = find_peaks(recent_data['high'], prominence=required_prominence)
+
+        support = recent_data['low'].iloc[low_peaks].mean() if len(low_peaks) > 0 else None
+        resistance = recent_data['high'].iloc[high_peaks].mean() if len(high_peaks) > 0 else None
+        
         return support, resistance
 
     def _calculate_trend_acceleration(self, data: pd.DataFrame, period: int = 10) -> float:
         if len(data) < period + 1:
             return 0.0
         mom = talib.MOM(data['close'].to_numpy(), timeperiod=period)
-        if mom.size < 2:
+        if mom.size < 2 or pd.isna(mom[-1]) or pd.isna(mom[-2]):
             return 0.0
         accel = mom[-1] - mom[-2]
         return accel if not pd.isna(accel) else 0.0
@@ -244,12 +251,11 @@ class MarketConditionAnalyzer:
 
 class VolumeAnalyzer:
     def analyze_volume_pattern(self, data: pd.DataFrame) -> Dict[str, float]:
-        if len(data) < 20:
+        if len(data) < 20 or 'volume' not in data.columns or data['volume'].isnull().all():
             return {}
         volume_ma_20 = data["volume"].rolling(20).mean().iloc[-1]
-        if pd.isna(volume_ma_20):
+        if pd.isna(volume_ma_20) or volume_ma_20 == 0:
             return {}
         current_volume = data["volume"].iloc[-1]
-        ratio = current_volume / volume_ma_20 if volume_ma_20 > 0 else 1
+        ratio = current_volume / volume_ma_20
         return {"volume_ratio": ratio}
-    

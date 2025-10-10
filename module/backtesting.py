@@ -2,7 +2,7 @@ import asyncio
 import backtrader as bt
 import pandas as pd
 
-from module.logger_config import logger
+from .logger_config import logger
 
 
 class BacktraderStrategy(bt.Strategy):

@@ -1,5 +1,5 @@
 import os
-from module.logger_config import logger
+from .logger_config import logger
 
 TIME_FRAMES = [
     "1h",
@@ -39,12 +39,11 @@ LONG_TERM_CONFIG = {
     }
 }
 
-LONG_TERM_INDICATOR_PRIORITIES = {
-    '1M': ['ichimoku', 'ma_ribbon', 'trend', 'adx', 'supertrend', 'kama', 'dema', 'tema', 'donchian'],
-    '1w': ['supertrend', 'ichimoku', 'ma_ribbon', 'trend', 'adx', 'donchian', 'keltner', 'bb'],
-    '1d': ['supertrend', 'ichimoku', 'bb', 'trend', 'keltner', 'adx', 'macd', 'rsi'],
-    '4h': ['macd', 'rsi', 'bb', 'supertrend', 'adx', 'stoch', 'cci', 'mfi'],
-    '1h': ['macd', 'rsi', 'bb', 'stoch', 'cci', 'mfi', 'williams_r']
+INDICATOR_GROUPS = {
+    'momentum': ['rsi', 'stoch', 'cci', 'macd', 'roc', 'mfi', 'stochrsi', 'williams_r', 'uo', 'mom', 'ppo'],
+    'trend': ['sma', 'ema', 'dema', 'tema', 'hma', 'vwma', 'supertrend', 'adx', 'aroon', 'psar', 'ichimoku', 'kama', 'ma_ribbon'],
+    'volatility': ['bb', 'atr', 'kc', 'dc', 'bbw', 'atr_bands', 'ulcer_index'],
+    'volume': ['volume', 'obv', 'cmf', 'ad_line', 'pvt', 'vwap', 'force_index', 'eom', 'kvo', 'pvo']
 }
 
 MULTI_TF_CONFIRMATION_MAP = {
@@ -227,4 +226,3 @@ def load_symbols():
 
 
 SYMBOLS = load_symbols()
-

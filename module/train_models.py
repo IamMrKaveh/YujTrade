@@ -2,11 +2,11 @@ import asyncio
 import warnings
 from typing import List
 
-from module.config import ConfigManager
-from module.constants import SYMBOLS, TIME_FRAMES
-from module.logger_config import logger
-from module.models import ModelManager, LSTMModel, XGBoostModel
-from module.market import MarketDataProvider
+from .config import ConfigManager
+from .constants import SYMBOLS, TIME_FRAMES
+from .logger_config import logger
+from .models import ModelManager
+from .market import MarketDataProvider
 
 warnings.filterwarnings("ignore")
 

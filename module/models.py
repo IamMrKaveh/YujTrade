@@ -10,16 +10,16 @@ import pandas as pd
 import tensorflow as tf
 import xgboost as xgb
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from tensorflow.keras.layers import (LSTM, BatchNormalization, Dense, Dropout)
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau # type: ignore
+from tensorflow.keras.layers import (LSTM, BatchNormalization, Dense, Dropout) # type: ignore
+from tensorflow.keras.models import Sequential # type: ignore
+from tensorflow.keras.optimizers import Adam # type: ignore
 import redis.asyncio as redis
 
-from module.logger_config import logger
-from module.resource_manager import managed_tf_session
-from module.exceptions import ModelError
-from module.indicators import TechnicalIndicator, get_all_indicators
+from .logger_config import logger
+from .resource_manager import managed_tf_session
+from .exceptions import ModelError
+from .indicators.indicator_factory import IndicatorFactory
 
 tf.get_logger().setLevel('ERROR')
 try:
@@ -28,20 +28,22 @@ try:
         for device in physical_devices:
             tf.config.experimental.set_memory_growth(device, True)
     else:
-        tf.config.set_visible_devices([], 'GPU')
+        os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+
 except (RuntimeError, ValueError) as e:
     logger.warning(f"Could not configure TensorFlow devices: {e}")
 
 
 class FeatureEngineer:
-    def __init__(self, indicators):
-        self.indicators = indicators
-        from sklearn.preprocessing import MinMaxScaler
+    def __init__(self):
+        from .indicators.indicator_factory import IndicatorFactory
+        self.indicator_factory = IndicatorFactory()
         self.scaler = MinMaxScaler(feature_range=(0, 1))
 
     def create_features(self, data: pd.DataFrame) -> pd.DataFrame:
         df = data.copy()
-        for name, indicator in self.indicators.items():
+        for name in self.indicator_factory.get_all_indicator_names():
+            indicator = self.indicator_factory.create(name)
             try:
                 result = indicator.calculate(df)
                 if result and hasattr(result, 'value'):
@@ -83,7 +85,7 @@ class BaseModel:
         self.model_path = Path(model_path)
         self.model_path.mkdir(parents=True, exist_ok=True)
         self.logger = logger
-        self.feature_engineer = FeatureEngineer(get_all_indicators())
+        self.feature_engineer = FeatureEngineer()
         self._is_closed = False
 
     def _check_if_closed(self):
@@ -91,7 +93,7 @@ class BaseModel:
             raise RuntimeError(f"Model {self.symbol}-{self.timeframe} has been closed and cannot be used")
 
     def _get_model_paths(self, model_name: str, extension: str) -> Tuple[Path, Path]:
-        model_suffix = f"_{self.symbol.lower().replace('/', '')}-{self.timeframe}"
+        model_suffix = f"_{self.symbol.lower().replace('/', '')}_{self.timeframe}"
         model_file = self.model_path / f"{model_name}{model_suffix}.{extension}"
         scaler_file = self.model_path / f"scaler_{model_name}{model_suffix}.pkl"
         return model_file, scaler_file
@@ -148,11 +150,7 @@ class LSTMModel(BaseModel):
         super().__init__(symbol, timeframe, model_path)
         
         sequence_length_map = {
-            "1h": 60,
-            "4h": 48,
-            "1d": 30,
-            "1w": 24,
-            "1M": 12
+            "1h": 60, "4h": 48, "1d": 30, "1w": 24, "1M": 12
         }
         self.sequence_length = sequence_length_map.get(timeframe, 30)
         
@@ -215,12 +213,14 @@ class LSTMModel(BaseModel):
                                         verbose=0, shuffle=False)
 
             final_val_loss = history.history.get('val_loss', [float('inf')])[-1]
-            if final_val_loss < 1.0:
+            loss_threshold = 0.5 * (data['close'].pct_change().std() ** 2)
+
+            if final_val_loss < loss_threshold:
                 self.is_trained = True
-                self.logger.info(f"LSTM model for {self.symbol}-{self.timeframe} trained successfully with val_loss: {final_val_loss:.4f}")
+                self.logger.info(f"LSTM model for {self.symbol}-{self.timeframe} trained successfully with val_loss: {final_val_loss:.4f} (Threshold: {loss_threshold:.4f})")
                 return True
             else:
-                self.logger.warning(f"LSTM training for {self.symbol}-{self.timeframe} did not converge. Final val_loss: {final_val_loss:.4f}")
+                self.logger.warning(f"LSTM training for {self.symbol}-{self.timeframe} did not converge. Final val_loss: {final_val_loss:.4f} (Threshold: {loss_threshold:.4f})")
                 self.is_trained = False
                 return False
         except Exception as e:
@@ -310,13 +310,8 @@ class XGBoostModel(BaseModel):
     def __init__(self, symbol: str, timeframe: str, model_path: str = "models/xgboost", **params):
         super().__init__(symbol, timeframe, model_path)
         self.params = params or {
-            "objective": "reg:squarederror", 
-            "eval_metric": "rmse", 
-            "n_estimators": 150,
-            "learning_rate": 0.05, 
-            "tree_method": "hist", 
-            "max_depth": 5, 
-            "subsample": 0.8,
+            "objective": "reg:squarederror", "eval_metric": "rmse", "n_estimators": 150,
+            "learning_rate": 0.05, "tree_method": "hist", "max_depth": 5, "subsample": 0.8,
         }
         self.model = xgb.XGBRegressor(**self.params)
 
@@ -391,8 +386,8 @@ class ModelManager:
         self.redis_client = redis_client
         self._cache: Dict[str, 'BaseModel'] = {}
         self._lock = asyncio.Lock()
-        self._executor: Optional[ThreadPoolExecutor] = None
-        self._executor_lock = asyncio.Lock()
+        self._training_executor: Optional[ThreadPoolExecutor] = None
+        self._prediction_executor: Optional[ThreadPoolExecutor] = None
         self._is_closed = False
         self.logger = logger
 
@@ -400,18 +395,26 @@ class ModelManager:
         if self._is_closed:
             raise RuntimeError("ModelManager has been closed and cannot be used")
 
-    async def _get_executor(self) -> ThreadPoolExecutor:
+    async def _get_executor(self, executor_type: str) -> ThreadPoolExecutor:
         self._check_if_closed()
-        async with self._executor_lock:
-            if self._executor is None or self._executor._shutdown:
-                max_workers = max(1, (os.cpu_count() or 1) - 1)
-                self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='ModelExecutor')
-            return self._executor
+        
+        if executor_type == 'training':
+            if self._training_executor is None or self._training_executor._shutdown:
+                max_workers = max(1, (os.cpu_count() or 4) // 2)
+                self._training_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='ModelTrainingExecutor')
+            return self._training_executor
+        elif executor_type == 'prediction':
+            if self._prediction_executor is None or self._prediction_executor._shutdown:
+                max_workers = max(1, (os.cpu_count() or 2))
+                self._prediction_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='ModelPredictionExecutor')
+            return self._prediction_executor
+        else:
+            raise ValueError("Invalid executor type specified.")
 
-    async def _run_in_executor(self, func, *args, **kwargs) -> Any:
+    async def _run_in_executor(self, func, *args, executor_type: str = 'prediction', **kwargs) -> Any:
         self._check_if_closed()
         loop = asyncio.get_running_loop()
-        executor = await self._get_executor()
+        executor = await self._get_executor(executor_type)
         return await loop.run_in_executor(executor, lambda: func(*args, **kwargs))
 
     def _get_model_class(self, model_type: str) -> Type['BaseModel']:
@@ -426,21 +429,28 @@ class ModelManager:
         key = f"{model_type}-{symbol}-{timeframe}"
         
         async with self._lock:
-            if key in self._cache:
-                return self._cache[key]
+            cached_model = self._cache.get(key)
+            if cached_model:
+                if cached_model._is_closed:
+                    del self._cache[key]
+                else:
+                    return cached_model
         
         model_dir = self.model_path / model_type
         model_class = self._get_model_class(model_type)
         model_path_str = str(model_dir)
 
         try:
-            model = await self._run_in_executor(model_class, symbol=symbol, timeframe=timeframe, model_path=model_path_str)
+            model = await self._run_in_executor(lambda: model_class(symbol=symbol, timeframe=timeframe, model_path=model_path_str), executor_type='prediction')
             
-            model_file, _ = model._get_model_paths(model_type, "keras" if model_type == 'lstm' else 'json')
+            if model_type == 'lstm':
+                model_file, _ = model._get_model_paths(model_type, "keras")
+            else:
+                model_file, _ = model._get_model_paths(model_type, "json")
             
             if model_file.exists():
                 try:
-                    await self._run_in_executor(model.load)
+                    await self._run_in_executor(model.load, executor_type='prediction')
                     self.logger.info(f"Loaded existing {model_type.upper()} model for {key}")
                 except Exception as e:
                     self.logger.warning(f"Failed to load {model_type.upper()} model for {key}, it will need training: {e}")
@@ -462,30 +472,26 @@ class ModelManager:
         for model_type_dir in self.model_path.iterdir():
             if model_type_dir.is_dir():
                 model_type = model_type_dir.name
-                if model_type == "lstm":
-                    ext = "keras"
-                elif model_type == "xgboost":
-                    ext = "json"
-                else:
-                    continue
+                if model_type == "lstm": ext = "keras"
+                elif model_type == "xgboost": ext = "json"
+                else: continue
                 
-                for file in model_type_dir.glob(f"*{ext}"):
+                for file in model_type_dir.glob(f"*.{ext}"):
                     model_files.append((file, model_type))
 
         for file, model_type in model_files:
             try:
                 base_name = file.stem
-                if model_type == 'lstm':
-                    parts_str = base_name.replace("lstm_", "")
-                elif model_type == 'xgboost':
-                    parts_str = base_name.replace("xgboost_", "")
-                else:
-                    continue
+                if model_type == 'lstm': parts_str = base_name.replace("lstm_", "")
+                elif model_type == 'xgboost': parts_str = base_name.replace("xgboost_", "")
+                else: continue
                 
-                symbol, timeframe = parts_str.split('-', 1)
-                symbol = symbol.upper().replace('', '/', 1) if '/' not in symbol.upper() else symbol.upper()
+                symbol, timeframe = parts_str.rsplit('_', 1)
+                symbol_formatted = symbol.upper()
+                if '/' not in symbol_formatted and len(symbol_formatted) > 4:
+                    symbol_formatted = symbol_formatted.replace("USDT", "/USDT", 1)
 
-                tasks.append(self.get_model(model_type, symbol, timeframe))
+                tasks.append(self.get_model(model_type, symbol_formatted, timeframe))
             except (IndexError, ValueError) as e:
                 self.logger.warning(f"Could not parse model file name: {file.name}. Error: {e}")
 
@@ -502,7 +508,7 @@ class ModelManager:
             return None
         
         try:
-            prediction = await self._run_in_executor(model.predict, data)
+            prediction = await self._run_in_executor(model.predict, data, executor_type='prediction')
             return prediction
         except (RuntimeError, CancelledError) as e:
             self.logger.warning(f"Prediction task cancelled or failed for {model_type} on {symbol}-{timeframe}: {e}")
@@ -528,13 +534,10 @@ class ModelManager:
             except Exception as e:
                 self.logger.error(f"Error cleaning up model {model.symbol}-{model.timeframe}: {e}")
         
-        async with self._executor_lock:
-            executor = self._executor
+        for executor in [self._training_executor, self._prediction_executor]:
             if executor:
-                self._executor = None
                 try:
                     executor.shutdown(wait=True, cancel_futures=True)
-                    self.logger.info("ThreadPoolExecutor shut down successfully.")
                 except Exception as e:
                     self.logger.error(f"Error shutting down executor: {e}")
         

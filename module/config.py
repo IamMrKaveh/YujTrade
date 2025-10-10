@@ -4,9 +4,9 @@ from typing import Any, Dict, Optional
 
 from decouple import config as decouple_config
 
-from module.constants import DEFAULT_INDICATOR_WEIGHTS, SYMBOLS, TIME_FRAMES
-from module.logger_config import logger
-from module.security import KeyEncryptor, get_password_from_key_manager
+from .constants import DEFAULT_INDICATOR_WEIGHTS, SYMBOLS, TIME_FRAMES
+from .logger_config import logger
+from .security import KeyEncryptor, get_password_from_key_manager
 
 
 class Config:
@@ -54,8 +54,6 @@ class Config:
     REDIS_PORT = decouple_config("REDIS_PORT", default=6379, cast=int)
     REDIS_TOKEN = decouple_config("REDIS_TOKEN", default="none", cast=str)
 
-    PROMETHEUS_PORT = decouple_config("PROMETHEUS_PORT", default=9090, cast=int)
-
 
 class ConfigManager:
     DEFAULT_CONFIG = {
@@ -65,7 +63,7 @@ class ConfigManager:
         "max_signals_per_timeframe": 1,
         "enable_scheduled_analysis": False,
         "schedule_hour": "*/1",
-        "app_version": "3.0.0",
+        "app_version": "4.0.0",
         "indicator_weights": DEFAULT_INDICATOR_WEIGHTS,
         "timeframe_based_weights": True
     }

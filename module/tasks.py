@@ -3,11 +3,11 @@ from typing import Set
 
 import redis.asyncio as redis
 
-from module.background_tasks import BackgroundTaskManager
-from module.config import Config, ConfigManager
-from module.logger_config import logger
-from module.market import MarketDataProvider
-from module.trading_service import TradingService
+from .background_tasks import BackgroundTaskManager
+from .config import Config, ConfigManager
+from .logger_config import logger
+from .market import MarketDataProvider
+from .trading_service import TradingService
 
 
 class TaskServiceContainer:
@@ -35,12 +35,13 @@ class TaskServiceContainer:
             raise ValueError("TELEGRAM_BOT_TOKEN is not configured.")
 
         try:
-            redis_pool = redis.ConnectionPool.from_url(
-                f"rediss://default:{Config.REDIS_TOKEN}@{Config.REDIS_HOST}:{Config.REDIS_PORT}",
+            redis_url = f"redis://default:{Config.REDIS_TOKEN}@{Config.REDIS_HOST}:{Config.REDIS_PORT}"
+            
+            self.redis_client = redis.Redis.from_url(
+                redis_url,
                 decode_responses=True,
                 max_connections=20
             )
-            self.redis_client = redis.Redis(connection_pool=redis_pool)
             await self.redis_client.ping()
             logger.info("Task Service: Redis connection pool created successfully.")
         except Exception as e:
@@ -49,13 +50,13 @@ class TaskServiceContainer:
 
         shared_session = None
 
-        from module.data_sources import BinanceFetcher
+        from module.data.binance import BinanceFetcher
         binance_fetcher = BinanceFetcher(
             redis_client=self.redis_client,
             session=shared_session
         )
 
-        from module.data_sources import MarketIndicesFetcher
+        from module.data.marketindices import MarketIndicesFetcher
         market_indices_fetcher = MarketIndicesFetcher(
             redis_client=self.redis_client,
             session=shared_session
@@ -120,4 +121,3 @@ async def run_quick_scan_task(chat_id: int, message_id: int):
         logger.info(f"Task 'run_quick_scan_task' finished for chat_id: {chat_id}. Generated {len(signals)} signals.")
     except Exception as e:
         logger.error(f"Error in run_quick_scan_task: {e}", exc_info=True)
-
