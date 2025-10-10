@@ -1,7 +1,6 @@
 import asyncio
 from datetime import datetime
 import os
-from collections import defaultdict
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -106,14 +105,13 @@ class TelegramBotHandler:
 
         async def analysis_task():
             symbols = self.config_manager.get("symbols", [])
-            signals = []
-            for symbol in symbols:
-                try:
-                    signal = await self.trading_service.analyze_symbol(symbol, "1h")
-                    if signal:
-                        signals.append(signal)
-                except Exception as e:
-                    logger.error(f"Error analyzing {symbol} on 1h: {e}")
+            timeframes_to_run = ["1h"]
+            
+            tasks = [self.trading_service.analyze_symbol(symbol, tf) for symbol in symbols for tf in timeframes_to_run]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            signals = [res for res in results if isinstance(res, TradingSignal)]
+            
             await self.send_signals_to_telegram(
                 signals,
                 str(query.message.chat_id),
@@ -180,31 +178,15 @@ class TelegramBotHandler:
         if not chat_id:
             logger.warning("Telegram chat ID not configured.")
             return
-
-        min_confidence = self.config_manager.get("min_confidence_score", 0)
-        max_signals_per_tf = self.config_manager.get("max_signals_per_timeframe", 1)
-
-        confident_signals = [s for s in signals if s.confidence_score >= min_confidence]
-
-        signals_by_timeframe = defaultdict(list)
-        for signal in confident_signals:
-            signals_by_timeframe[signal.timeframe].append(signal)
-
-        filtered_signals = []
-        for tf, tf_signals in signals_by_timeframe.items():
-            sorted_signals = sorted(tf_signals, key=lambda s: s.confidence_score, reverse=True)
-            filtered_signals.extend(sorted_signals[:max_signals_per_tf])
         
-        filtered_signals.sort(key=lambda s: s.confidence_score, reverse=True)
-
-        if filtered_signals:
-            summary = f"{summary_text} Found {len(filtered_signals)} signal(s). 🎯"
+        if signals:
+            summary = f"{summary_text} Found {len(signals)} signal(s). 🎯"
             await self.application.bot.send_message(
                 chat_id,
                 escape_markdown_v2(summary),
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
-            for signal in filtered_signals:
+            for signal in signals:
                 messages = self.format_signal_message(signal)
                 for message in messages:
                     try:

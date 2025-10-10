@@ -1,6 +1,8 @@
 import asyncio
 from typing import List, Optional, Set
 
+import pandas as pd
+
 from .analysis_engine import AnalysisEngine
 from .config import ConfigManager
 from .core import TradingSignal
@@ -24,7 +26,7 @@ class TradingService:
 
         redis_client = getattr(market_data_provider, 'redis', None)
 
-        self.model_manager = ModelManager(redis_client=redis_client)
+        self.model_manager = ModelManager(trading_service=self, redis_client=redis_client)
         
         self.analysis_engine = AnalysisEngine(
             market_data_provider=market_data_provider,
@@ -75,6 +77,24 @@ class TradingService:
             analysis_engine=self.analysis_engine
         )
 
+    async def get_data_for_model(self, symbol: str, timeframe: str, for_prediction: bool = False) -> Optional[pd.DataFrame]:
+        limit_map = {
+            "1h": 2000, "4h": 1500, "1d": 1000, "1w": 500, "1M": 300
+        }
+        limit = limit_map.get(timeframe, 2000)
+        
+        if for_prediction:
+            limit = min(limit, 300)
+
+        try:
+            data = await self.market_data_provider.fetch_ohlcv_data(symbol, timeframe, limit=limit)
+            if data is None or data.empty or len(data) < 200:
+                logger.warning(f"Insufficient data for model operations for {symbol}-{timeframe}.")
+                return None
+            return data
+        except Exception as e:
+            logger.error(f"Failed to fetch data for model for {symbol}-{timeframe}: {e}")
+            return None
 
     async def analyze_symbol(self, symbol: str, timeframe: str) -> Optional[TradingSignal]:
         if symbol in self.invalid_symbols:
@@ -132,27 +152,14 @@ class TradingService:
             elif isinstance(res, Exception) and not isinstance(res, InvalidSymbolError):
                 logger.error(f"Signal generation failed: {res}")
 
-        ranked_signals = SignalRanking.rank_signals(signals)
-
-        max_signals = LONG_TERM_CONFIG.get('max_signals_per_run', 3)
-        final_signals = []
-        
-        if not ranked_signals:
+        if not signals:
             logger.info("No signals generated in this analysis cycle")
             return []
 
-        best_score = SignalRanking.calculate_signal_score(ranked_signals[0])
-        quality_threshold = max(best_score * 0.8, self.config_manager.get("min_absolute_signal_score", 65.0))
+        ranked_signals = SignalRanking.rank_signals(signals)
 
-        for signal in ranked_signals:
-            if len(final_signals) >= max_signals:
-                break
-            
-            current_score = SignalRanking.calculate_signal_score(signal)
-            if current_score >= quality_threshold:
-                final_signals.append(signal)
-            else:
-                logger.debug(f"Signal for {signal.symbol}-{signal.timeframe} with score {current_score:.2f} did not meet quality threshold of {quality_threshold:.2f}")
+        max_signals = LONG_TERM_CONFIG.get('max_signals_per_run', 3)
+        final_signals = ranked_signals[:max_signals]
 
         if final_signals:
             logger.info(
@@ -162,7 +169,7 @@ class TradingService:
                 logger.info(
                     f"  #{i}: {sig.symbol} {sig.timeframe} {sig.signal_type.value.upper()} "
                     f"(Confidence: {sig.confidence_score:.1f}%, R/R: {sig.risk_reward_ratio:.2f}, "
-                    f"Trend: {sig.market_context.get('trend', 'N/A')})"
+                    f"Rank Score: {SignalRanking.calculate_signal_score(sig):.2f})"
                 )
         else:
             logger.info("No signals met the final quality criteria.")

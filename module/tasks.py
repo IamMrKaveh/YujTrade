@@ -37,11 +37,13 @@ class TaskServiceContainer:
         try:
             redis_url = f"redis://default:{Config.REDIS_TOKEN}@{Config.REDIS_HOST}:{Config.REDIS_PORT}"
             
-            self.redis_client = redis.Redis.from_url(
+            # Increase max_connections
+            pool = redis.ConnectionPool.from_url(
                 redis_url,
                 decode_responses=True,
-                max_connections=20
+                max_connections=50  # Increased from 20
             )
+            self.redis_client = redis.Redis(connection_pool=pool)
             await self.redis_client.ping()
             logger.info("Task Service: Redis connection pool created successfully.")
         except Exception as e:
@@ -90,9 +92,12 @@ class TaskServiceContainer:
         if hasattr(self, 'redis_client') and self.redis_client:
             async def close_redis():
                 try:
-                    await self.redis_client.aclose()
+                    # Close the client first
+                    await self.redis_client.close()
+                    # Then disconnect the pool
                     if hasattr(self.redis_client, 'connection_pool'):
                         await self.redis_client.connection_pool.disconnect()
+                    logger.info("Redis connection pool disconnected.")
                 except Exception as e:
                     logger.warning(f"Error closing Redis: {e}")
             

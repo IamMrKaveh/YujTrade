@@ -246,7 +246,7 @@ class AnalysisEngine:
             "technical": self.perform_technical_analysis(data, symbol, data_collection_timestamp),
             "market_condition": self.analyze_market_context(data, analysis_timestamp),
             "external_data": self.gather_external_data(symbol, analysis_timestamp),
-            "ml_predictions": self.get_ml_predictions(symbol, timeframe, data, analysis_timestamp)
+            "ml_predictions": self.get_ml_predictions(symbol, timeframe, analysis_timestamp)
         }
 
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
@@ -310,7 +310,14 @@ class AnalysisEngine:
             return None
 
         signal_type, threshold_info = self.determine_signal_type(combined_score, market_context, symbol, timeframe)
+        
+        # Log why no signal is generated if HOLD
         if signal_type == SignalType.HOLD:
+            logger.info(
+                f"No signal for {symbol}-{timeframe}. "
+                f"Combined Score: {combined_score:.2f}, "
+                f"Threshold: {threshold_info.get('base_threshold', 'N/A'):.2f}"
+            )
             return None
 
         raw_confidence = abs(combined_score)
@@ -324,22 +331,25 @@ class AnalysisEngine:
         quality_adjusted_confidence = raw_confidence * performance_factor
         final_confidence = quality_adjusted_confidence * (1 - confidence_penalty)
 
-        if final_confidence < 0.3:
-            logger.info(f"Final confidence {final_confidence:.2f} below absolute minimum 0.3")
+        if final_confidence < 0: # Changed from 0.3 to 0 as requested
+            logger.info(f"Final confidence {final_confidence:.2f} below absolute minimum 0 for {symbol}-{timeframe}")
             return None
 
-        base_min_confidence = LONG_TERM_CONFIG['min_confidence_threshold'].get(
-            timeframe,
-            self.config_manager.get("min_confidence_score", 70)
-        )
+        base_min_confidence_key = "min_confidence_threshold"
+        min_confidence_map = self.config_manager.get(base_min_confidence_key, {})
+        if not isinstance(min_confidence_map, dict):
+            min_confidence_map = LONG_TERM_CONFIG.get(base_min_confidence_key, {})
+        
+        base_min_confidence = min_confidence_map.get(timeframe, self.config_manager.get("min_confidence_score", 70))
+        
         volatility_penalty = market_context.volatility / 10 if hasattr(market_context, 'volatility') and market_context.volatility else 0
         win_rate_penalty = 1 - (self._get_recent_win_rate(symbol, timeframe) / 100) if self._get_recent_win_rate(symbol, timeframe) else 0
         adaptive_min_confidence = base_min_confidence * (1 + volatility_penalty) * (1 + win_rate_penalty * 0.5)
 
         if final_confidence < adaptive_min_confidence:
             logger.info(
-                f"Confidence {final_confidence:.2f} (raw: {raw_confidence:.2f}, penalty: {confidence_penalty:.2%}, quality: {overall_quality_score:.2f}, perf: {performance_factor:.2f}, adaptive_threshold: {adaptive_min_confidence:.2f}) "
-                f"below threshold for {symbol}-{timeframe}"
+                f"Confidence {final_confidence:.2f} below adaptive threshold {adaptive_min_confidence:.2f} for {symbol}-{timeframe}. "
+                f"(raw: {raw_confidence:.2f}, penalty: {confidence_penalty:.2%}, quality: {overall_quality_score:.2f}, perf: {performance_factor:.2f})"
             )
             return None
 
@@ -477,7 +487,7 @@ class AnalysisEngine:
 
         return external_data
 
-    async def get_ml_predictions(self, symbol: str, timeframe: str, data: pd.DataFrame, timestamp: datetime) -> Dict[str, Dict[str, float]]:
+    async def get_ml_predictions(self, symbol: str, timeframe: str, timestamp: datetime) -> Dict[str, Dict[str, float]]:
         if not self.model_manager:
             return {}
         
@@ -485,8 +495,8 @@ class AnalysisEngine:
         staleness_penalty = min(model_staleness_days / 7, 1.0)
         
         tasks = {
-            "lstm": self.model_manager.predict_with_confidence("lstm", symbol, timeframe, data),
-            "xgboost": self.model_manager.predict_with_confidence("xgboost", symbol, timeframe, data)
+            "lstm": self.model_manager.predict_with_confidence("lstm", symbol, timeframe),
+            "xgboost": self.model_manager.predict_with_confidence("xgboost", symbol, timeframe)
         }
         
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
@@ -496,7 +506,12 @@ class AnalysisEngine:
             if isinstance(pred_result, Exception):
                 logger.warning(f"ML prediction for {model_name} failed on {symbol}-{timeframe}: {pred_result}")
                 continue
-            if pred_result is not None and 'prediction' in pred_result and 'confidence' in pred_result:
+
+            if pred_result is None or pred_result.get('prediction') is None or pd.isna(pred_result.get('prediction')):
+                logger.debug(f"ML prediction for {model_name} on {symbol}-{timeframe} returned None or NaN.")
+                continue
+
+            if 'prediction' in pred_result and 'confidence' in pred_result:
                 raw_confidence = pred_result.get('raw_confidence', pred_result['confidence'])
                 calibrated_confidence = pred_result.get('confidence', raw_confidence)
                 uncertainty = pred_result.get('uncertainty', 0.0)
@@ -511,7 +526,7 @@ class AnalysisEngine:
                 pred_result['confidence'] = final_confidence
                 pred_result['timestamp'] = timestamp
                 predictions[model_name] = pred_result
-                logger.info(f"ML prediction from {model_name} for {symbol}-{timeframe}: {pred_result['prediction']} "
+                logger.info(f"ML prediction from {model_name} for {symbol}-{timeframe}: {pred_result['prediction']:.4f} "
                           f"(raw conf: {raw_confidence:.2f}, calibrated: {calibrated_confidence:.2f}, final: {final_confidence:.2f})")
         
         return predictions
@@ -697,28 +712,31 @@ class AnalysisEngine:
         return validated_data, timestamps
 
     def _check_timestamp_synchronization(self, all_timestamps: Dict[str, datetime], timeframe: str) -> Tuple[bool, str]:
-        if not all_timestamps:
-            return False, "No timestamps available"
-        
-        max_allowed_diff = timedelta(minutes=self.MAX_DATA_AGE_MINUTES.get(timeframe, 15))
-        
-        data_ts = all_timestamps.get('data_collection')
-        analysis_ts = all_timestamps.get('analysis')
+        if not all_timestamps or 'data_collection' not in all_timestamps or 'analysis' not in all_timestamps:
+            return False, "Core timestamps (data or analysis) are missing."
 
-        if data_ts and analysis_ts:
-            if abs(data_ts - analysis_ts) > max_allowed_diff:
-                return False, f"Time difference between data ({data_ts}) and analysis ({analysis_ts}) is too high."
-            if data_ts >= analysis_ts:
-                return False, "Data timestamp is not before analysis timestamp (potential data leakage)"
+        data_ts = all_timestamps['data_collection']
+        analysis_ts = all_timestamps['analysis']
 
-        timestamps_list = list(all_timestamps.values())
-        min_ts = min(timestamps_list)
-        max_ts = max(timestamps_list)
-        time_diff = max_ts - min_ts
-        
+        if data_ts.tzinfo is None: data_ts = data_ts.replace(tzinfo=timezone.utc)
+        if analysis_ts.tzinfo is None: analysis_ts = analysis_ts.replace(tzinfo=timezone.utc)
+
+        if data_ts >= analysis_ts:
+            return False, f"Data timestamp ({data_ts}) is not before analysis timestamp ({analysis_ts})."
+
+        timeframe_deltas = {
+            '1m': timedelta(minutes=1), '5m': timedelta(minutes=5), '15m': timedelta(minutes=15),
+            '1h': timedelta(hours=1), '4h': timedelta(hours=4), '1d': timedelta(days=1),
+            '1w': timedelta(weeks=1), '1M': timedelta(days=30)
+        }
+        expected_interval = timeframe_deltas.get(timeframe, timedelta(hours=1))
+
+        max_allowed_diff = expected_interval * 1.5
+
+        time_diff = analysis_ts - data_ts
         if time_diff > max_allowed_diff:
-            return False, f"Time difference {time_diff.total_seconds()/60:.1f} minutes exceeds maximum {max_allowed_diff.total_seconds()/60:.1f} minutes"
-        
+            return False, f"Time difference {time_diff.total_seconds()/60:.1f}m exceeds max allowed {max_allowed_diff.total_seconds()/60:.1f}m"
+
         return True, "Timestamps synchronized"
 
     def _get_performance_factor(self, symbol: str, timeframe: str) -> float:
@@ -904,13 +922,20 @@ class AnalysisEngine:
 
         if total_weight > 0:
             score = weighted_score / total_weight
-            total_weight_sum = sum(model_weights.values())
-            normalized_weights = [w / total_weight_sum for w in model_weights.values()]
-            weighted_score = sum(
-                (1 if predictions[model]['prediction'] > 0 else -1) * normalized_weights[i]
-                for i, model in enumerate(predictions.keys()) if predictions[model]['prediction'] != 0
-            )
-            score = weighted_score
+            total_weight_sum = sum(model_weights.get(name, 0.5) for name in predictions.keys() if predictions[name].get('prediction') != 0)
+            if total_weight_sum > 0:
+                normalized_weights = [model_weights.get(name, 0.5) / total_weight_sum for name in predictions.keys() if predictions[name].get('prediction') != 0]
+                
+                valid_predictions = [
+                    (1 if predictions[model]['prediction'] > 0 else -1)
+                    for model in predictions.keys() if predictions[model].get('prediction') != 0
+                ]
+                
+                if valid_predictions:
+                    weighted_score = sum(
+                        pred * weight for pred, weight in zip(valid_predictions, normalized_weights)
+                    )
+                    score = weighted_score
         
         avg_confidence = total_confidence / count if count > 0 else 0.5
 
@@ -1043,7 +1068,8 @@ class AnalysisEngine:
 
     def determine_signal_type(self, score: float, market_context: MarketAnalysis, 
                              symbol: str, timeframe: str) -> Tuple[SignalType, Dict[str, Any]]:
-        base_threshold = self.config_manager.get("signal_threshold", 0.4) * 100
+        # Set base_threshold to 0 as requested
+        base_threshold = 0.0
 
         threshold_info = {
             'base_threshold': base_threshold,
@@ -1053,7 +1079,7 @@ class AnalysisEngine:
 
         if score > base_threshold:
             return SignalType.BUY, threshold_info
-        if score < -base_threshold:
+        if score < base_threshold: # This will handle scores below 0
             return SignalType.SELL, threshold_info
         return SignalType.HOLD, threshold_info
 

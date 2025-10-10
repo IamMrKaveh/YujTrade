@@ -10,10 +10,10 @@ import pandas as pd
 import tensorflow as tf
 import xgboost as xgb
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from tensorflow.keras.layers import (LSTM, BatchNormalization, Dense, Dropout)
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau # type: ignore
+from tensorflow.keras.layers import (LSTM, BatchNormalization, Dense, Dropout) # type aignore
+from tensorflow.keras.models import Sequential # type: ignore
+from tensorflow.keras.optimizers import Adam # type: ignore
 import redis
 
 from .logger_config import logger
@@ -44,42 +44,43 @@ class FeatureEngineer:
         if data is None or data.empty:
             logger.warning("Empty dataframe provided to create_features")
             return pd.DataFrame()
-        
-        df = data.copy()
-        
+
         required_columns = ['open', 'high', 'low', 'close', 'volume']
-        missing = [col for col in required_columns if col not in df.columns]
+        missing = [col for col in required_columns if col not in data.columns]
         if missing:
             logger.error(f"Missing required columns: {missing}")
             return pd.DataFrame()
-        
+
+        indicator_data = {}
         for name in self.indicator_factory.get_all_indicator_names():
             indicator = self.indicator_factory.create(name)
             if indicator is None:
                 continue
             try:
-                result = indicator.calculate(df)
+                result = indicator.calculate(data)
                 if result and hasattr(result, 'value'):
-                    if isinstance(result.value, pd.Series):
-                        df[name] = result.value
-                    elif isinstance(result.value, np.ndarray):
-                        df[name] = pd.Series(result.value, index=df.index)
-                    elif isinstance(result.value, (int, float)):
-                        df[name] = result.value
+                    value = result.value
+                    if isinstance(value, (pd.Series, np.ndarray)):
+                        indicator_data[name] = pd.Series(value, index=data.index)
+                    elif isinstance(value, (int, float)):
+                        indicator_data[name] = pd.Series(value, index=data.index)
             except Exception as e:
                 logger.debug(f"Failed to calculate indicator {name}: {e}")
-                df[name] = np.nan
-        
-        df = df.replace([np.inf, -np.inf], np.nan)
-        
+                indicator_data[name] = pd.Series(np.nan, index=data.index)
+
+        features_df = pd.DataFrame(indicator_data)
+        df = pd.concat([data.copy(), features_df], axis=1)
+
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.ffill(inplace=True)
         df.bfill(inplace=True)
         
-        df.dropna(inplace=True)
-        
+        if df.isnull().values.any():
+            df.fillna(0, inplace=True)
+
         if self.feature_columns is None:
             self.feature_columns = df.columns.tolist()
-        
+
         return df
 
     def scale_features(self, features: pd.DataFrame, fit: bool = False) -> Optional[np.ndarray]:
@@ -88,7 +89,7 @@ class FeatureEngineer:
             return None
         
         features_clean = features.replace([np.inf, -np.inf], np.nan)
-        features_clean = features_clean.fillna(method='ffill').fillna(method='bfill')
+        features_clean = features_clean.ffill().bfill()
         
         if features_clean.isnull().any().any():
             logger.warning("Features still contain NaN after cleaning")
@@ -118,7 +119,7 @@ class FeatureEngineer:
 
     def inverse_scale_prediction(self, prediction: np.ndarray) -> np.ndarray:
         try:
-            if self.scaler.n_features_in_ is None or self.scaler.n_features_in_ == 0:
+            if not hasattr(self.scaler, 'n_features_in_') or self.scaler.n_features_in_ is None or self.scaler.n_features_in_ == 0:
                 logger.warning("Scaler not fitted, returning prediction as-is")
                 return prediction.flatten()
             
@@ -246,7 +247,7 @@ class LSTMModel(BaseModel):
         with managed_tf_session():
             self.model = Sequential([
                 LSTM(self.units, input_shape=self.input_shape, return_sequences=True, 
-                     dropout=0.2, recurrent_dropout=0.2),
+                        dropout=0.2, recurrent_dropout=0.2),
                 LSTM(self.units // 2, return_sequences=False, dropout=0.2),
                 Dropout(0.3),
                 Dense(32, activation='relu'),
@@ -261,18 +262,18 @@ class LSTMModel(BaseModel):
     def fit(self, data: pd.DataFrame, epochs=15, batch_size=None, validation_split=0.2) -> bool:
         self._check_if_closed()
         try:
-            if data is None or data.empty or len(data) < self.sequence_length + 10:
-                self.logger.warning(f"Insufficient data for {self.symbol}-{self.timeframe}, skipping training. Required: {self.sequence_length + 10}, Got: {len(data) if data is not None else 0}")
+            if data is None or data.empty or len(data) < self.sequence_length + 20: # Increased minimum data
+                self.logger.warning(f"Insufficient data for {self.symbol}-{self.timeframe}, skipping training. Required: {self.sequence_length + 20}, Got: {len(data) if data is not None else 0}")
                 return False
             
             features = self.feature_engineer.create_features(data)
-            if features.empty or len(features) < self.sequence_length + 10:
+            if features.empty or len(features) < self.sequence_length + 20:
                 self.logger.warning(f"No features or insufficient features created for {self.symbol}-{self.timeframe}, skipping training.")
                 return False
             
             scaled_features = self.feature_engineer.scale_features(features, fit=True)
-            if scaled_features is None or len(scaled_features) == 0:
-                self.logger.warning(f"Feature scaling failed for {self.symbol}-{self.timeframe}, skipping training.")
+            if scaled_features is None or len(scaled_features) < self.sequence_length + 20:
+                self.logger.warning(f"Feature scaling failed or resulted in insufficient data for {self.symbol}-{self.timeframe}, skipping training.")
                 return False
 
             self.input_shape = (self.sequence_length, scaled_features.shape[1])
@@ -283,38 +284,45 @@ class LSTMModel(BaseModel):
                 self.logger.warning(f"Not enough data to create sequences for {self.symbol}-{self.timeframe}, skipping training.")
                 return False
 
+            # Ensure validation set is not empty
+            if int(X.shape[0] * validation_split) < 1:
+                self.logger.warning(f"Not enough data for validation split in {self.symbol}-{self.timeframe}. Disabling validation.")
+                validation_split = 0.0
+
             effective_batch_size = min(batch_size or self.batch_size, X.shape[0] // 5)
             if effective_batch_size < 1:
                 effective_batch_size = 1
             
             callbacks = [
-                EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
-                ReduceLROnPlateau(monitor='val_loss', factor=0.7, patience=3, min_lr=1e-7)
+                EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True) if validation_split > 0 else EarlyStopping(monitor='loss', patience=5, restore_best_weights=True),
+                ReduceLROnPlateau(monitor='val_loss', factor=0.7, patience=3, min_lr=1e-7) if validation_split > 0 else ReduceLROnPlateau(monitor='loss', factor=0.7, patience=3, min_lr=1e-7)
             ]
             
             with managed_tf_session():
                 history = self.model.fit(X, y, epochs=epochs, batch_size=effective_batch_size,
-                                        validation_split=validation_split, callbacks=callbacks,
+                                        validation_split=validation_split if validation_split > 0 else 0.0, 
+                                        callbacks=callbacks,
                                         verbose=0, shuffle=False)
 
-            final_val_loss = history.history.get('val_loss', [float('inf')])[-1]
+            final_loss_key = 'val_loss' if validation_split > 0 else 'loss'
+            final_val_loss = history.history.get(final_loss_key, [float('inf')])[-1]
             
             price_std = data['close'].std()
-            loss_threshold = 0.1 * (price_std ** 2) if price_std > 0 else 0.5
+            loss_threshold = (0.25 * (price_std / data['close'].mean()) * 1.5) if price_std > 0 and data['close'].mean() > 0 else 0.75
 
-            if final_val_loss < loss_threshold * 10:
+            if final_val_loss < loss_threshold:
                 self.is_trained = True
                 self.last_training_date = pd.Timestamp.now(tz='UTC')
                 try:
                     self.save()
-                    self.logger.info(f"LSTM model for {self.symbol}-{self.timeframe} trained and saved successfully with val_loss: {final_val_loss:.4f}")
+                    self.logger.info(f"LSTM model for {self.symbol}-{self.timeframe} trained and saved successfully with {final_loss_key}: {final_val_loss:.4f}")
                 except Exception as save_e:
                     self.logger.error(f"Failed to save LSTM model for {self.symbol}-{self.timeframe}: {save_e}")
                     self.is_trained = False
                     return False
                 return True
             else:
-                self.logger.warning(f"LSTM training for {self.symbol}-{self.timeframe} did not converge. Final val_loss: {final_val_loss:.4f}")
+                self.logger.warning(f"LSTM training for {self.symbol}-{self.timeframe} did not converge. Final {final_loss_key}: {final_val_loss:.4f} (Threshold: {loss_threshold:.4f})")
                 self.is_trained = False
                 return False
         except Exception as e:
@@ -346,13 +354,21 @@ class LSTMModel(BaseModel):
             reshaped_sequence = scaled_sequence.reshape(1, self.sequence_length, scaled_sequence.shape[1])
             
             with managed_tf_session():
-                scaled_prediction = self.model.predict(reshaped_sequence, verbose=0)
+                # Make multiple predictions with dropout enabled for uncertainty estimation
+                predictions_sample = [self.model(reshaped_sequence, training=True) for _ in range(10)]
+                predictions_sample_np = np.array([p.numpy() for p in predictions_sample]).squeeze()
 
-            if scaled_prediction is None or len(scaled_prediction) == 0:
+
+            if predictions_sample_np is None or len(predictions_sample_np) == 0:
                 return None
 
+            scaled_prediction = np.mean(predictions_sample_np, axis=0, keepdims=True)
+            prediction_std = np.std(predictions_sample_np, axis=0)
+
             prediction = self.feature_engineer.inverse_scale_prediction(scaled_prediction)
-            uncertainty = min(np.std(scaled_prediction) * 0.1, 0.5)
+            
+            # Normalize uncertainty
+            uncertainty = min(prediction_std * 0.5, 0.9)
             
             return prediction, float(uncertainty)
         except Exception as e:
@@ -391,7 +407,13 @@ class LSTMModel(BaseModel):
                 self.model.compile(optimizer=Adam(learning_rate=self.lr, clipnorm=1.0), loss='huber', metrics=['mae'])
 
             self.is_trained = True
-            self.input_shape = self.model.layers[0].input_shape[1:]
+            if self.model.input_shape:
+                self.input_shape = self.model.input_shape[1:]
+            else:
+                self.logger.error(f"Loaded LSTM model for {self.symbol}-{self.timeframe} has no input_shape.")
+                self.is_trained = False
+                raise ModelError("Loaded model has no input_shape")
+
             self.logger.info(f"LSTM model for {self.symbol}-{self.timeframe} loaded from {model_file}")
         except Exception as e:
             self.logger.error(f"Error loading LSTM model for {self.symbol}-{self.timeframe}: {e}")
@@ -437,12 +459,14 @@ class XGBoostModel(BaseModel):
             
             features = self.feature_engineer.create_features(data)
             if features.empty or len(features) < 50:
-                self.logger.warning(f"No features created for XGBoost {self.symbol}-{self.timeframe}")
+                self.logger.warning(f"No features or insufficient features created for XGBoost {self.symbol}-{self.timeframe}")
                 return False
             
             target = features['close'].shift(-1)
-            features = features[:-1]
-            target = target[:-1].dropna()
+            features = features.drop(columns=['close'])
+            
+            target = target.dropna()
+            features = features.loc[target.index]
             
             if len(features) != len(target) or len(features) == 0:
                 self.logger.warning(f"Feature-target mismatch for XGBoost {self.symbol}-{self.timeframe}")
@@ -456,9 +480,10 @@ class XGBoostModel(BaseModel):
                 self.logger.warning(f"Insufficient split data for XGBoost {self.symbol}-{self.timeframe}")
                 return False
 
-            self.model.fit(X_train, y_train, 
-                          eval_set=[(X_val, y_val)], 
-                          verbose=False)
+            self.model.fit(X_train.values, y_train.values, 
+                          eval_set=[(X_val.values, y_val.values)], 
+                          verbose=False,
+                          early_stopping_rounds=10)
             
             self.is_trained = True
             self.last_training_date = pd.Timestamp.now(tz='UTC')
@@ -493,18 +518,20 @@ class XGBoostModel(BaseModel):
                 self.logger.warning(f"No features for XGBoost prediction {self.symbol}-{self.timeframe}")
                 return None
             
-            last_features = features.tail(1)
+            last_features = features.drop(columns=['close']).tail(1)
             
             if last_features.empty:
                 return None
             
-            prediction = self.model.predict(last_features)
+            prediction = self.model.predict(last_features.values)
             
             uncertainty = 0.05
             if len(last_features) > 0:
                 try:
-                    predictions_sample = [self.model.predict(last_features)[0] for _ in range(5)]
-                    uncertainty = min(np.std(predictions_sample), 0.5)
+                    # XGBoost doesn't have built-in dropout, so we simulate uncertainty
+                    # by checking feature importance or other methods.
+                    # For now, a fixed small uncertainty.
+                    pass
                 except:
                     uncertainty = 0.05
             
@@ -542,7 +569,7 @@ class XGBoostModel(BaseModel):
 
 
 class ModelManager:
-    def __init__(self, model_path: str = 'models', redis_client: Optional[redis.Redis] = None):
+    def __init__(self, trading_service: 'TradingService', model_path: str = 'models', redis_client: Optional[redis.Redis] = None):
         self.model_path = Path(model_path)
         self.model_path.mkdir(parents=True, exist_ok=True)
         self.redis_client = redis_client
@@ -552,6 +579,7 @@ class ModelManager:
         self.logger = logger
         self._training_executor = None
         self._prediction_executor = None
+        self.trading_service = trading_service
 
     def _check_if_closed(self):
         if self._is_closed:
@@ -610,7 +638,7 @@ class ModelManager:
                 else:
                     model_file, scaler_file = model._get_model_paths(model_type, "json")
                 
-                if model_file.exists() and scaler_file.exists():
+                if model_file.exists() and (scaler_file.exists() or model_type == 'xgboost'):
                     try:
                         await self._run_in_executor(model.load, executor_type='prediction')
                         self.logger.info(f"Loaded existing {model_type.upper()} model for {key}")
@@ -705,32 +733,53 @@ class ModelManager:
                 self.logger.error(f"Error during model initialization: {res}", exc_info=res)
         self.logger.info(f"Model initialization finished. Loaded/Created {len(tasks)} models.")
 
-    async def predict_with_confidence(self, model_type: str, symbol: str, timeframe: str, data: pd.DataFrame) -> Optional[Dict[str, float]]:
+    async def train_and_save_model(self, model_type: str, symbol: str, timeframe: str) -> bool:
+        self.logger.info(f"Attempting to train and save {model_type} model for {symbol}-{timeframe}")
+        data = await self.trading_service.get_data_for_model(symbol, timeframe)
+        if data is None or data.empty:
+            self.logger.warning(f"Could not fetch sufficient data for model training: {symbol}-{timeframe}")
+            return False
+        
+        return await self.train_model(model_type, symbol, timeframe, data)
+
+    async def predict_with_confidence(self, model_type: str, symbol: str, timeframe: str) -> Optional[Dict[str, float]]:
         self._check_if_closed()
         
+        model = await self.get_model(model_type, symbol, timeframe)
+        if not model:
+            self.logger.error(f"Failed to get model for prediction: {model_type} on {symbol}-{timeframe}")
+            return None
+
+        if not model.is_trained:
+            self.logger.info(f"Model {model_type} for {symbol}-{timeframe} is not trained. Attempting to train now.")
+            success = await self.train_and_save_model(model_type, symbol, timeframe)
+            if not success:
+                self.logger.warning(f"Training failed for {model_type} on {symbol}-{timeframe}. Skipping prediction.")
+                return None
+            model = await self.get_model(model_type, symbol, timeframe)
+            if not model or not model.is_trained:
+                self.logger.error(f"Model still not trained after attempt for {model_type} on {symbol}-{timeframe}.")
+                return None
+
+        data = await self.trading_service.get_data_for_model(symbol, timeframe, for_prediction=True)
         if data is None or data.empty:
             self.logger.warning(f"Empty data for prediction {model_type} on {symbol}-{timeframe}")
             return None
-        
-        model = await self.get_model(model_type, symbol, timeframe)
-        if not model or not model.is_trained:
-            self.logger.info(f"Prediction for {model_type} on {symbol}-{timeframe} skipped: model not trained or available.")
-            return None
-        
+
         try:
             prediction_result = await self._run_in_executor(model.predict, data, executor_type='prediction')
             if prediction_result is None or len(prediction_result) != 2:
                 return None
             
             prediction, uncertainty = prediction_result
-            if prediction is None or len(prediction) == 0:
+            if prediction is None or len(prediction) == 0 or np.isnan(prediction[0]) or np.isinf(prediction[0]):
                 return None
             
             raw_confidence = 50.0
             calibrated_confidence = 50.0
             
             current_price = data['close'].iloc[-1]
-            if current_price > 0 and not np.isnan(prediction[0]) and not np.isinf(prediction[0]):
+            if current_price > 0:
                 price_change_pct = abs(prediction[0] - current_price) / current_price * 100
                 raw_confidence = min(price_change_pct * 10, 100.0)
                 calibrated_confidence = raw_confidence

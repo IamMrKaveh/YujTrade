@@ -1,13 +1,13 @@
 import asyncio
-from contextlib import asynccontextmanager
-from typing import Optional, AsyncGenerator, Any
+from contextlib import contextmanager, asynccontextmanager
+from typing import Optional, AsyncGenerator, Any, Generator
 
 import tensorflow as tf
 from .logger_config import logger
 
 
-@asynccontextmanager
-async def managed_tf_session() -> AsyncGenerator[None, None]:
+@contextmanager
+def managed_tf_session() -> Generator[None, None, None]:
     """
     A context manager to handle TensorFlow session clearing.
     """
@@ -33,4 +33,3 @@ async def managed_resource(resource: Any) -> AsyncGenerator[Any, None]:
             await resource.shutdown()
         elif hasattr(resource, 'cleanup') and asyncio.iscoroutinefunction(resource.cleanup):
             await resource.cleanup()
-            

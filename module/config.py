@@ -62,17 +62,18 @@ class ConfigManager:
         "symbols": SYMBOLS,
         "timeframes": TIME_FRAMES,
         "min_confidence_score": 0,
+        "signal_threshold": 0.35,
         "max_signals_per_timeframe": 1,
         "enable_scheduled_analysis": False,
         "schedule_hour": "*/1",
-        "app_version": "4.1.0",
+        "app_version": "5.0.0",
         "indicator_weights": DEFAULT_INDICATOR_WEIGHTS,
         "timeframe_based_weights": True,
         "soft_group_weights": {
             'momentum': 25, 'trend': 25, 'volatility': 25, 'volume': 25
         },
         "unanimity_threshold": 0.9,
-        "current_timeframe": "1d"
+        "current_timeframe": "1h"
     }
 
     def __init__(self, config_path: str = "config.json"):
