@@ -10,7 +10,7 @@ import talib
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
-from .core import (
+from ..common.core import (
     DynamicLevels, TradingSignal, SignalType, MarketAnalysis,
     FundamentalAnalysis, OnChainAnalysis, DerivativesAnalysis,
     OrderBook, MacroEconomicData, TrendingData, BinanceFuturesData,
@@ -20,9 +20,9 @@ from .market import MarketDataProvider
 from .indicators.indicator_factory import IndicatorFactory
 from .indicators.base import IndicatorResult
 from .analyzers import MarketConditionAnalyzer, PatternAnalyzer
-from .logger_config import logger
+from ..config.logger import logger
 from .utils import calculate_risk_reward_ratio, calculate_dynamic_levels, detect_market_regime, IndicatorNormalizer, calculate_fibonacci_levels, calculate_pivot_points
-from .constants import LONG_TERM_CONFIG, INDICATOR_GROUPS
+from ..common.constants import LONG_TERM_CONFIG, INDICATOR_GROUPS
 from .data_validator import DataQualityChecker
 from .models import ModelManager
 
@@ -109,69 +109,6 @@ class MLConfidenceCalibrator:
         
         if len(self.calibration_data[model_name]) > 500:
             self.calibration_data[model_name] = self.calibration_data[model_name][-500:]
-
-
-class IndicatorCorrelationManager:
-    def __init__(self):
-        self.correlation_matrix: Optional[pd.DataFrame] = None
-        self.correlation_threshold = 0.7
-
-    def compute_correlations(self, processed_results: Dict[str, Any], data: pd.DataFrame):
-        indicator_values = {
-            name: item['result'].value 
-            for name, item in processed_results.items() 
-            if item.get('result') and isinstance(item['result'].value, (int, float)) and not pd.isna(item['result'].value)
-        }
-        
-        if not indicator_values or len(indicator_values) < 2:
-            self.correlation_matrix = None
-            return
-
-        temp_data = {}
-        for name, item in processed_results.items():
-            if item.get('result') and isinstance(item['result'].value, (int, float)):
-                temp_data[name] = np.random.rand(10) * item['result'].value
-
-        if len(temp_data) < 2:
-            self.correlation_matrix = None
-            return
-
-        df = pd.DataFrame(temp_data)
-        self.correlation_matrix = df.corr()
-
-    def get_decorrelation_weights(self, processed_results: Dict[str, Any]) -> Dict[str, float]:
-        if self.correlation_matrix is None or self.correlation_matrix.empty:
-            return {name: 1.0 for name in processed_results.keys()}
-
-        weights = {}
-        correlated_groups = []
-        
-        indicators = list(self.correlation_matrix.columns)
-        
-        for i, indicator1 in enumerate(indicators):
-            is_grouped = any(indicator1 in group for group in correlated_groups)
-            if is_grouped:
-                continue
-            
-            new_group = {indicator1}
-            for j in range(i + 1, len(indicators)):
-                indicator2 = indicators[j]
-                if self.correlation_matrix.loc[indicator1, indicator2] > self.correlation_threshold:
-                    new_group.add(indicator2)
-            
-            if len(new_group) > 1:
-                correlated_groups.append(new_group)
-
-        for group in correlated_groups:
-            group_size = len(group)
-            for indicator in group:
-                weights[indicator] = 1.0 / group_size
-        
-        for indicator in processed_results.keys():
-            if indicator not in weights:
-                weights[indicator] = 1.0
-        
-        return weights
 
 
 class AnalysisEngine:
