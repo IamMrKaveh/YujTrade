@@ -4,17 +4,25 @@ import talib
 
 import pandas_ta as ta
 
-from ...common.core import IndicatorResult
-from .base import TechnicalIndicator
+from common.core import IndicatorResult
+from common.exceptions import InsufficientDataError
+from features.indicators.base import TechnicalIndicator
+
 
 class VortexIndicator(TechnicalIndicator):
     def __init__(self, period: int = 14):
         self.period = period
 
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        vortex_df = ta.vortex(high=data['high'], low=data['low'], close=data['close'], length=self.period)
+        if len(data) < self.period:
+            raise InsufficientDataError(
+                f"VortexIndicator requires at least {self.period} data points."
+            )
+        vortex_df = ta.vortex(
+            high=data["high"], low=data["low"], close=data["close"], length=self.period
+        )
         if vortex_df is None or vortex_df.empty or vortex_df.iloc[-1].isna().any():
-            return IndicatorResult(name="Vortex", value=np.nan, signal_strength=np.nan, interpretation="insufficient_data")
+            raise InsufficientDataError("Vortex calculation resulted in NaN.")
 
         vi_plus = float(vortex_df.iloc[-1, 0])
         vi_minus = float(vortex_df.iloc[-1, 1])
@@ -29,12 +37,27 @@ class VortexIndicator(TechnicalIndicator):
             interpretation = "no_trend"
             strength = 50.0
 
-        return IndicatorResult(name="Vortex", value=vi_plus - vi_minus, signal_strength=float(strength), interpretation=interpretation)
+        return IndicatorResult(
+            name="Vortex",
+            value=vi_plus - vi_minus,
+            signal_strength=float(strength),
+            interpretation=interpretation,
+        )
 
 
 class KSTIndicator(TechnicalIndicator):
-    def __init__(self, roc1: int = 10, roc2: int = 15, roc3: int = 20, roc4: int = 30, 
-                sma1: int = 10, sma2: int = 10, sma3: int = 10, sma4: int = 15, signal: int = 9):
+    def __init__(
+        self,
+        roc1: int = 10,
+        roc2: int = 15,
+        roc3: int = 20,
+        roc4: int = 30,
+        sma1: int = 10,
+        sma2: int = 10,
+        sma3: int = 10,
+        sma4: int = 15,
+        signal: int = 9,
+    ):
         self.roc1 = roc1
         self.roc2 = roc2
         self.roc3 = roc3
@@ -44,16 +67,27 @@ class KSTIndicator(TechnicalIndicator):
         self.sma3 = sma3
         self.sma4 = sma4
         self.signal = signal
+        self.min_period = max(roc1, roc2, roc3, roc4) + max(sma1, sma2, sma3, sma4)
 
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        if len(data) < self.min_period:
+            raise InsufficientDataError(
+                f"KSTIndicator requires at least {self.min_period} data points."
+            )
         kst_df = ta.kst(
-            close=data['close'], 
-            roc1=self.roc1, roc2=self.roc2, roc3=self.roc3, roc4=self.roc4, 
-            sma1=self.sma1, sma2=self.sma2, sma3=self.sma3, sma4=self.sma4, 
-            signal=self.signal
+            close=data["close"],
+            roc1=self.roc1,
+            roc2=self.roc2,
+            roc3=self.roc3,
+            roc4=self.roc4,
+            sma1=self.sma1,
+            sma2=self.sma2,
+            sma3=self.sma3,
+            sma4=self.sma4,
+            signal=self.signal,
         )
         if kst_df is None or kst_df.empty or kst_df.iloc[-1].isna().any():
-            return IndicatorResult(name="KST", value=np.nan, signal_strength=np.nan, interpretation="insufficient_data")
+            raise InsufficientDataError("KST calculation resulted in NaN.")
 
         kst_value = float(kst_df.iloc[-1, 0])
         kst_signal = float(kst_df.iloc[-1, 1])
@@ -68,75 +102,45 @@ class KSTIndicator(TechnicalIndicator):
             interpretation = "neutral"
             strength = 50.0
 
-        return IndicatorResult(name="KST", value=kst_value, signal_strength=float(strength), interpretation=interpretation)
+        return IndicatorResult(
+            name="KST",
+            value=kst_value,
+            signal_strength=float(strength),
+            interpretation=interpretation,
+        )
 
 
 class HilbertDominantCycleIndicator(TechnicalIndicator):
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        dc_period = talib.HT_DCPERIOD(data['close'].to_numpy(dtype=np.float64))
-        if dc_period.size == 0 or pd.isna(dc_period[-1]):
-            return IndicatorResult(name="HT_DominantCycle", value=np.nan, signal_strength=np.nan, interpretation="insufficient_data")
+        if len(data) < 32:
+            raise InsufficientDataError("HilbertDominantCycleIndicator requires at least 32 data points.")
 
-        current_period = float(dc_period[-1])
+        ht_dc_period = talib.HT_DCPERIOD(data["close"].to_numpy(dtype=np.float64))
+        if ht_dc_period.size == 0 or pd.isna(ht_dc_period[-1]):
+            raise InsufficientDataError("HT_DCPERIOD calculation resulted in NaN.")
 
-        if current_period < 20:
-            interpretation = "short_cycle"
-            strength = min((20 - current_period) / 20 * 100, 100.0)
-        elif current_period > 40:
-            interpretation = "long_cycle"
-            strength = min((current_period - 40) / 40 * 100, 100.0)
-        else:
-            interpretation = "normal_cycle"
-            strength = 50.0
+        value = float(ht_dc_period[-1])
+        strength = 100 - min(value, 100)
+        interpretation = f"dominant_cycle_{int(value)}_periods"
 
-        return IndicatorResult(name="HT_DominantCycle", value=current_period, signal_strength=float(strength), interpretation=interpretation)
+        return IndicatorResult(
+            name="HT_DC", value=value, signal_strength=strength, interpretation=interpretation
+        )
 
 
 class HilbertTrendVsCycleModeIndicator(TechnicalIndicator):
     def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        trend_mode = talib.HT_TRENDMODE(data['close'].to_numpy(dtype=np.float64))
-        if trend_mode.size == 0 or pd.isna(trend_mode[-1]):
-            return IndicatorResult(name="HT_TrendMode", value=np.nan, signal_strength=np.nan, interpretation="insufficient_data")
+        if len(data) < 63:
+            raise InsufficientDataError("HilbertTrendVsCycleModeIndicator requires at least 63 data points.")
 
-        current_mode = float(trend_mode[-1])
+        ht_trendmode = talib.HT_TRENDMODE(data["close"].to_numpy(dtype=np.float64))
+        if ht_trendmode.size == 0 or pd.isna(ht_trendmode[-1]):
+            raise InsufficientDataError("HT_TRENDMODE calculation resulted in NaN.")
 
-        if current_mode == 1:
-            interpretation = "trending_market"
-            strength = 100.0
-        else:
-            interpretation = "cycling_market"
-            strength = 100.0
+        value = int(ht_trendmode[-1])
+        interpretation = "trend_mode" if value == 1 else "cycle_mode"
+        strength = 100.0 if value == 1 else 50.0
 
-        return IndicatorResult(name="HT_TrendMode", value=current_mode, signal_strength=strength, interpretation=interpretation)
-
-
-class KaufmanEfficiencyRatioIndicator(TechnicalIndicator):
-    def __init__(self, period: int = 10):
-        self.period = period
-
-    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
-        if len(data) < self.period:
-            return IndicatorResult(name="ER", value=np.nan, signal_strength=np.nan, interpretation="insufficient_data")
-
-        close_np = data['close'].to_numpy(dtype=np.float64)
-        change = abs(close_np[-1] - close_np[-self.period])
-        volatility = np.sum(np.abs(np.diff(close_np[-self.period:])))
-
-        if volatility == 0:
-            er = 0.0
-        else:
-            er = change / volatility
-
-        if er > 0.7:
-            interpretation = "strong_trend"
-            strength = er * 100
-        elif er < 0.3:
-            interpretation = "weak_trend"
-            strength = (1 - er) * 100
-        else:
-            interpretation = "moderate_trend"
-            strength = 50.0
-
-        return IndicatorResult(name="ER", value=float(er), signal_strength=float(strength), interpretation=interpretation)
-
-
+        return IndicatorResult(
+            name="HT_TREND_MODE", value=float(value), signal_strength=strength, interpretation=interpretation
+        )

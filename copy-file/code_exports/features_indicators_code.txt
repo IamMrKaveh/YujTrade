@@ -1,0 +1,831 @@
+[features\indicators\all_indicators.py] :
+
+from typing import Dict, Type
+
+from .base import TechnicalIndicator
+from .custom import (
+    MedianPriceIndicator,
+    PivotPointsIndicator,
+)
+from .cycle import (
+    KSTIndicator,
+    VortexIndicator,
+)
+from .momentum import (
+    RSIIndicator,
+    StochasticIndicator,
+)
+from .trend import (
+    MACDIndicator,
+    MovingAverageIndicator,
+)
+from .volatility import (
+    ATRIndicator,
+    BollingerBandsIndicator,
+)
+from .volume import (
+    ChaikinMoneyFlowIndicator,
+    VolumeIndicator,
+)
+
+
+def get_all_indicators() -> Dict[str, Type[TechnicalIndicator]]:
+    """
+    Returns a dictionary mapping indicator names to their corresponding class types.
+    This avoids instantiating all indicators at once.
+    """
+    return {
+        "sma": MovingAverageIndicator,
+        "ema": MovingAverageIndicator,
+        "rsi": RSIIndicator,
+        "macd": MACDIndicator,
+        "bb": BollingerBandsIndicator,
+        "stoch": StochasticIndicator,
+        "volume": VolumeIndicator,
+        "atr": ATRIndicator,
+        "ichimoku": IchimokuIndicator,
+        "williams_r": WilliamsRIndicator,
+        "cci": CCIIndicator,
+        "supertrend": SuperTrendIndicator,
+        "adx": ADXIndicator,
+        "cmf": ChaikinMoneyFlowIndicator,
+        "obv": OBVIndicator,
+        "squeeze": SqueezeMomentumIndicator,
+        "psar": ParabolicSARIndicator,
+        "vwap": VWAPIndicator,
+        "mfi": MoneyFlowIndexIndicator,
+        "aroon": AroonIndicator,
+        "uo": UltimateOscillatorIndicator,
+        "roc": ROCIndicator,
+        "ad_line": ADLineIndicator,
+        "force_index": ForceIndexIndicator,
+        "vwma": VWMAIndicator,
+        "keltner": KeltnerChannelsIndicator,
+        "donchian": DonchianChannelsIndicator,
+        "trix": TRIXIndicator,
+        "eom": EaseOfMovementIndicator,
+        "std_dev": StandardDeviationIndicator,
+        "stochrsi": StochRSIIndicator,
+        "kst": KSTIndicator,
+        "mass": MassIndexIndicator,
+        "corr_coef": CorrelationCoefficientIndicator,
+        "elder_ray": ElderRayIndexIndicator,
+        "pivot": PivotPointsIndicator,
+        "momentum": MomentumIndicator,
+        "dpo": DetrendedPriceOscillatorIndicator,
+        "choppiness": ChoppinessIndexIndicator,
+        "vortex": VortexIndicator,
+        "awesome": AwesomeOscillatorIndicator,
+        "cmo": ChandeMomentumOscillatorIndicator,
+        "rvi": RelativeVigorIndexIndicator,
+        "pvr": PriceVolumeRankIndicator,
+        "ado": AccumulationDistributionOscillatorIndicator,
+        "pvt": PriceVolumeTrendIndicator,
+        "bop": BalanceOfPowerIndicator,
+        "linreg": LinearRegressionIndicator,
+        "linreg_slope": LinearRegressionSlopeIndicator,
+        "median_price": MedianPriceIndicator,
+        "typical_price": TypicalPriceIndicator,
+        "weighted_close": WeightedClosePriceIndicator,
+        "hma": HullMovingAverageIndicator,
+        "zlema": ZLEMAIndicator,
+        "kama": KAMAIndicator,
+        "t3": T3Indicator,
+        "dema": DEMAIndicator,
+        "tema": TEMAIndicator,
+        "fisher": FisherTransformIndicator,
+        "stc": SchaffTrendCycleIndicator,
+        "qqe": QQEIndicator,
+        "connors_rsi": ConnorsRSIIndicator,
+        "smi": StochasticMomentumIndexIndicator,
+        "tsi": TSIIndicator,
+        "gann_hilo": GannHiLoActivatorIndicator,
+        "ma_ribbon": MovingAverageRibbonIndicator,
+        "fractal": FractalIndicator,
+        "chaikin_vol": ChaikinVolatilityIndicator,
+        "historical_vol": HistoricalVolatilityIndicator,
+        "ulcer_index": UlcerIndexIndicator,
+        "atr_bands": ATRBandsIndicator,
+        "bbw": BollingerBandwidthIndicator,
+        "volume_osc": VolumeOscillatorIndicator,
+        "kvo": KlingerVolumeOscillatorIndicator,
+        "frama": FRAMAIndicator,
+        "vidya": VIDYAIndicator,
+        "mama": MAMAIndicator,
+        "rmi": RMIIndicator,
+        "rsi2": RSI2Indicator,
+        "ppo": PPOIndicator,
+        "pvo": PVOIndicator,
+        "nvi": NVIIndicator,
+        "pvi": PVIIndicator,
+        "mfi_bw": MFIBillWilliamsIndicator,
+        "ht_dc": HilbertDominantCycleIndicator,
+        "ht_trend_mode": HilbertTrendVsCycleModeIndicator,
+        "er": KaufmanEfficiencyRatioIndicator,
+        "coppock": CoppockCurveIndicator,
+        "bop_rsi": BalanceOfPowerRSIIndicator,
+        "price_action": PriceActionPatternIndicator,
+        "market_structure": MarketStructureIndicator,
+        "liquidity_levels": LiquidityLevelsIndicator,
+        "vw_rsi": VolumeWeightedRSIIndicator,
+        "smc": SmartMoneyConceptIndicator,
+        "wyckoff_vsa": WyckoffVolumeSpreadIndicator,
+        "adi": AccumulationDistributionIndexIndicator,
+        "tii": TrendIntensityIndexIndicator,
+        "order_flow": OrderFlowImbalanceIndicator,
+    }
+
+
+=====
+
+[features\indicators\base.py] :
+
+from abc import ABC, abstractmethod
+from typing import Protocol
+
+import pandas as pd
+
+from common.core import IndicatorResult
+from common.exceptions import IndicatorError, InsufficientDataError
+
+
+class IndicatorInterface(Protocol):
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult: ...
+
+
+class TechnicalIndicator(ABC):
+    @abstractmethod
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        """
+        Calculates the indicator value.
+
+        Raises:
+            InsufficientDataError: If the provided data is not enough for calculation.
+            IndicatorError: For other calculation-related errors.
+        """
+        pass
+
+
+=====
+
+[features\indicators\custom.py] :
+
+from abc import ABC, abstractmethod
+from typing import Protocol, Dict, Optional
+
+import numpy as np
+import pandas as pd
+import talib
+
+import pandas_ta as ta
+from pandas_ta.momentum import stoch, roc, stochrsi, trix, uo, squeeze, cmo
+from pandas_ta.overlap import ichimoku, supertrend, kama
+from pandas_ta.volatility import bbands, atr, kc, massi
+from pandas_ta.trend import adx as adx_ta, aroon, psar, dpo
+from pandas_ta.volume import cmf, obv, ad, eom, efi, pvt
+
+from common.core import IndicatorResult
+from common.exceptions import InsufficientDataError
+from features.indicators.base import TechnicalIndicator
+
+
+class PivotPointsIndicator(TechnicalIndicator):
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        if len(data) < 2:
+            raise InsufficientDataError(
+                "PivotPointsIndicator requires at least 2 data points."
+            )
+
+        prev_high = float(data["high"].iloc[-2])
+        prev_low = float(data["low"].iloc[-2])
+        prev_close = float(data["close"].iloc[-2])
+        current_price = float(data["close"].iloc[-1])
+
+        pivot = (prev_high + prev_low + prev_close) / 3
+        r1 = 2 * pivot - prev_low
+        s1 = 2 * pivot - prev_high
+
+        if current_price > r1:
+            interpretation = "above_resistance"
+            strength = 100.0
+        elif current_price < s1:
+            interpretation = "below_support"
+            strength = 100.0
+        else:
+            interpretation = "in_pivot_range"
+            strength = 50.0
+
+        return IndicatorResult(
+            name="PivotPoints",
+            value=pivot,
+            signal_strength=strength,
+            interpretation=interpretation,
+        )
+
+
+class MedianPriceIndicator(TechnicalIndicator):
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        if len(data) < 1:
+            raise InsufficientDataError(
+                "MedianPriceIndicator requires at least 1 data point."
+            )
+        median_price = talib.MEDPRICE(
+            data["high"].to_numpy(dtype=np.float64),
+            data["low"].to_numpy(dtype=np.float64),
+        )
+        if median_price.size == 0 or pd.isna(median_price[-1]):
+            raise InsufficientDataError("MedianPrice calculation resulted in NaN.")
+
+        current_median = float(median_price[-1])
+        current_close = float(data["close"].iloc[-1])
+
+        if current_close > current_median:
+            interpretation = "above_median"
+            strength = (
+                abs(current_close - current_median) / current_median * 100
+                if current_median > 0
+                else 0.0
+            )
+        elif current_close < current_median:
+            interpretation = "below_median"
+            strength = (
+                abs(current_close - current_median) / current_median * 100
+                if current_median > 0
+                else 0.0
+            )
+        else:
+            interpretation = "at_median"
+            strength = 50.0
+
+        return IndicatorResult(
+            name="MedianPrice",
+            value=current_median,
+            signal_strength=min(float(strength), 100.0),
+            interpretation=interpretation,
+        )
+
+
+=====
+
+[features\indicators\cycle.py] :
+
+import numpy as np
+import pandas as pd
+import talib
+
+import pandas_ta as ta
+
+from common.core import IndicatorResult
+from common.exceptions import InsufficientDataError
+from features.indicators.base import TechnicalIndicator
+
+
+class VortexIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 14):
+        self.period = period
+
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        if len(data) < self.period:
+            raise InsufficientDataError(
+                f"VortexIndicator requires at least {self.period} data points."
+            )
+        vortex_df = ta.vortex(
+            high=data["high"], low=data["low"], close=data["close"], length=self.period
+        )
+        if vortex_df is None or vortex_df.empty or vortex_df.iloc[-1].isna().any():
+            raise InsufficientDataError("Vortex calculation resulted in NaN.")
+
+        vi_plus = float(vortex_df.iloc[-1, 0])
+        vi_minus = float(vortex_df.iloc[-1, 1])
+
+        if vi_plus > vi_minus and vi_plus > 1:
+            interpretation = "bullish_trend"
+            strength = min((vi_plus - 1) * 100, 100.0)
+        elif vi_minus > vi_plus and vi_minus > 1:
+            interpretation = "bearish_trend"
+            strength = min((vi_minus - 1) * 100, 100.0)
+        else:
+            interpretation = "no_trend"
+            strength = 50.0
+
+        return IndicatorResult(
+            name="Vortex",
+            value=vi_plus - vi_minus,
+            signal_strength=float(strength),
+            interpretation=interpretation,
+        )
+
+
+class KSTIndicator(TechnicalIndicator):
+    def __init__(
+        self,
+        roc1: int = 10,
+        roc2: int = 15,
+        roc3: int = 20,
+        roc4: int = 30,
+        sma1: int = 10,
+        sma2: int = 10,
+        sma3: int = 10,
+        sma4: int = 15,
+        signal: int = 9,
+    ):
+        self.roc1 = roc1
+        self.roc2 = roc2
+        self.roc3 = roc3
+        self.roc4 = roc4
+        self.sma1 = sma1
+        self.sma2 = sma2
+        self.sma3 = sma3
+        self.sma4 = sma4
+        self.signal = signal
+        self.min_period = max(roc1, roc2, roc3, roc4) + max(sma1, sma2, sma3, sma4)
+
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        if len(data) < self.min_period:
+            raise InsufficientDataError(
+                f"KSTIndicator requires at least {self.min_period} data points."
+            )
+        kst_df = ta.kst(
+            close=data["close"],
+            roc1=self.roc1,
+            roc2=self.roc2,
+            roc3=self.roc3,
+            roc4=self.roc4,
+            sma1=self.sma1,
+            sma2=self.sma2,
+            sma3=self.sma3,
+            sma4=self.sma4,
+            signal=self.signal,
+        )
+        if kst_df is None or kst_df.empty or kst_df.iloc[-1].isna().any():
+            raise InsufficientDataError("KST calculation resulted in NaN.")
+
+        kst_value = float(kst_df.iloc[-1, 0])
+        kst_signal = float(kst_df.iloc[-1, 1])
+
+        if kst_value > kst_signal and kst_value > 0:
+            interpretation = "bullish"
+            strength = min(abs(kst_value), 100.0)
+        elif kst_value < kst_signal and kst_value < 0:
+            interpretation = "bearish"
+            strength = min(abs(kst_value), 100.0)
+        else:
+            interpretation = "neutral"
+            strength = 50.0
+
+        return IndicatorResult(
+            name="KST",
+            value=kst_value,
+            signal_strength=float(strength),
+            interpretation=interpretation,
+        )
+
+
+=====
+
+[features\indicators\factory.py] :
+
+from typing import Optional, List, Dict, Type
+
+from features.indicators.all_indicators import get_all_indicators
+from features.indicators.base import TechnicalIndicator
+from features.indicators.trend import MovingAverageIndicator
+
+
+class IndicatorFactory:
+    def __init__(self):
+        self._indicator_classes: Dict[str, Type[TechnicalIndicator]] = (
+            get_all_indicators()
+        )
+
+    def create(self, name: str) -> Optional[TechnicalIndicator]:
+        """
+        Dynamically creates an instance of a technical indicator.
+        """
+        name_lower = name.lower()
+
+        # Handle special cases like 'sma_20', 'ema_12'
+        if name_lower.startswith(("sma_", "ema_")):
+            try:
+                ma_type, period_str = name_lower.split("_")
+                period = int(period_str)
+                return MovingAverageIndicator(period=period, ma_type=ma_type)
+            except (ValueError, IndexError):
+                return None  # Invalid format
+
+        indicator_class = self._indicator_classes.get(name_lower)
+        if indicator_class:
+            return indicator_class()
+
+        return None
+
+    def get_all_indicator_names(self) -> List[str]:
+        # This can be expanded to include dynamic names like 'sma_20' if needed,
+        # but for now, returning the base names is sufficient.
+        return list(self._indicator_classes.keys())
+
+
+=====
+
+[features\indicators\momentum.py] :
+
+import numpy as np
+import pandas as pd
+import talib
+
+import pandas_ta as ta
+from pandas_ta.momentum import roc, stochrsi, trix, uo, squeeze, cmo
+
+from common.core import IndicatorResult
+from common.exceptions import InsufficientDataError
+from features.indicators.base import TechnicalIndicator
+
+
+class RSIIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 14):
+        self.period = period
+
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        if len(data) < self.period:
+            raise InsufficientDataError(
+                f"RSIIndicator requires at least {self.period} data points."
+            )
+        rsi_series = talib.RSI(
+            data["close"].to_numpy(dtype=np.float64), timeperiod=self.period
+        )
+        if rsi_series.size == 0 or pd.isna(rsi_series[-1]):
+            raise InsufficientDataError("RSI calculation resulted in NaN.")
+
+        current_rsi = float(rsi_series[-1])
+
+        if current_rsi > 70:
+            interpretation = "overbought"
+            signal_strength = min((current_rsi - 70) / 30 * 100, 100)
+        elif current_rsi < 30:
+            interpretation = "oversold"
+            signal_strength = min((30 - current_rsi) / 30 * 100, 100)
+        else:
+            interpretation = "neutral"
+            signal_strength = max(0, 50 - abs(current_rsi - 50))
+
+        return IndicatorResult(
+            name="RSI",
+            value=current_rsi,
+            signal_strength=float(signal_strength),
+            interpretation=interpretation,
+        )
+
+
+class StochasticIndicator(TechnicalIndicator):
+    def __init__(self, k_period: int = 14, d_period: int = 3, s_period: int = 3):
+        self.k_period = k_period
+        self.d_period = d_period
+        self.s_period = s_period
+        self.min_period = k_period + s_period + d_period
+
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        if len(data) < self.min_period:
+            raise InsufficientDataError(
+                f"StochasticIndicator requires at least {self.min_period} data points."
+            )
+        slowk, slowd = talib.STOCH(
+            data["high"].to_numpy(dtype=np.float64),
+            data["low"].to_numpy(dtype=np.float64),
+            data["close"].to_numpy(dtype=np.float64),
+            fastk_period=self.k_period,
+            slowk_period=self.s_period,
+            slowd_period=self.d_period,
+        )
+
+        if slowk.size == 0 or pd.isna(slowk[-1]):
+            raise InsufficientDataError("Stochastic calculation resulted in NaN.")
+
+        current_k = float(slowk[-1])
+        current_d = float(slowd[-1])
+        avg_stoch = (current_k + current_d) / 2
+
+        if avg_stoch > 80:
+            interpretation = "overbought"
+            signal_strength = min((avg_stoch - 80) / 20 * 100, 100)
+        elif avg_stoch < 20:
+            interpretation = "oversold"
+            signal_strength = min((20 - avg_stoch) / 20 * 100, 100)
+        else:
+            interpretation = "neutral"
+            signal_strength = max(0, 50 - abs(avg_stoch - 50))
+
+        return IndicatorResult(
+            name="STOCH",
+            value=float(avg_stoch),
+            signal_strength=float(signal_strength),
+            interpretation=interpretation,
+        )
+
+
+=====
+
+[features\indicators\trend.py] :
+
+import numpy as np
+import pandas as pd
+import talib
+
+import pandas_ta as ta
+from pandas_ta.overlap import ichimoku, supertrend, kama
+from pandas_ta.trend import adx, aroon
+
+from common.core import IndicatorResult
+from common.exceptions import InsufficientDataError, IndicatorError
+from features.indicators.base import TechnicalIndicator
+
+
+class MovingAverageIndicator(TechnicalIndicator):
+    def __init__(self, period: int, ma_type: str = "sma"):
+        self.period = period
+        self.ma_type = ma_type.upper()
+
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        if len(data) < self.period:
+            raise InsufficientDataError(
+                f"MovingAverageIndicator requires at least {self.period} data points."
+            )
+        try:
+            close_np = data["close"].to_numpy(dtype=np.float64)
+            if self.ma_type == "EMA":
+                ma_series = talib.EMA(close_np, timeperiod=self.period)
+            else:
+                ma_series = talib.SMA(close_np, timeperiod=self.period)
+        except Exception as e:
+            raise IndicatorError(f"Error calculating {self.ma_type}: {e}") from e
+
+        if ma_series.size == 0 or pd.isna(ma_series[-1]):
+            raise InsufficientDataError(f"{self.ma_type} calculation resulted in NaN.")
+
+        current_price = data["close"].iloc[-1]
+        current_ma = ma_series[-1]
+
+        signal_strength = (
+            abs((current_price - current_ma) / current_ma) * 100
+            if current_ma != 0
+            else 0
+        )
+        interpretation = (
+            "bullish_above_ma" if current_price > current_ma else "bearish_below_ma"
+        )
+
+        return IndicatorResult(
+            name=f"{self.ma_type}_{self.period}",
+            value=float(current_ma),
+            signal_strength=float(signal_strength),
+            interpretation=interpretation,
+        )
+
+
+class MACDIndicator(TechnicalIndicator):
+    def __init__(self, fast: int = 12, slow: int = 26, signal: int = 9):
+        self.fast = fast
+        self.slow = slow
+        self.signal_period = signal
+        self.min_period = slow + signal
+
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        if len(data) < self.min_period:
+            raise InsufficientDataError(
+                f"MACD requires at least {self.min_period} data points."
+            )
+        macd, macdsignal, macdhist = talib.MACD(
+            data["close"].to_numpy(dtype=np.float64),
+            fastperiod=self.fast,
+            slowperiod=self.slow,
+            signalperiod=self.signal_period,
+        )
+        if macd.size == 0 or pd.isna(macd[-1]):
+            raise InsufficientDataError("MACD calculation resulted in NaN.")
+
+        current_macd = float(macd[-1])
+        current_signal = float(macdsignal[-1])
+        current_histogram = float(macdhist[-1])
+
+        if current_macd > current_signal and current_histogram > 0:
+            interpretation = "bullish_crossover"
+            signal_strength = min(abs(current_histogram) * 1000, 100)
+        elif current_macd < current_signal and current_histogram < 0:
+            interpretation = "bearish_crossover"
+            signal_strength = min(abs(current_histogram) * 1000, 100)
+        else:
+            interpretation = "neutral"
+            signal_strength = 50.0
+
+        return IndicatorResult(
+            name="MACD",
+            value=current_macd,
+            signal_strength=float(signal_strength),
+            interpretation=interpretation,
+        )
+
+
+=====
+
+[features\indicators\volatility.py] :
+
+import numpy as np
+import pandas as pd
+import talib
+
+import pandas_ta as ta
+from pandas_ta.volatility import bbands, massi
+
+from common.core import IndicatorResult
+from common.exceptions import InsufficientDataError
+from features.indicators.base import TechnicalIndicator
+
+
+class BollingerBandsIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 20, std_dev: float = 2.0):
+        self.period = period
+        self.std_dev = std_dev
+
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        if len(data) < self.period:
+            raise InsufficientDataError(
+                f"BollingerBandsIndicator requires at least {self.period} data points."
+            )
+        bb_df = bbands(close=data["close"], length=self.period, std=self.std_dev)
+        if bb_df is None or bb_df.empty or bb_df.dropna().empty:
+            raise InsufficientDataError(
+                "Bollinger Bands calculation resulted in empty DataFrame."
+            )
+
+        upper_band = float(bb_df.iloc[-1, 2])
+        lower_band = float(bb_df.iloc[-1, 0])
+        current_price = float(data["close"].iloc[-1])
+
+        band_width = upper_band - lower_band
+        if band_width == 0:
+            return IndicatorResult(
+                name="BB",
+                value=0.5,
+                signal_strength=0.0,
+                interpretation="neutral_flat_bands",
+            )
+
+        bb_position = (current_price - lower_band) / band_width
+
+        if bb_position > 0.8:
+            interpretation = "near_upper_band"
+            signal_strength = (bb_position - 0.8) / 0.2 * 100
+        elif bb_position < 0.2:
+            interpretation = "near_lower_band"
+            signal_strength = (0.2 - bb_position) / 0.2 * 100
+        else:
+            interpretation = "middle_range"
+            signal_strength = 50.0
+
+        return IndicatorResult(
+            name="BB",
+            value=float(bb_position),
+            signal_strength=float(signal_strength),
+            interpretation=interpretation,
+        )
+
+
+class ATRIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 14):
+        self.period = period
+
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        if len(data) < self.period:
+            raise InsufficientDataError(
+                f"ATRIndicator requires at least {self.period} data points."
+            )
+        atr_series = talib.ATR(
+            data["high"].to_numpy(dtype=np.float64),
+            data["low"].to_numpy(dtype=np.float64),
+            data["close"].to_numpy(dtype=np.float64),
+            timeperiod=self.period,
+        )
+        if atr_series.size == 0 or pd.isna(atr_series[-1]):
+            raise InsufficientDataError("ATR calculation resulted in NaN.")
+
+        current_atr = float(atr_series[-1])
+        current_price = float(data["close"].iloc[-1])
+
+        atr_percentage = (
+            (current_atr / current_price) * 100 if current_price > 0 else 0.0
+        )
+
+        if atr_percentage > 3:
+            interpretation = "high_volatility"
+            signal_strength = min(atr_percentage * 20, 100)
+        elif atr_percentage < 1:
+            interpretation = "low_volatility"
+            signal_strength = max(0, (1 - atr_percentage) * 100)
+        else:
+            interpretation = "normal_volatility"
+            signal_strength = 50.0
+
+        return IndicatorResult(
+            name="ATR",
+            value=current_atr,
+            signal_strength=float(signal_strength),
+            interpretation=interpretation,
+        )
+
+
+=====
+
+[features\indicators\volume.py] :
+
+import numpy as np
+import pandas as pd
+import talib
+
+import pandas_ta as ta
+from pandas_ta.volume import cmf, obv, ad, eom, efi, pvt
+
+from common.core import IndicatorResult
+from config.logger import logger
+from common.exceptions import InsufficientDataError
+from features.indicators.base import TechnicalIndicator
+
+
+class VolumeIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 20):
+        self.period = period
+
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        if "volume" not in data.columns or len(data) < self.period:
+            raise InsufficientDataError(
+                f"VolumeIndicator requires 'volume' column and at least {self.period} data points."
+            )
+
+        volume_ma = talib.SMA(
+            data["volume"].to_numpy(dtype=np.float64), timeperiod=self.period
+        )
+        if volume_ma.size == 0 or pd.isna(volume_ma[-1]):
+            raise InsufficientDataError("Volume MA calculation resulted in NaN.")
+
+        current_volume = float(data["volume"].iloc[-1])
+        average_volume = float(volume_ma[-1])
+
+        volume_ratio = current_volume / average_volume if average_volume > 0 else 1.0
+
+        if volume_ratio > 1.5:
+            interpretation = "high_volume"
+            signal_strength = min((volume_ratio - 1) * 50, 100)
+        elif volume_ratio < 0.5:
+            interpretation = "low_volume"
+            signal_strength = max(0, (1 - volume_ratio) * 100)
+        else:
+            interpretation = "normal_volume"
+            signal_strength = 50.0
+
+        return IndicatorResult(
+            name="VOLUME",
+            value=float(volume_ratio),
+            signal_strength=float(signal_strength),
+            interpretation=interpretation,
+        )
+
+
+class ChaikinMoneyFlowIndicator(TechnicalIndicator):
+    def __init__(self, period: int = 20):
+        self.period = period
+
+    def calculate(self, data: pd.DataFrame) -> IndicatorResult:
+        if len(data) < self.period:
+            raise InsufficientDataError(
+                f"CMF requires at least {self.period} data points."
+            )
+        cmf_series = cmf(
+            high=data["high"],
+            low=data["low"],
+            close=data["close"],
+            volume=data["volume"],
+            length=self.period,
+        )
+        if cmf_series is None or cmf_series.empty or pd.isna(cmf_series.iloc[-1]):
+            raise InsufficientDataError("CMF calculation resulted in NaN.")
+
+        current_value = float(cmf_series.iloc[-1])
+
+        if current_value > 0:
+            interpretation = "buy_pressure"
+            strength = min(abs(current_value) * 200, 100)
+        elif current_value < 0:
+            interpretation = "sell_pressure"
+            strength = min(abs(current_value) * 200, 100)
+        else:
+            interpretation = "neutral"
+            strength = 50.0
+
+        return IndicatorResult(
+            name="CMF",
+            value=current_value,
+            signal_strength=float(strength),
+            interpretation=interpretation,
+        )
+
+
+=====
+

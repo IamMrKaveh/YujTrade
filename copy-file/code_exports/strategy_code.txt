@@ -1,0 +1,578 @@
+[strategy\multi_timeframe.py] :
+
+import pandas as pd
+import numpy as np
+from typing import Dict, Any, List, Tuple, Optional
+import redis
+
+from config.settings import ConfigManager
+from config.logger import logger
+from common.core import SignalType, TrendDirection, MarketAnalysis
+from common.constants import MULTI_TF_CONFIRMATION_MAP, MULTI_TF_CONFIRMATION_WEIGHTS
+from common.exceptions import InsufficientDataError
+from data.data_provider import MarketDataProvider
+from analysis.market_analyzer import MarketConditionAnalyzer
+from common.cache import CacheKeyBuilder, CacheCategory
+
+
+class MultiTimeframeAnalyzer:
+    def __init__(
+        self,
+        market_data_provider: MarketDataProvider,
+        redis_client: Optional[redis.Redis] = None,
+        config_manager: Optional[ConfigManager] = None,
+    ):
+        self.data_provider = market_data_provider
+        self.redis = redis_client
+        self.config = config_manager or ConfigManager()
+        self.analyzer = MarketConditionAnalyzer()
+        self.cache_ttl = 3600  # 1 hour
+
+    async def get_confirmation_score(
+        self,
+        symbol: str,
+        base_timeframe: str,
+        signal_type: SignalType,
+        base_data: pd.DataFrame,
+    ) -> Tuple[float, Dict[str, MarketAnalysis], bool]:
+        higher_timeframes = MULTI_TF_CONFIRMATION_MAP.get(base_timeframe, [])
+        if not higher_timeframes:
+            return 1.0, {}, False
+
+        weights = MULTI_TF_CONFIRMATION_WEIGHTS.get(base_timeframe, {})
+        total_score = 0.0
+        total_weight = 0.0
+        analyses: Dict[str, MarketAnalysis] = {}
+        direction_conflict = False
+
+        for tf in higher_timeframes:
+            try:
+                higher_tf_data = await self._get_higher_tf_data(symbol, tf)
+                if higher_tf_data is None or higher_tf_data.empty:
+                    continue
+
+                analysis = self.analyzer.analyze_market_condition(higher_tf_data)
+                analyses[tf] = analysis
+
+                score, conflict = self._calculate_single_tf_score(analysis, signal_type)
+                if conflict:
+                    direction_conflict = True
+
+                weight = weights.get(tf, 1.0)
+                total_score += score * weight
+                total_weight += weight
+
+            except InsufficientDataError:
+                logger.warning(
+                    f"Insufficient data for multi-timeframe analysis on {symbol}-{tf}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Error in multi-timeframe analysis for {symbol}-{tf}: {e}"
+                )
+
+        final_score = (total_score / total_weight) if total_weight > 0 else 1.0
+        return final_score, analyses, direction_conflict
+
+    async def _get_higher_tf_data(
+        self, symbol: str, timeframe: str
+    ) -> Optional[pd.DataFrame]:
+        cache_key = CacheKeyBuilder.mtf_analysis_key(symbol, timeframe)
+        if self.redis:
+            try:
+                cached_data = await self.redis.get(cache_key)
+                if cached_data:
+                    return pd.read_json(cached_data, orient="split")
+            except Exception as e:
+                logger.warning(f"Redis GET for MTF data failed: {e}")
+
+        data = await self.data_provider.fetch_ohlcv_data(symbol, timeframe, limit=200)
+        if data is not None and not data.empty and self.redis:
+            try:
+                await self.redis.set(
+                    cache_key, data.to_json(orient="split"), ex=self.cache_ttl
+                )
+            except Exception as e:
+                logger.warning(f"Redis SET for MTF data failed: {e}")
+
+        return data
+
+    def _calculate_single_tf_score(
+        self, analysis: MarketAnalysis, signal_type: SignalType
+    ) -> Tuple[float, bool]:
+        score = 0.5  # Neutral starting point
+        conflict = False
+
+        is_bullish_signal = signal_type == SignalType.BUY
+        is_bearish_signal = signal_type == SignalType.SELL
+
+        # Trend alignment
+        if is_bullish_signal and analysis.trend == TrendDirection.BULLISH:
+            score += 0.3
+        elif is_bearish_signal and analysis.trend == TrendDirection.BEARISH:
+            score += 0.3
+        elif (is_bullish_signal and analysis.trend == TrendDirection.BEARISH) or (
+            is_bearish_signal and analysis.trend == TrendDirection.BULLISH
+        ):
+            score -= 0.4
+            conflict = True
+
+        # Trend strength
+        if analysis.trend_strength.value == "strong":
+            score += 0.15
+        elif analysis.trend_strength.value == "weak":
+            score -= 0.1
+
+        # Volume confirmation
+        if analysis.volume_confirmation:
+            score += 0.1
+
+        return np.clip(score, 0, 1), conflict
+
+
+=====
+
+[strategy\signal_generator.py] :
+
+import asyncio
+from datetime import datetime, timezone
+from typing import Dict, Any, Optional, Tuple, List
+
+import numpy as np
+import pandas as pd
+
+from common.core import TradingSignal, SignalType
+from data.data_provider import MarketDataProvider
+from data.data_validator import DataQualityChecker
+from features.feature_engineering import FeatureEngineer
+from analysis.market_analyzer import MarketConditionAnalyzer
+from analysis.scoring import AnalysisScorer
+from modeling.model_manager import ModelManager
+from config.settings import ConfigManager
+from config.logger import logger
+from common.utils import (
+    calculate_risk_reward_ratio,
+    calculate_dynamic_levels,
+    detect_market_regime,
+)
+from common.constants import LONG_TERM_CONFIG, AnalysisComponent
+
+
+class SignalGenerator:
+    """
+    Orchestrates the entire analysis pipeline to generate a trading signal.
+    This is the refactored version of the old AnalysisEngine.
+    """
+
+    def __init__(
+        self,
+        data_provider: MarketDataProvider,
+        model_manager: ModelManager,
+        config_manager: ConfigManager,
+    ):
+        self.data_provider = data_provider
+        self.model_manager = model_manager
+        self.config_manager = config_manager
+
+        # Initialize components
+        self.feature_engineer = FeatureEngineer(self.config_manager)
+        self.market_analyzer = MarketConditionAnalyzer()
+        self.scorer = AnalysisScorer(self.config_manager)
+        self.data_validator = DataQualityChecker()
+
+    async def generate_signal(
+        self, symbol: str, timeframe: str, data: pd.DataFrame
+    ) -> Optional[TradingSignal]:
+        """
+        The main method to run a full analysis for a given symbol and timeframe.
+        """
+        analysis_timestamp = datetime.now(timezone.utc)
+
+        # 1. Validate Data Quality
+        is_valid, quality_msg = self.data_validator.validate_data_quality(
+            data, timeframe
+        )
+        if not is_valid:
+            logger.warning(
+                f"Data quality check failed for {symbol}-{timeframe}: {quality_msg}"
+            )
+            return None
+
+        # 2. Basic Market Analysis (Regime, Context)
+        market_regime = detect_market_regime(data)
+        market_context = self.market_analyzer.analyze_market_condition(data)
+
+        # 3. Feature Engineering & Technical Analysis
+        last_indicator_results = self.feature_engineer.get_last_indicator_results(
+            data, timeframe
+        )
+
+        # 4. Score Technical Indicators
+        tech_score = self.scorer.score_technical_results(
+            last_indicator_results, market_context
+        )
+
+        # 5. Score Market Context
+        market_score, market_reasons = self.scorer.score_market_context(market_context)
+
+        # 6. Gather and Score External Data (Placeholder for future expansion)
+        external_score, external_reasons = 0.0, []
+
+        # 7. Get and Score ML Predictions
+        current_price = data["close"].iloc[-1]
+        ml_predictions = await self.get_ml_predictions(symbol, timeframe)
+        ml_score, ml_reasons, ml_confidence = self.scorer.score_ml_predictions(
+            ml_predictions, current_price
+        )
+
+        # 8. Calculate Combined Score
+        scores = {
+            AnalysisComponent.TECHNICAL_ANALYSIS: tech_score,
+            AnalysisComponent.MARKET_CONTEXT: market_score,
+            AnalysisComponent.EXTERNAL_DATA: external_score,
+            AnalysisComponent.ML_MODELS: ml_score,
+        }
+        all_reasons = market_reasons + external_reasons + ml_reasons
+        final_score, all_reasons = self.scorer.calculate_combined_score(
+            scores, all_reasons, timeframe
+        )
+
+        # 9. Determine Signal Type
+        signal_type = self.determine_signal_type(final_score)
+        if signal_type == SignalType.HOLD:
+            logger.info(
+                f"No signal for {symbol}-{timeframe}. Final Score: {final_score:.2f}"
+            )
+            return None
+
+        # 10. Calculate Levels and Create Signal
+        levels = calculate_dynamic_levels(data, signal_type, market_context)
+        rr_ratio = calculate_risk_reward_ratio(
+            levels["primary_entry"],
+            levels["tight_stop"],
+            levels["primary_exit"],
+            signal_type,
+        )
+
+        min_rr_ratio = LONG_TERM_CONFIG.get("min_risk_reward_ratio", 2.0)
+        if rr_ratio < min_rr_ratio:
+            logger.info(
+                f"Risk/Reward {rr_ratio:.2f} below minimum {min_rr_ratio} for {symbol}-{timeframe}"
+            )
+            return None
+
+        # Create the final signal object
+        signal = TradingSignal(
+            symbol=symbol,
+            signal_type=signal_type,
+            entry_price=levels["primary_entry"],
+            exit_price=levels["primary_exit"],
+            stop_loss=levels["tight_stop"],
+            timestamp=data.index[-1].to_pydatetime(),
+            timeframe=timeframe,
+            confidence_score=abs(final_score),
+            reasons=all_reasons,
+            risk_reward_ratio=rr_ratio,
+            predicted_profit=abs(levels["primary_exit"] - levels["primary_entry"]),
+            volume_analysis={"volume_trend": market_context.volume_trend},
+            market_context=market_context.__dict__,
+            dynamic_levels=levels,
+            analysis_timestamp=analysis_timestamp,
+        )
+
+        return signal
+
+    async def get_ml_predictions(self, symbol: str, timeframe: str) -> Dict[str, Dict]:
+        """Gets predictions from all available ML models."""
+        predictions = {}
+        model_types = ["lstm", "xgboost"]
+        tasks = [
+            self.model_manager.predict_with_confidence(m_type, symbol, timeframe)
+            for m_type in model_types
+        ]
+        results = await asyncio.gather(*tasks)
+        for i, res in enumerate(results):
+            if res:
+                predictions[model_types[i]] = res
+        return predictions
+
+    def determine_signal_type(self, score: float) -> SignalType:
+        """
+        Determines the signal type based on the final score and thresholds.
+        """
+        threshold = self.config_manager.get("signal_threshold", 50)
+        if score > threshold:
+            return SignalType.BUY
+        if score < -threshold:
+            return SignalType.SELL
+        return SignalType.HOLD
+
+    def adjust_weights_by_regime(
+        self, base_weights: Dict[str, float], market_regime: Dict[str, Any]
+    ) -> Dict[str, float]:
+        """
+        Adjusts indicator weights based on the detected market regime.
+        """
+        adjusted = base_weights.copy()
+
+        if market_regime.get("market_type") == "ranging":
+            mean_reversion_indicators = ["rsi", "stoch", "cci", "williams_r"]
+            for indicator in mean_reversion_indicators:
+                if indicator in adjusted:
+                    adjusted[indicator] *= 1.5
+        elif market_regime.get("market_type") == "trending":
+            trend_indicators = ["sma", "ema", "adx", "supertrend", "psar", "ichimoku"]
+            for indicator in trend_indicators:
+                if indicator in adjusted:
+                    adjusted[indicator] *= 1.3
+
+        return adjusted
+
+
+=====
+
+[strategy\signal_ranking.py] :
+
+from typing import List
+
+from common.constants import LONG_TERM_CONFIG
+from common.core import SignalType, TradingSignal
+
+
+class SignalRanking:
+    @staticmethod
+    def calculate_signal_score(signal: TradingSignal) -> float:
+        base_score = signal.confidence_score
+        rr_multiplier = min(signal.risk_reward_ratio, 5.0) / 2.0 if signal.risk_reward_ratio > 0 else 0.5
+        
+        timeframe_priority = LONG_TERM_CONFIG['timeframe_priority_weights'].get(signal.timeframe, 1.0)
+        base_score *= timeframe_priority
+        
+        base_score *= rr_multiplier
+        
+        if signal.macro_data and signal.macro_data.fed_rate is not None:
+            if signal.signal_type == SignalType.BUY and signal.macro_data.fed_rate > 4.0:
+                base_score *= 0.8
+            elif signal.signal_type == SignalType.SELL and signal.macro_data.fed_rate < 2.0:
+                base_score *= 0.8
+        
+        return base_score
+
+    @staticmethod
+    def rank_signals(signals: List[TradingSignal]) -> List[TradingSignal]:
+        return sorted(signals, key=SignalRanking.calculate_signal_score, reverse=True)
+
+
+
+=====
+
+[strategy\signal_tracker.py] :
+
+import json
+from pathlib import Path
+from typing import Dict, Any, List, Tuple
+from datetime import datetime, timezone
+import numpy as np
+
+
+class SignalTracker:
+    def __init__(self, storage_path: str = "signal_history.json"):
+        self.storage_path = Path(storage_path)
+        self.history = self._load_history()
+
+    def _load_history(self) -> Dict[str, Any]:
+        if self.storage_path.exists():
+            try:
+                with open(self.storage_path, "r") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                return {}
+        return {}
+
+    def _save_history(self):
+        with open(self.storage_path, "w") as f:
+            json.dump(self.history, f, indent=4)
+
+    def record(self, signal_id: str, outcome: bool, details: Dict[str, Any]):
+        """
+        Records the outcome of a trading signal.
+
+        :param signal_id: A unique identifier for the signal.
+        :param outcome: True for a successful trade (profit), False otherwise.
+        :param details: A dictionary containing signal parameters for later analysis.
+        """
+        self.history[signal_id] = {"outcome": outcome, "details": details}
+        self._save_history()
+
+    def get_performance_summary(self) -> Dict[str, float]:
+        """
+        Provides a summary of historical performance.
+        """
+        total_signals = len(self.history)
+        if total_signals == 0:
+            return {"total": 0, "win_rate": 0.0}
+
+        wins = sum(1 for data in self.history.values() if data.get("outcome"))
+        win_rate = (wins / total_signals) * 100
+        return {"total": total_signals, "win_rate": win_rate}
+
+
+class AdaptiveThresholdManager:
+    def __init__(self):
+        self.performance_history: Dict[str, List[Dict]] = {}
+        self.min_samples = 50
+
+    def record_performance(
+        self,
+        volatility_regime: str,
+        hurst_range: str,
+        threshold: float,
+        signal_success: bool,
+    ):
+        key = f"{volatility_regime}_{hurst_range}"
+        if key not in self.performance_history:
+            self.performance_history[key] = []
+
+        self.performance_history[key].append(
+            {
+                "threshold": threshold,
+                "success": signal_success,
+                "timestamp": datetime.now(timezone.utc),
+            }
+        )
+
+        if len(self.performance_history[key]) > 100:
+            self.performance_history[key] = self.performance_history[key][-100:]
+
+    def get_optimal_threshold(
+        self, volatility_regime: str, hurst_range: str, default_threshold: float
+    ) -> float:
+        key = f"{volatility_regime}_{hurst_range}"
+
+        if (
+            key not in self.performance_history
+            or len(self.performance_history[key]) < self.min_samples
+        ):
+            return default_threshold
+
+        history = self.performance_history[key]
+        threshold_performance = {}
+
+        for record in history:
+            threshold = round(record["threshold"], 2)
+            if threshold not in threshold_performance:
+                threshold_performance[threshold] = {"success": 0, "total": 0}
+
+            threshold_performance[threshold]["total"] += 1
+            if record["success"]:
+                threshold_performance[threshold]["success"] += 1
+
+        best_threshold = default_threshold
+        best_accuracy = 0
+
+        for threshold, perf in threshold_performance.items():
+            if perf["total"] >= 10:
+                accuracy = perf["success"] / perf["total"]
+                confidence_interval = 1.96 * np.sqrt(
+                    (accuracy * (1 - accuracy)) / perf["total"]
+                )
+                if accuracy - confidence_interval > 0.55:
+                    if accuracy > best_accuracy:
+                        best_accuracy = accuracy
+                        best_threshold = threshold
+
+        return best_threshold
+
+
+class MLConfidenceCalibrator:
+    def __init__(self):
+        self.calibration_data: Dict[str, List[Tuple[float, bool, float]]] = {}
+        self.calibration_bins = 10
+
+    def add_prediction(
+        self,
+        model_name: str,
+        confidence: float,
+        actual_result: bool,
+        timestamp: datetime = None,
+    ):
+        if model_name not in self.calibration_data:
+            self.calibration_data[model_name] = []
+
+        time_decay_factor = 1.0
+        if timestamp:
+            days_old = (datetime.now(timezone.utc) - timestamp).days
+            time_decay_factor = np.exp(-days_old / 90)
+
+        self.calibration_data[model_name].append(
+            (confidence, actual_result, time_decay_factor)
+        )
+
+        if len(self.calibration_data[model_name]) > 500:
+            self.calibration_data[model_name] = self.calibration_data[model_name][-500:]
+
+    def get_calibrated_confidence(
+        self, model_name: str, raw_confidence: float
+    ) -> float:
+        """
+        Returns a calibrated confidence score based on historical performance.
+        """
+        if (
+            model_name not in self.calibration_data
+            or len(self.calibration_data[model_name]) < 20
+        ):
+            return raw_confidence
+
+        history = self.calibration_data[model_name]
+
+        # Find the appropriate bin for the raw_confidence
+        if raw_confidence >= 100:
+            bin_index = self.calibration_bins - 1
+        else:
+            bin_index = int(raw_confidence * self.calibration_bins / 100)
+
+        # Get all predictions in that bin
+        bin_predictions = [
+            (conf, result, weight)
+            for conf, result, weight in history
+            if int(conf * self.calibration_bins / 100) == bin_index
+        ]
+
+        if not bin_predictions:
+            # If no data in this bin, check adjacent bins
+            for offset in [-1, 1]:
+                adjacent_bin_index = bin_index + offset
+                if 0 <= adjacent_bin_index < self.calibration_bins:
+                    bin_predictions = [
+                        (conf, result, weight)
+                        for conf, result, weight in history
+                        if int(conf * self.calibration_bins / 100) == adjacent_bin_index
+                    ]
+                    if bin_predictions:
+                        break
+
+        if not bin_predictions:
+            return raw_confidence
+
+        # Calculate weighted accuracy for that bin
+        total_weight = sum(w for _, _, w in bin_predictions)
+        correct_weight = sum(w for _, result, w in bin_predictions if result)
+
+        if total_weight == 0:
+            return raw_confidence
+
+        accuracy_in_bin = correct_weight / total_weight
+
+        # Simple linear interpolation between raw confidence and historical accuracy
+        # Give more weight to historical accuracy if more data is available
+        data_points_weight = min(len(bin_predictions) / 50.0, 1.0) * 0.5
+        calibrated = (
+            raw_confidence * (1 - data_points_weight)
+            + (accuracy_in_bin * 100) * data_points_weight
+        )
+
+        return np.clip(calibrated, 0, 100)
+
+
+=====
+

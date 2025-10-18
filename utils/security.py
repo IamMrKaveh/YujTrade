@@ -7,7 +7,7 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-from ..config.logger import logger
+from config.logger import logger
 
 
 def generate_key_from_password(password: str, salt: bytes) -> bytes:

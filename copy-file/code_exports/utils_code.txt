@@ -1,0 +1,366 @@
+[utils\background_manager.py] :
+
+import asyncio
+from typing import Set, Coroutine
+
+from config.logger import logger
+
+
+class BackgroundTaskManager:
+    def __init__(self):
+        self._tasks: Set[asyncio.Task] = set()
+
+    def _log_task_completion(self, task: asyncio.Task):
+        self._tasks.discard(task)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            # Log cancellation at a lower level to avoid cluttering the main log
+            logger.debug(f"Task {task.get_name()} was cancelled.")
+        except Exception as e:
+            logger.error(f"Task {task.get_name()} failed with an exception:", exc_info=e)
+        else:
+            logger.info(f"Task {task.get_name()} completed successfully. {len(self._tasks)} tasks remaining.")
+
+    def create_task(self, coro: Coroutine, name: str = None) -> asyncio.Task:
+        """Creates a background task with an optional name for better logging."""
+        task = asyncio.create_task(coro, name=name)
+        self._tasks.add(task)
+        task.add_done_callback(self._log_task_completion)
+        logger.info(f"Task '{task.get_name()}' started. {len(self._tasks)} tasks running.")
+        return task
+
+    async def cancel_all(self):
+        if not self._tasks:
+            return
+
+        logger.info(f"Cancelling {len(self._tasks)} background tasks.")
+        tasks_to_cancel = list(self._tasks)
+        for task in tasks_to_cancel:
+            if not task.done():
+                task.cancel()
+        
+        await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        self._tasks.clear()
+        logger.info("All background tasks cancelled.")
+
+=====
+
+[utils\circuit_breaker.py] :
+
+import asyncio
+import time
+from enum import Enum
+from typing import Callable, Any, Set, Type
+
+from common.exceptions import APIRateLimitError, NetworkError, TradingBotException
+
+
+class CircuitBreakerError(TradingBotException):
+    """Exception raised when the circuit breaker is open."""
+
+    pass
+
+
+class CircuitState(Enum):
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+class CircuitBreaker:
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        timeout: int = 60,
+        half_open_attempts: int = 3,
+        failure_exceptions: Set[Type[Exception]] = None,
+    ):
+        self.failure_threshold = failure_threshold
+        self.timeout = timeout
+        self.half_open_attempts = half_open_attempts
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.state = CircuitState.CLOSED
+        self.half_open_success_count = 0
+        self._lock = asyncio.Lock()
+        self.failure_exceptions = failure_exceptions or {
+            APIRateLimitError,
+            NetworkError,
+        }
+
+    async def call(self, func: Callable, *args, **kwargs) -> Any:
+        async with self._lock:
+            if self.state == CircuitState.OPEN:
+                if (time.time() - self.last_failure_time) > self.timeout:
+                    self.state = CircuitState.HALF_OPEN
+                    self.half_open_success_count = 0
+                else:
+                    raise CircuitBreakerError(
+                        f"Circuit breaker is OPEN. Last failure at {self.last_failure_time}"
+                    )
+
+        try:
+            result = await func(*args, **kwargs)
+            await self._on_success()
+            return result
+        except Exception as e:
+            await self._on_failure(e)
+            raise e
+
+    async def _on_success(self):
+        async with self._lock:
+            if self.state == CircuitState.HALF_OPEN:
+                self.half_open_success_count += 1
+                if self.half_open_success_count >= self.half_open_attempts:
+                    self.state = CircuitState.CLOSED
+                    self.failure_count = 0
+                    self.last_failure_time = None
+            elif self.state == CircuitState.CLOSED:
+                self.failure_count = 0
+                self.last_failure_time = None
+
+    async def _on_failure(self, exc: Exception):
+        if not any(isinstance(exc, exc_type) for exc_type in self.failure_exceptions):
+            return
+
+        async with self._lock:
+            self.last_failure_time = time.time()
+            if self.state == CircuitState.HALF_OPEN:
+                self.state = CircuitState.OPEN
+                self.failure_count = self.failure_threshold
+            elif self.state == CircuitState.CLOSED:
+                self.failure_count += 1
+                if self.failure_count >= self.failure_threshold:
+                    self.state = CircuitState.OPEN
+
+
+=====
+
+[utils\resource_manager.py] :
+
+import asyncio
+from contextlib import contextmanager, asynccontextmanager
+from typing import Optional, AsyncGenerator, Any, Generator
+
+import aiohttp
+import redis.asyncio as redis
+import tensorflow as tf
+
+from config.logger import logger
+from config.settings import SecretsManager
+
+
+class ResourceManager:
+    """A centralized class to manage shared resources like sessions and DB connections."""
+
+    def __init__(self):
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._redis_client: Optional[redis.Redis] = None
+        self._lock = asyncio.Lock()
+        self._redis_connection_pool: Optional[redis.ConnectionPool] = None
+
+    async def get_session(self) -> aiohttp.ClientSession:
+        """Provides a shared aiohttp.ClientSession."""
+        async with self._lock:
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=30)
+                )
+                logger.info("AIOHTTP session created.")
+            return self._session
+
+    async def get_redis_client(self) -> Optional[redis.Redis]:
+        """Provides a shared Redis client instance."""
+        async with self._lock:
+            if self._redis_client is None:
+                if not all(
+                    [
+                        SecretsManager.REDIS_HOST,
+                        SecretsManager.REDIS_PORT,
+                        SecretsManager.REDIS_TOKEN,
+                    ]
+                ):
+                    logger.warning("Redis not configured. Caching will be disabled.")
+                    return None
+                try:
+                    redis_url = f"redis://default:{SecretsManager.REDIS_TOKEN}@{SecretsManager.REDIS_HOST}:{SecretsManager.REDIS_PORT}"
+                    self._redis_connection_pool = redis.ConnectionPool.from_url(
+                        redis_url, decode_responses=True, max_connections=50
+                    )
+                    self._redis_client = redis.Redis(
+                        connection_pool=self._redis_connection_pool
+                    )
+                    await self._redis_client.ping()
+                    logger.info("Redis connection pool created successfully.")
+                except Exception as e:
+                    logger.error(
+                        f"Redis connection failed: {e}. Caching will be disabled."
+                    )
+                    self._redis_client = None
+                    if self._redis_connection_pool:
+                        await self._redis_connection_pool.disconnect()
+                        self._redis_connection_pool = None
+            return self._redis_client
+
+    async def cleanup(self):
+        """Cleans up all managed resources."""
+        logger.info("Cleaning up ResourceManager...")
+        async with self._lock:
+            cleanup_tasks = []
+            if self._session and not self._session.closed:
+                cleanup_tasks.append(self._session.close())
+                logger.info("AIOHTTP session closed.")
+
+            if self._redis_client:
+                cleanup_tasks.append(self._redis_client.close())
+                logger.info("Redis client closed.")
+
+            if self._redis_connection_pool:
+                cleanup_tasks.append(self._redis_connection_pool.disconnect())
+                logger.info("Redis connection pool disconnected.")
+
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+
+            self._session = None
+            self._redis_client = None
+            self._redis_connection_pool = None
+        logger.info("ResourceManager cleaned up successfully.")
+
+    async def __aenter__(self):
+        await self.get_session()
+        await self.get_redis_client()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.cleanup()
+
+
+@contextmanager
+def managed_tf_session() -> Generator[None, None, None]:
+    """
+    A context manager to handle TensorFlow session clearing.
+    """
+    try:
+        yield
+    finally:
+        tf.keras.backend.clear_session()
+        logger.debug("TensorFlow session cleared.")
+
+
+@asynccontextmanager
+async def managed_resource(resource: Any) -> AsyncGenerator[Any, None]:
+    """
+    A generic async context manager for resources that have an async cleanup method.
+    Example: aiohttp.ClientSession, DB Connections.
+    """
+    try:
+        yield resource
+    finally:
+        if hasattr(resource, "close") and asyncio.iscoroutinefunction(resource.close):
+            await resource.close()
+        elif hasattr(resource, "shutdown") and asyncio.iscoroutinefunction(
+            resource.shutdown
+        ):
+            await resource.shutdown()
+        elif hasattr(resource, "cleanup") and asyncio.iscoroutinefunction(
+            resource.cleanup
+        ):
+            await resource.cleanup()
+
+
+=====
+
+[utils\security.py] :
+
+import base64
+import hashlib
+import os
+from typing import Optional
+
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+from config.logger import logger
+
+
+def generate_key_from_password(password: str, salt: bytes) -> bytes:
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=480000,
+    )
+    key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
+    return key
+
+
+def get_encryption_key(password: str, salt_path="secret.salt") -> bytes:
+    try:
+        if os.path.exists(salt_path):
+            with open(salt_path, "rb") as salt_file:
+                salt = salt_file.read()
+        else:
+            salt = os.urandom(16)
+            with open(salt_path, "wb") as salt_file:
+                salt_file.write(salt)
+            logger.info(f"New salt created at {salt_path}")
+        return generate_key_from_password(password, salt)
+    except Exception as e:
+        logger.error(f"Error getting encryption key: {e}")
+        raise
+
+
+class KeyEncryptor:
+    def __init__(self, password: str):
+        try:
+            self.key = get_encryption_key(password)
+            self.fernet = Fernet(self.key)
+        except Exception as e:
+            logger.error(f"Failed to initialize KeyEncryptor: {e}")
+            raise
+
+    def encrypt(self, data: str) -> str:
+        if not data:
+            return ""
+        try:
+            return self.fernet.encrypt(data.encode()).decode()
+        except Exception as e:
+            logger.error(f"Encryption failed: {e}")
+            return ""
+
+    def decrypt(self, encrypted_data: str) -> str:
+        if not encrypted_data:
+            return ""
+        try:
+            return self.fernet.decrypt(encrypted_data.encode()).decode()
+        except Exception:
+            logger.error(f"Decryption failed for data. It might be invalid or corrupted.")
+            return ""
+
+
+def hash_data(data: str, salt: str = None) -> str:
+    salt_val = salt or os.urandom(16).hex()
+    hashed = hashlib.pbkdf2_hmac("sha256", data.encode(), salt_val.encode(), 100000)
+    return f"{salt_val}${hashed.hex()}"
+
+
+def verify_hashed_data(stored_hash: str, provided_data: str) -> bool:
+    try:
+        salt, h = stored_hash.split("$")
+        return h == hashlib.pbkdf2_hmac("sha256", provided_data.encode(), salt.encode(), 100000).hex()
+    except (ValueError, TypeError):
+        return False
+
+def get_password_from_key_manager() -> Optional[str]:
+    password = os.environ.get("SECRET_ENCRYPTION_PASSWORD")
+    if password:
+        logger.info("Loaded encryption password from secure key manager (placeholder).")
+        return password
+    return None
+
+
+
+=====
+

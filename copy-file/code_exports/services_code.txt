@@ -1,3 +1,5 @@
+[services\trading_service.py] :
+
 import asyncio
 from typing import List, Optional, Set
 
@@ -185,3 +187,7 @@ class TradingService(ModelDataProvider):
         logger.info("Cleaning up TradingService resources.")
         if self.model_manager:
             await self.model_manager.shutdown()
+
+
+=====
+

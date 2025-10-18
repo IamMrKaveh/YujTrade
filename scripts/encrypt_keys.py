@@ -3,8 +3,8 @@ from pathlib import Path
 
 from decouple import Config, RepositoryEnv
 
-from ..config.logger import logger
-from ..utils.security import KeyEncryptor
+from config.logger import logger
+from utils.security import KeyEncryptor
 
 
 def run():

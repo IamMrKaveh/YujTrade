@@ -3,8 +3,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 
-from ..config.logger import logger
-from ..common.constants import LONG_TERM_CONFIG
+from config.logger import logger
+from common.constants import LONG_TERM_CONFIG
 
 
 class DataQualityChecker:

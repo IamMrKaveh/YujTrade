@@ -1,7 +1,7 @@
 import asyncio
 from typing import Set, Coroutine
 
-from ..config.logger import logger
+from config.logger import logger
 
 
 class BackgroundTaskManager:

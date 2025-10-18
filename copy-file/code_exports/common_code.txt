@@ -1,3 +1,445 @@
+[common\cache.py] :
+
+from enum import Enum
+from typing import List, Optional
+
+
+class CacheCategory(Enum):
+    OHLCV = "ohlcv"
+    MACRO = "macro"
+    NEWS = "news"
+    SENTIMENT = "sentiment"
+    FEAR_GREED = "fear_greed"
+    TRENDING = "trending"
+    DERIVATIVES = "derivatives"
+    FUNDAMENTAL = "fundamental"
+    METRICS = "metrics"
+    PROFILE = "profile"
+    GENERIC = "generic"
+    INDICES = "indices"
+    YIELD = "yield"
+    COIN_LIST = "coin_list"
+
+
+class CacheKeyBuilder:
+    """A centralized builder for creating consistent cache keys."""
+
+    PREFIX = "cache"
+
+    @staticmethod
+    def build(
+        category: CacheCategory,
+        source: str,
+        parts: List[str],
+        symbol: Optional[str] = None,
+    ) -> str:
+        """
+        Constructs a standardized cache key.
+
+        Example:
+        >>> CacheKeyBuilder.build(CacheCategory.OHLCV, "binance", ["1h", "1000"], "BTC/USDT")
+        'cache:ohlcv:binance:btc_usdt:1h:1000'
+        """
+        safe_symbol = (
+            symbol.lower().replace("/", "_").replace("\\", "") if symbol else "global"
+        )
+        key_parts = [
+            CacheKeyBuilder.PREFIX,
+            category.value,
+            source.lower(),
+            safe_symbol,
+        ] + [str(p).lower() for p in parts]
+        return ":".join(key_parts)
+
+    @staticmethod
+    def ohlcv_key(source: str, symbol: str, timeframe: str, limit: int) -> str:
+        return CacheKeyBuilder.build(
+            CacheCategory.OHLCV, source, [timeframe, str(limit)], symbol
+        )
+
+    @staticmethod
+    def generic_key(source: str, identifier: str, symbol: Optional[str] = None) -> str:
+        return CacheKeyBuilder.build(
+            CacheCategory.GENERIC, source, [identifier], symbol
+        )
+
+    @staticmethod
+    def mtf_analysis_key(symbol: str, timeframe: str) -> str:
+        return CacheKeyBuilder.build(
+            CacheCategory.METRICS, "internal", ["mtf_analysis", timeframe], symbol
+        )
+
+    @staticmethod
+    def derivatives_key(source: str, metric: str, symbol: str) -> str:
+        """Creates a cache key for derivatives data."""
+        return CacheKeyBuilder.build(
+            CacheCategory.DERIVATIVES, source, [metric], symbol
+        )
+
+    @staticmethod
+    def macro_key(source: str, identifier: str) -> str:
+        """Creates a cache key for macro-economic data."""
+        return CacheKeyBuilder.build(CacheCategory.MACRO, source, [identifier])
+
+    @staticmethod
+    def indices_key(source: str, identifier: str) -> str:
+        """Creates a cache key for market indices."""
+        return CacheKeyBuilder.build(CacheCategory.INDICES, source, [identifier])
+
+
+=====
+
+[common\constants.py] :
+
+import os
+from enum import Enum
+from config.logger import logger
+
+TIME_FRAMES = [
+    "1h",
+    "4h",
+    "1d",
+    "1w",
+    "1M",
+]
+
+LONG_TERM_CONFIG = {
+    'focus_timeframes': ['1d', '1w', '1M'],
+    'min_confidence_threshold': {
+        '1h': 82,
+        '4h': 78,
+        '1d': 72,
+        '1w': 68,
+        '1M': 65
+    },
+    'timeframe_priority_weights': {
+        '1M': 2.0,
+        '1w': 1.6,
+        '1d': 1.2,
+        '4h': 0.8,
+        '1h': 0.5
+    },
+    'require_higher_tf_confirmation': True,
+    'min_trend_strength': 'MODERATE',
+    'min_risk_reward_ratio': 2.8,
+    'min_volume_surge': 1.4,
+    'max_signals_per_run': 3,
+    'min_data_points': {
+        '1h': 600,
+        '4h': 500,
+        '1d': 300,
+        '1w': 200,
+        '1M': 150
+    }
+}
+
+INDICATOR_GROUPS = {
+    'momentum': ['rsi', 'stoch', 'cci', 'macd', 'roc', 'mfi', 'stochrsi', 'williams_r', 'uo', 'mom', 'ppo'],
+    'trend': ['sma', 'ema', 'dema', 'tema', 'hma', 'vwma', 'supertrend', 'adx', 'aroon', 'psar', 'ichimoku', 'kama', 'ma_ribbon'],
+    'volatility': ['bb', 'atr', 'kc', 'dc', 'bbw', 'atr_bands', 'ulcer_index'],
+    'volume': ['volume', 'obv', 'cmf', 'ad_line', 'pvt', 'vwap', 'force_index', 'eom', 'kvo', 'pvo']
+}
+
+MULTI_TF_CONFIRMATION_MAP = {
+    "1h": ["4h", "1d"],
+    "4h": ["1d", "1w"],
+    "1d": ["1w", "1M"],
+    "1w": ["1M"],
+    "1M": [],
+}
+
+MULTI_TF_CONFIRMATION_WEIGHTS = {
+    "1h": {"4h": 0.6, "1d": 0.4},
+    "4h": {"1d": 0.7, "1w": 0.3},
+    "1d": {"1w": 0.8, "1M": 0.2},
+    "1w": {"1M": 1.0},
+    "1M": {}
+}
+
+SIGNAL_EXPIRY_BY_TIMEFRAME = {
+    '1h': 12, '4h': 24, '1d': 72, '1w': 168, '1M': 720
+}
+
+DECAY_HALF_LIFE_BY_TIMEFRAME = {
+    '1h': 24, '4h': 48, '1d': 168, '1w': 720, '1M': 2160
+}
+
+THRESHOLD_BOUNDS = {
+    'volatility_factor_min': 0.8,
+    'volatility_factor_max': 1.5,
+    'floor_threshold': 40
+}
+
+
+class AnalysisComponent(Enum):
+    TECHNICAL_ANALYSIS = "technical_analysis"
+    MARKET_CONTEXT = "market_context"
+    EXTERNAL_DATA = "external_data"
+    ML_MODELS = "ml_models"
+
+
+def load_symbols():
+    try:
+        path = 'symbols.txt'
+        if not os.path.exists(path):
+            logger.error("symbols.txt file not found")
+            return []
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = [line.rstrip('\n\r') for line in f]
+        seen = set()
+        symbols = []
+        for line in lines:
+            s = line.strip()
+            if not s:
+                continue
+            s = s.upper()
+            if s not in seen:
+                seen.add(s)
+                symbols.append(s)
+        if not symbols:
+            logger.warning("No symbols found in symbols.txt")
+            return []
+        logger.info(f"Loaded {len(symbols)} symbols from symbols.txt")
+        return symbols
+    except Exception as e:
+        logger.error(f"Error loading symbols: {e}")
+        return []
+
+
+SYMBOLS = load_symbols()
+
+=====
+
+[common\core.py] :
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
+
+
+class SignalType(Enum):
+    BUY = "buy"
+    SELL = "sell"
+    HOLD = "hold"
+
+
+class TrendDirection(Enum):
+    BULLISH = "bullish"
+    BEARISH = "bearish"
+    SIDEWAYS = "sideways"
+
+
+class MarketCondition(Enum):
+    OVERSOLD = "oversold"
+    OVERBOUGHT = "overbought"
+    NEUTRAL = "neutral"
+
+
+class TrendStrength(Enum):
+    WEAK = "weak"
+    MODERATE = "moderate"
+    STRONG = "strong"
+
+
+@dataclass
+class IndicatorResult:
+    name: str
+    value: float
+    signal_strength: float
+    interpretation: str
+
+
+@dataclass
+class FundamentalAnalysis:
+    market_cap: float = 0.0
+    total_volume: float = 0.0
+    developer_score: float = 0.0
+    community_score: float = 0.0
+
+
+@dataclass
+class OnChainAnalysis:
+    mvrv: Optional[float] = None
+    sopr: Optional[float] = None
+    active_addresses: Optional[int] = None
+    realized_cap: Optional[float] = None
+
+
+@dataclass
+class OrderBook:
+    bids: List[Tuple[float, float]] = field(default_factory=list)
+    asks: List[Tuple[float, float]] = field(default_factory=list)
+    bid_ask_spread: Optional[float] = None
+    total_bid_volume: Optional[float] = None
+    total_ask_volume: Optional[float] = None
+
+
+@dataclass
+class BinanceFuturesData:
+    top_trader_long_short_ratio_accounts: Optional[float] = None
+    top_trader_long_short_ratio_positions: Optional[float] = None
+    liquidation_orders: List[Dict[str, Any]] = field(default_factory=list)
+    mark_price: Optional[float] = None
+
+
+@dataclass
+class DerivativesAnalysis:
+    open_interest: Optional[float] = None
+    funding_rate: Optional[float] = None
+    taker_long_short_ratio: Optional[float] = None
+    coingecko_derivatives: List[Dict[str, Any]] = field(default_factory=list)
+    binance_futures_data: Optional[BinanceFuturesData] = None
+    cumulative_funding_rate: Optional[float] = None
+
+
+@dataclass
+class MacroEconomicData:
+    cpi: Optional[float] = None
+    fed_rate: Optional[float] = None
+    treasury_yield_10y: Optional[float] = None
+    gdp: Optional[float] = None
+    unemployment: Optional[float] = None
+
+
+@dataclass
+class TrendingData:
+    coingecko_trending: List[str] = field(default_factory=list)
+
+
+@dataclass
+class MarketAnalysis:
+    trend: TrendDirection
+    trend_strength: TrendStrength
+    volatility: float
+    volume_trend: str
+    support_levels: List[float]
+    resistance_levels: List[float]
+    momentum_score: float
+    market_condition: MarketCondition
+    trend_acceleration: float
+    volume_confirmation: bool
+    hurst_exponent: Optional[float] = None
+    volume_trend_score: Optional[float] = None
+    adx: Optional[float] = None
+
+
+@dataclass
+class DynamicLevels:
+    primary_entry: float
+    secondary_entry: float
+    primary_exit: float
+    secondary_exit: float
+    tight_stop: float
+    wide_stop: float
+    breakeven_point: float
+    trailing_stop: float
+
+
+@dataclass
+class TradingSignal:
+    symbol: str
+    signal_type: SignalType
+    entry_price: float
+    exit_price: float
+    stop_loss: float
+    timestamp: datetime
+    timeframe: str
+    confidence_score: float
+    reasons: List[str]
+    risk_reward_ratio: float
+    predicted_profit: float
+    volume_analysis: Dict[str, float]
+    market_context: Dict[str, Any]
+    dynamic_levels: Dict[str, float]
+    fundamental_analysis: Optional[FundamentalAnalysis] = None
+    on_chain_analysis: Optional[OnChainAnalysis] = None
+    derivatives_analysis: Optional[DerivativesAnalysis] = None
+    order_book: Optional[OrderBook] = None
+    macro_data: Optional[MacroEconomicData] = None
+    trending_data: Optional[TrendingData] = None
+    expiry_time: Optional[datetime] = None
+    position_size: Optional[float] = None
+    data_collection_timestamp: Optional[datetime] = None
+    analysis_timestamp: Optional[datetime] = None
+
+=====
+
+[common\exceptions.py] :
+
+class TradingBotException(Exception):
+    """Base exception for all custom exceptions in the application."""
+
+    pass
+
+
+class NetworkError(TradingBotException):
+    """Raised for network-related issues like connection errors."""
+
+    pass
+
+
+class DataError(TradingBotException):
+    """Base exception for data-related problems."""
+
+    pass
+
+
+class ValidationError(DataError):
+    """Raised when data validation fails."""
+
+    pass
+
+
+class APIRateLimitError(NetworkError):
+    """Raised when an API rate limit is exceeded."""
+
+    pass
+
+
+class InvalidSymbolError(ValidationError):
+    """
+    Raised when a symbol is not supported by an exchange or API.
+    This error should typically not be retried.
+    """
+
+    pass
+
+
+class InsufficientDataError(DataError):
+    """Raised when there is not enough data to perform an operation."""
+
+    pass
+
+
+class ModelError(TradingBotException):
+    """Raised for errors related to machine learning models."""
+
+    pass
+
+
+class ConfigurationError(TradingBotException):
+    """Raised for configuration-related problems."""
+
+    pass
+
+
+class IndicatorError(DataError):
+    """Raised for errors during indicator calculation."""
+
+    pass
+
+
+class ObjectClosedError(TradingBotException):
+    """Raised when an operation is attempted on a closed object."""
+
+    pass
+
+
+=====
+
+[common\utils.py] :
+
 import asyncio
 import time
 from functools import wraps
@@ -726,3 +1168,7 @@ def calculate_correlation_matrix(symbols_data: Dict[str, pd.DataFrame]) -> pd.Da
     correlation_matrix = returns.corr()
 
     return correlation_matrix
+
+
+=====
+

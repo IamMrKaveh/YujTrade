@@ -1,8 +1,16 @@
 from typing import Dict, Any, List, Tuple
+
 import numpy as np
 
-from common.core import MarketAnalysis, TrendDirection, DerivativesAnalysis
+from common.constants import AnalysisComponent
+from common.core import (
+    MarketAnalysis,
+    TrendDirection,
+    DerivativesAnalysis,
+    IndicatorResult,
+)
 from config.logger import logger
+from config.settings import ConfigManager
 
 
 class AnalysisScorer:
@@ -10,19 +18,25 @@ class AnalysisScorer:
     A class dedicated to scoring different aspects of the market analysis.
     """
 
+    def __init__(self, config_manager: ConfigManager):
+        self.config_manager = config_manager
+
     def score_technical_results(
         self, processed_results: Dict[str, Any], market_context: MarketAnalysis
     ) -> float:
         """
         Calculates a score based on technical indicators.
         """
-        # This is a simplified scoring logic. In a real-world scenario, this would be more complex.
-        # The logic is moved from the old AnalysisEngine.
         total_score = 0
         count = 0
         for name, item in processed_results.items():
             result = item.get("result")
-            if not result or not hasattr(result, "value") or np.isnan(result.value):
+            if (
+                not result
+                or not hasattr(result, "value")
+                or result.value is None
+                or np.isnan(result.value)
+            ):
                 continue
 
             score = self.get_indicator_score(result, market_context)
@@ -31,7 +45,9 @@ class AnalysisScorer:
 
         return (total_score / count) if count > 0 else 0.0
 
-    def get_indicator_score(self, result, market_context: MarketAnalysis) -> float:
+    def get_indicator_score(
+        self, result: IndicatorResult, market_context: MarketAnalysis
+    ) -> float:
         strength = (
             np.clip(result.signal_strength / 100.0, 0, 1)
             if result.signal_strength is not None
@@ -48,6 +64,7 @@ class AnalysisScorer:
             "accumulation",
             "uptrend",
             "support",
+            "strong_buying",
         ]
         bearish_keywords = [
             "bearish",
@@ -59,6 +76,7 @@ class AnalysisScorer:
             "distribution",
             "downtrend",
             "resistance",
+            "strong_selling",
         ]
 
         interpretation = result.interpretation.lower()
@@ -74,6 +92,7 @@ class AnalysisScorer:
 
         base_score = direction * strength
 
+        # Contextual adjustment
         if (
             market_context.trend == TrendDirection.BULLISH
             and "strong" in market_context.trend_strength.value
@@ -122,7 +141,8 @@ class AnalysisScorer:
         score += volume_score
         reasons.append(f"Volume Score: {volume_score:.2f}")
 
-        return np.clip(score / 1.8, -1.0, 1.0), reasons
+        # Normalize the score
+        return np.clip(score / 2.0, -1.0, 1.0), reasons
 
     def score_external_data(
         self, data: Dict[str, Any], market_context: MarketAnalysis, symbol: str
@@ -204,7 +224,9 @@ class AnalysisScorer:
 
         for model_name, pred_data in predictions.items():
             pred_price = pred_data.get("prediction", 0)
-            confidence = pred_data.get("confidence", 0)
+            confidence = pred_data.get(
+                "calibrated_confidence", pred_data.get("confidence", 0)
+            )
 
             if pred_price == 0:
                 continue
@@ -221,11 +243,41 @@ class AnalysisScorer:
             )
 
         # Normalize the score by the total confidence to get a value between -1 and 1
-        final_score = (
-            (weighted_score / total_confidence * 100) if total_confidence > 0 else 0.0
-        )
-        avg_confidence = (
-            total_confidence / sum(model_weights.values()) if predictions else 0.0
-        )
+        num_models = len(predictions)
+        if num_models == 0:
+            return 0.0, [], 0.0
+
+        total_model_weights = sum(model_weights.get(m, 0.5) for m in predictions)
+        if total_model_weights == 0:
+            return 0.0, [], 0.0
+
+        final_score = weighted_score / total_model_weights
+        avg_confidence = total_confidence / total_model_weights
 
         return np.clip(final_score, -1.0, 1.0), reasons, avg_confidence / 100.0
+
+    def calculate_combined_score(
+        self,
+        scores: Dict[AnalysisComponent, float],
+        reasons: List[str],
+        timeframe: str,
+    ) -> Tuple[float, List[str]]:
+        """
+        Combines scores from all analysis parts into a single final score.
+        """
+        weights = self.config_manager.get_component_weights(timeframe)
+
+        final_score = 0.0
+        total_weight = 0.0
+
+        for component, score in scores.items():
+            weight = weights.get(component.value, 0)
+            final_score += score * weight
+            total_weight += weight
+
+        if total_weight == 0:
+            return 0.0, reasons
+
+        # Normalize and scale to -100 to 100 range
+        normalized_score = (final_score / total_weight) * 100
+        return normalized_score, reasons
